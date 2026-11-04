@@ -108,7 +108,8 @@ impl Harnesses {
             .map(|config| {
                 let mut descriptor = self.profiles[&config.id].driver.descriptor();
                 descriptor["capabilities"]["commandOutputs"] = json!(true);
-                descriptor["capabilities"]["sessionDigest"] = json!(descriptor["capabilities"]["history"] == true);
+                descriptor["capabilities"]["sessionDigest"] =
+                    json!(descriptor["capabilities"]["history"] == true);
                 if !config.aliases.is_empty() {
                     descriptor["aliases"] = json!(config.aliases);
                 }
@@ -192,14 +193,29 @@ impl Harnesses {
             read_args["digestProjection"] = json!(true);
             let started = std::time::Instant::now();
             let metadata_only = args["metadataOnly"] == true;
-            let result = profile.read(if metadata_only {"harness_session_info"} else {"harness_session_read"}, read_args).await
+            let result = profile
+                .read(
+                    if metadata_only {
+                        "harness_session_info"
+                    } else {
+                        "harness_session_read"
+                    },
+                    read_args,
+                )
+                .await
                 .and_then(|mut history| {
-                    if metadata_only {history["turns"] = json!([]); history["nextCursor"] = Value::Null;}
+                    if metadata_only {
+                        history["turns"] = json!([]);
+                        history["nextCursor"] = Value::Null;
+                    }
                     super::digest::project(history, &args)
                 });
-            crate::core::events::emit(crate::core::events::Level::Info, "harness.digest.result",
+            crate::core::events::emit(
+                crate::core::events::Level::Info,
+                "harness.digest.result",
                 json!({"operation":"harness.session.digest","operationId":operation_id,"stage":"project","result":if result.is_ok(){"success"}else{"failure"},
-                    "sessionId":args["sessionId"],"code":result.as_ref().err().map(|e|e.code),"durationMs":started.elapsed().as_millis()}));
+                    "sessionId":args["sessionId"],"code":result.as_ref().err().map(|e|e.code),"durationMs":started.elapsed().as_millis()}),
+            );
             return result;
         }
         let referenced = output_mode(name, &args)?;
@@ -300,6 +316,9 @@ impl Harnesses {
             project.id, project.revision, config.id, read_only
         );
         let mut scoped = self.scoped.lock().await;
+        if self.closed.load(Ordering::Acquire) {
+            return Err(Error::unavailable());
+        }
         if !scoped.contains_key(&key) {
             if scoped.len() >= 128 {
                 return Err(Error::too_many("PROJECT_HARNESS_LIMIT"));
@@ -465,14 +484,16 @@ impl Harnesses {
     }
     pub async fn close(&self) {
         self.closed.store(true, Ordering::Release);
-        let mut scoped = self.scoped.lock().await;
-        for profile in scoped.values() {
-            profile.driver.stop();
-        }
-        for profile in scoped.values() {
-            profile.driver.drain().await;
-        }
-        scoped.clear();
+        let profiles = {
+            let scoped = self.scoped.lock().await;
+            let profiles = scoped.values().cloned().collect::<Vec<_>>();
+            for profile in &profiles {
+                profile.driver.stop();
+            }
+            profiles
+        };
+        futures_util::future::join_all(profiles.iter().map(|profile| profile.driver.drain())).await;
+        self.scoped.lock().await.clear();
         // Fence every driver before waiting so queued mutations cannot start another child.
         for profile in self.profiles.values() {
             profile.driver.stop();
@@ -486,31 +507,14 @@ impl Harnesses {
 impl Profile {
     async fn read(&self, name: &str, args: Value) -> Result<Value, Error> {
         let started = std::time::Instant::now();
+        let context = super::diagnostics::read_context(name, &args);
         let result = match self.driver.get() {
             Ok(driver) => {
-                super::diagnostics::scope(
-                    super::diagnostics::operation_context(name, &args),
-                    driver.read(name, args.clone()),
-                )
-                .await
+                super::diagnostics::scope(context.clone(), driver.read(name, args.clone())).await
             }
             Err(error) => Err(error),
         };
-        if name == "harness_query" {
-            let operation = args["requestId"].as_str().filter(|id| {
-                id.len() <= 128
-                    && id
-                        .bytes()
-                        .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
-            });
-            crate::core::events::emit(
-                crate::core::events::Level::Info,
-                "harness.query.result",
-                json!({"operation":"harness.query","operationId":operation,"stage":"native",
-                    "outcome":if result.is_ok() {"succeeded"} else {"failed"},
-                    "code":result.as_ref().err().map(|error|error.code),"durationMs":started.elapsed().as_millis()}),
-            );
-        }
+        super::diagnostics::read_result(&context, &result, &args, started.elapsed());
         result
     }
     async fn mutate(self: &Arc<Self>, name: &str, args: Value) -> Result<Value, Error> {

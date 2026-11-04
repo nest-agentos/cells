@@ -39,7 +39,7 @@ pub async fn entries(
     let listing = state
         .workers
         .read(&state.files, deadline, move |token| {
-            export.list(&query.path, &token)
+            export.list_fields(&query.path, &token, query.fields)
         })
         .await?;
     // Fetch one extra entry to learn whether another page exists.

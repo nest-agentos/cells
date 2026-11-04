@@ -19,6 +19,53 @@ pub fn time_ms(value: &Value) -> Value {
         .map(|time| json!(time.timestamp_millis()))
         .unwrap_or(Value::Null)
 }
+/// Preserve native facts and stamp lifecycle events at node ingestion, never at UI render time.
+pub fn stamp_event(message: &mut Value, observed_at: i64) {
+    let method = message["method"].as_str().unwrap_or("").to_owned();
+    let (field, time_key) = match method.as_str() {
+        "item/started" => ("item", "startedAt"),
+        "item/completed" => ("item", "completedAt"),
+        "turn/started" => ("turn", "startedAt"),
+        "turn/completed" => ("turn", "completedAt"),
+        _ => return,
+    };
+    let Some(item) = message["params"][field].as_object_mut() else {
+        return;
+    };
+    let terminal = matches!(method.as_str(), "item/completed" | "turn/completed");
+    let failed = item
+        .get("status")
+        .and_then(Value::as_str)
+        .is_some_and(|status| matches!(status, "failed" | "cancelled" | "interrupted"));
+    let key = if terminal && failed {
+        "endedAt"
+    } else {
+        time_key
+    };
+    let supplied = item.get(key).map(time_ms).unwrap_or(Value::Null);
+    item.insert(
+        key.into(),
+        if supplied.is_null() {
+            json!(observed_at)
+        } else {
+            supplied
+        },
+    );
+    if item.get("type").and_then(Value::as_str) == Some("userMessage") {
+        let sent = item
+            .get("submittedAt")
+            .map(time_ms)
+            .filter(|value| !value.is_null())
+            .or_else(|| {
+                item.get("timestamp")
+                    .map(time_ms)
+                    .filter(|value| !value.is_null())
+            });
+        item.insert("submittedAt".into(), sent.unwrap_or(json!(observed_at)));
+    }
+    item.entry("status")
+        .or_insert_with(|| json!(if terminal { "completed" } else { "inProgress" }));
+}
 pub fn session_title(thread: &Value) -> &str {
     ["name", "preview"]
         .iter()
@@ -51,7 +98,8 @@ pub fn item(value: &Value) -> Option<Value> {
     Some(
         json!({"id":value["id"],"type":kind,"name":name.chars().take(256).collect::<String>(),
         "paths":paths,"operation":action,"commandPreview":preview,
-        "timestamp":value["timestamp"],"turnId":value["turnId"],"status":value["status"]}),
+        "timestamp":value["timestamp"],"submittedAt":value["submittedAt"],"startedAt":value["startedAt"],
+        "completedAt":value["completedAt"],"endedAt":value["endedAt"],"turnId":value["turnId"],"status":value["status"]}),
     )
 }
 fn command<'a>(value: &'a Value, parsed: &'a Value, input: &'a Value, name: &str) -> &'a str {
@@ -246,6 +294,24 @@ pub fn events(mut page: Value) -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lifecycle_timing_preserves_native_instants_and_distinguishes_terminal_outcomes() {
+        let at = 1791458565000i64;
+        let mut start = serde_json::json!({"method":"item/started","params":{"item":{"id":"a","type":"agentMessage"}}});
+        super::stamp_event(&mut start, at);
+        assert_eq!(start["params"]["item"]["startedAt"], at);
+        assert!(start["params"]["item"]["completedAt"].is_null());
+        let mut done = serde_json::json!({"method":"item/completed","params":{"item":{"id":"a","type":"agentMessage","completedAt":"2026-10-08T11:22:45Z"}}});
+        super::stamp_event(&mut done, at + 1000);
+        assert_eq!(done["params"]["item"]["completedAt"], at);
+        let mut failed = serde_json::json!({"method":"item/completed","params":{"item":{"id":"a","status":"failed"}}});
+        super::stamp_event(&mut failed, at);
+        assert_eq!(failed["params"]["item"]["endedAt"], at);
+        assert!(failed["params"]["item"]["completedAt"].is_null());
+        let mut delta = serde_json::json!({"method":"item/agentMessage/delta","params":{"delta":"private text"}});
+        super::stamp_event(&mut delta, at);
+        assert!(delta["params"]["completedAt"].is_null());
+    }
     use super::*;
     #[test]
     fn time_accepts_seconds_milliseconds_and_rfc3339_without_changing_the_instant() {

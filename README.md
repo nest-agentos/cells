@@ -548,3 +548,11 @@ Codex rollout 回退历史将带明确 `turn_id` 的 `task_complete` / `turn_abo
 `[projects].execution_profiles` contains administrator-owned profiles with unique `id`, `name`, optional Unix `user`, explicit authentication `principals`, inherited node-service environment names (`inherit`), fixed `variables`, and read-only `mounts` (`source`/`target` absolute paths). Projects choose an authorized profile through `project_execution` / `project_set_execution` with revision CAS and ordinary environment overrides. Cross-UID execution requires a root node service; supplementary groups are cleared before dropping GID/UID. The selected user's login shell is never loaded. HOME alone does not expose host files; configure required mounts explicitly. Keep secrets in inherited service variables, outside project overrides. Existing nodes without the advertised `projectExecutionEnvironment` capability reject the new settings client before mutation.
 
 Executable directory projects use immutable readable IDs (1–64 ASCII letters/digits, `_` or `-`, starting with a letter/digit). `project_register.id` optionally requests an ID; otherwise the node derives a name slug and numeric collision suffix. UUID-shaped new IDs are rejected. IDs are unique case-insensitively across active and retired records; forgetting a project never permits its ID to target a new directory. Existing IDs remain valid.
+
+会话列表按需读取：`harness_sessions` 的 `limit/cursor` 控制展示摘要页。Codex 使用原生 `thread/list`；Claude 先枚举文件身份和 mtime，排序后仅解析当前窗口及溢出判断需要的头尾摘要，并保留 cwd 授权和符号链接检查；DSH 上游仍返回完整目录，Cells 先用集合核对授权成员，再分页并生成所选行的展示摘要。读取不经过 NestOS TypeScript VFS 的写事务。`harness.read.completed` 在 debug 级别记录只读查询的 operationId、阶段、返回数量和耗时，失败为 warn，不记录正文或完整参数。全局关闭先同步停止准入，释放目录锁后等待各 harness 排空。
+
+文件基础事实投影：`GET /v1/fs/:alias/entries?fields=entry` 和 `POST /v1/fs/:alias/stat` 的 `fields: "entry"` 只返回基础属性，跳过 revision/metadata 锁和 sidecar 数据库。完整 `stat` 投影保留条件写入所需版本和 source metadata；路径授权、符号链接限制、批量数量及字节上限在两种投影中一致。驱动与节点按同一协议一起升级。
+
+### Harness 消息时间
+
+原生消息可携带 Unix 毫秒 `submittedAt`、`startedAt`、`completedAt` 和失败/取消的 `endedAt`。节点在生命周期事件进入 replay buffer 前保留原生时间，缺失时记录该事件的节点接收时间；该值不来自浏览器渲染。Codex、Claude 与 DSH 可确认的持久消息完成记录保留完成时间，工具摘要透传时间字段。旧 `timestamp` 不等同于完成时间，未知历史时间不补造；客户端重连合并保留已有明确时间，显示时钟不改变原生状态。

@@ -129,8 +129,12 @@ fn record_items(event: &Value, cursor: &mut Cursor, session: &str) -> Vec<Value>
         }
         return vec![];
     }
-    if event["type"] == "user/message" && matches!(event["data"]["source"]["kind"].as_str(),
-        Some("agent-instructions" | "runtime-context" | "tool-jobs")) {
+    if event["type"] == "user/message"
+        && matches!(
+            event["data"]["source"]["kind"].as_str(),
+            Some("agent-instructions" | "runtime-context" | "tool-jobs")
+        )
+    {
         return vec![];
     }
     let role = match event["type"].as_str() {
@@ -183,6 +187,15 @@ fn content_items(event: &Value, cursor: &mut Cursor, role: &str, seq: u64) -> Ve
                 value["contentItemKinds"] = json!(["user.text"]);
             }
             tool_result(&mut value, block, cursor);
+            let at = crate::harness::presentation::time_ms(&event["time"]);
+            if value["type"] == "userMessage" {
+                value["submittedAt"] = at.clone();
+            }
+            if (value["type"] == "agentMessage" || value["type"] == "reasoning")
+                && value["status"] == "completed"
+            {
+                value["completedAt"] = at;
+            }
             Some(value)
         })
         .collect()

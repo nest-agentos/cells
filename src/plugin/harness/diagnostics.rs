@@ -25,6 +25,48 @@ pub(super) fn native_context(params: &Value) -> Value {
     context
 }
 
+pub(super) fn read_context(name: &str, args: &Value) -> Value {
+    let mut context = operation_context(name, args);
+    if context["operationId"].is_null() {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        context["operationId"] = json!(format!(
+            "read-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+    }
+    context
+}
+
+pub(super) fn read_result(
+    context: &Value,
+    result: &Result<Value, crate::core::error::Error>,
+    args: &Value,
+    elapsed: std::time::Duration,
+) {
+    let mut fields = context.clone();
+    fields["stage"] = json!("query");
+    fields["result"] = json!(if result.is_ok() { "success" } else { "failure" });
+    fields["code"] = json!(result.as_ref().err().map(|error| error.code));
+    fields["durationMs"] = json!(elapsed.as_millis() as u64);
+    fields["requestedLimit"] = json!(args["limit"].as_u64());
+    fields["hasCursor"] = json!(args["cursor"].is_string());
+    fields["count"] = json!(result
+        .as_ref()
+        .ok()
+        .and_then(|value| value["sessions"].as_array())
+        .map(Vec::len));
+    emit(
+        if result.is_ok() {
+            Level::Debug
+        } else {
+            Level::Warn
+        },
+        "harness.read.completed",
+        fields,
+    );
+}
+
 pub(super) fn operation_started(context: &Value) {
     let mut fields = context.clone();
     fields["stage"] = json!("execution");

@@ -12,4 +12,6 @@ use serde::Deserialize;
 pub struct ListQuery {
     pub path: String,
     pub cursor: Option<String>,
+    #[serde(default)]
+    pub fields: crate::fs::model::ReadFields,
 }

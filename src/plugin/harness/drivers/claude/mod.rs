@@ -57,7 +57,7 @@ impl Claude {
             usage: Arc::default(),
         }
     }
-    async fn catalog(&self) -> Result<history::Catalog, Error> {
+    async fn catalog(&self, limit: Option<usize>) -> Result<history::Catalog, Error> {
         static WORK: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
         let permit = WORK
             .try_acquire()
@@ -66,7 +66,7 @@ impl Claude {
         let runtime = self.runtime.clone();
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            history::catalog(&config, runtime.as_deref())
+            history::catalog(&config, runtime.as_deref(), limit)
         })
         .await
         .map_err(|_| Error::internal())?
@@ -112,7 +112,7 @@ impl Claude {
         if let Some(process) = self.sessions.get(id).await {
             return Ok(process.session.lock().unwrap().clone());
         }
-        self.catalog()
+        self.catalog(None)
             .await?
             .entries
             .into_iter()
@@ -124,8 +124,18 @@ impl Claude {
         if args["archived"].as_bool() == Some(true) {
             return Ok(json!({"sessions":[],"nextCursor":null}));
         }
+        let live = self
+            .sessions
+            .live()
+            .into_iter()
+            .map(|process| process.session.lock().unwrap().clone())
+            .collect::<Vec<_>>();
+        let (offset, limit) = page_bounds(args)?;
+        if offset > 8192 {
+            return Err(Error::invalid());
+        }
         let mut sessions = self
-            .catalog()
+            .catalog(Some(offset + limit + live.len() + 1))
             .await?
             .entries
             .into_iter()
@@ -136,8 +146,7 @@ impl Claude {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        for process in self.sessions.live() {
-            let session = process.session.lock().unwrap().clone();
+        for session in live {
             sessions.insert(session["id"].as_str().unwrap().into(), session);
         }
         list_page(sessions.into_values().collect(), args)
@@ -146,7 +155,7 @@ impl Claude {
         let id = string(args, "sessionId")?;
         let mut session = self.session(id).await?;
         let entry = self
-            .catalog()
+            .catalog(None)
             .await?
             .entries
             .into_iter()
@@ -180,7 +189,7 @@ impl Claude {
         let id = string(args, "sessionId")?.to_owned();
         self.session(&id).await?;
         let entry = self
-            .catalog()
+            .catalog(None)
             .await?
             .entries
             .into_iter()
@@ -270,7 +279,7 @@ impl Claude {
     }
     async fn resume_path(&self, id: &str) -> Result<String, Error> {
         let entry = self
-            .catalog()
+            .catalog(None)
             .await?
             .entries
             .into_iter()
@@ -385,7 +394,7 @@ impl Claude {
         if args["archived"] == true {
             return Ok(json!({"matches":[],"truncated":false,"nextCursor":null}));
         }
-        let entries = self.catalog().await?.entries;
+        let entries = self.catalog(None).await?.entries;
         let config = self.config.clone();
         let query = query.to_lowercase();
         let mode = mode.to_owned();
@@ -421,7 +430,9 @@ impl Claude {
             "harness_session_usage" => self.usage(args).await,
             "harness_session_info" => {
                 let mut session = self.session(string(args, "sessionId")?).await?;
-                if args["digestProjection"] != true {super::usage::attach(&mut session, self.usage(args).await);}
+                if args["digestProjection"] != true {
+                    super::usage::attach(&mut session, self.usage(args).await);
+                }
                 Ok(json!({"session":session}))
             }
             "harness_session_search" => self.search(args).await,
@@ -544,12 +555,7 @@ fn list_page(mut sessions: Vec<Value>, args: &Value) -> Result<Value, Error> {
             .cmp(&a["updatedAt"].as_i64())
             .then(a["id"].as_str().cmp(&b["id"].as_str()))
     });
-    let offset = args["cursor"]
-        .as_str()
-        .map(|v| v.parse::<usize>().map_err(|_| Error::invalid()))
-        .transpose()?
-        .unwrap_or(0);
-    let limit = args["limit"].as_u64().unwrap_or(100).clamp(1, 100) as usize;
+    let (offset, limit) = page_bounds(args)?;
     if offset > sessions.len() {
         return Err(Error::invalid());
     }
@@ -557,4 +563,16 @@ fn list_page(mut sessions: Vec<Value>, args: &Value) -> Result<Value, Error> {
     Ok(
         json!({"sessions":sessions[offset..end],"nextCursor":if end<sessions.len(){json!(end.to_string())}else{Value::Null}}),
     )
+}
+
+fn page_bounds(args: &Value) -> Result<(usize, usize), Error> {
+    let offset = args["cursor"]
+        .as_str()
+        .map(|v| v.parse::<usize>().map_err(|_| Error::invalid()))
+        .transpose()?
+        .unwrap_or(0);
+    Ok((
+        offset,
+        args["limit"].as_u64().unwrap_or(100).clamp(1, 100) as usize,
+    ))
 }

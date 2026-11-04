@@ -73,7 +73,13 @@ fn keys(config: &ProfileConfig, runtime: Option<&ProjectRuntime>) -> Result<Vec<
         })
         .collect())
 }
+struct Candidate {
+    path: String,
+    id: String,
+    modified: u128,
+}
 struct Scan {
+    candidates: Vec<Candidate>,
     entries: Vec<Entry>,
     bytes: usize,
     inspected: usize,
@@ -87,13 +93,7 @@ impl Scan {
         }
         Ok(())
     }
-    fn folder(
-        &mut self,
-        home: &Export,
-        name: &str,
-        config: &ProfileConfig,
-        runtime: Option<&ProjectRuntime>,
-    ) -> Result<(), Error> {
+    fn folder(&mut self, home: &Export, name: &str) -> Result<(), Error> {
         let dir = home.open_dir(&format!("projects/{name}"))?;
         for file in std::fs::read_dir(format!("/proc/self/fd/{}", dir.as_raw_fd()))? {
             self.inspected += 1;
@@ -109,13 +109,16 @@ impl Scan {
             if !file.file_type()?.is_file() {
                 continue;
             }
-            self.inspect(
-                home,
-                format!("projects/{name}/{filename}"),
-                id,
-                config,
-                runtime,
-            )?;
+            let modified = file
+                .metadata()?
+                .modified()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |time| time.as_millis());
+            self.candidates.push(Candidate {
+                path: format!("projects/{name}/{filename}"),
+                id: id.to_owned(),
+                modified,
+            });
         }
         Ok(())
     }
@@ -144,14 +147,7 @@ impl Scan {
         }
         Ok(())
     }
-    fn projects(
-        &mut self,
-        home: &Export,
-        directory: &File,
-        keys: &[String],
-        config: &ProfileConfig,
-        runtime: Option<&ProjectRuntime>,
-    ) -> Result<(), Error> {
+    fn projects(&mut self, home: &Export, directory: &File, keys: &[String]) -> Result<(), Error> {
         for (count, folder) in
             std::fs::read_dir(format!("/proc/self/fd/{}", directory.as_raw_fd()))?.enumerate()
         {
@@ -169,13 +165,17 @@ impl Scan {
                     .iter()
                     .any(|key| name == key || name.starts_with(&(key.clone() + "-")))
             {
-                self.folder(home, name, config, runtime)?;
+                self.folder(home, name)?;
             }
         }
         Ok(())
     }
 }
-pub fn catalog(config: &ProfileConfig, runtime: Option<&ProjectRuntime>) -> Result<Catalog, Error> {
+pub fn catalog(
+    config: &ProfileConfig,
+    runtime: Option<&ProjectRuntime>,
+    limit: Option<usize>,
+) -> Result<Catalog, Error> {
     let home = Export::open(&config.home)?;
     let keys = keys(config, runtime)?;
     let directory = match home.open_dir("projects") {
@@ -188,22 +188,43 @@ pub fn catalog(config: &ProfileConfig, runtime: Option<&ProjectRuntime>) -> Resu
         Err(error) => return Err(error),
     };
     let mut scan = Scan {
+        candidates: Vec::new(),
         entries: Vec::new(),
         bytes: 0,
         inspected: 0,
         started: Instant::now(),
     };
-    scan.projects(&home, &directory, &keys, config, runtime)?;
-    scan.entries.sort_by(|a, b| {
-        b.session["updatedAt"]
-            .as_i64()
-            .cmp(&a.session["updatedAt"].as_i64())
-            .then(a.session["id"].as_str().cmp(&b.session["id"].as_str()))
-    });
-    Ok(Catalog {
-        entries: scan.entries,
-    })
+    scan.projects(&home, &directory, &keys)?;
+    scan.finish(&home, config, runtime, limit)
 }
+impl Scan {
+    fn finish(
+        mut self,
+        home: &Export,
+        config: &ProfileConfig,
+        runtime: Option<&ProjectRuntime>,
+        limit: Option<usize>,
+    ) -> Result<Catalog, Error> {
+        self.candidates
+            .sort_by(|a, b| b.modified.cmp(&a.modified).then(a.id.cmp(&b.id)));
+        let mut visible = std::collections::HashSet::new();
+        for candidate in std::mem::take(&mut self.candidates) {
+            let previous = self.entries.len();
+            self.inspect(home, candidate.path, &candidate.id, config, runtime)?;
+            if self.entries.len() > previous {
+                visible.insert(candidate.id);
+            }
+            if limit.is_some_and(|limit| visible.len() >= limit) {
+                break;
+            }
+        }
+        self.entries.sort_by(compare_entries);
+        Ok(Catalog {
+            entries: self.entries,
+        })
+    }
+}
+
 fn metadata(
     file: &mut File,
     id: &str,
@@ -474,11 +495,15 @@ fn items(record: &Value) -> Value {
         .filter_map(|(index, block)| {
             let mut block = block.clone();
             block["timestamp"] = record["timestamp"].clone();
-            super::protocol::item(
+            let mut item = super::protocol::item(
                 &block,
                 &format!("{msg}:{index}"),
                 record["_turn"].as_str().unwrap_or(""),
-            )
+            )?;
+            if item["type"] == "agentMessage" || item["type"] == "reasoning" {
+                item["completedAt"] = time.clone();
+            }
+            Some(item)
         })
         .collect::<Vec<_>>())
 }
@@ -488,9 +513,22 @@ fn user_item(record: &Value, id: &str, time: &Value) -> Value {
     } else {
         record["message"]["content"].clone()
     };
-    let kinds = content.as_array().map(|parts| parts.iter().map(|part|
-        if part["type"] == "text" {json!("user.text")} else {json!("user.attachment")}).collect::<Vec<_>>()).unwrap_or_default();
-    json!([{"id":id,"type":"userMessage","content":content,"contentItemKinds":kinds,"turnId":id,"timestamp":time,"status":"completed"}])
+    let kinds = content
+        .as_array()
+        .map(|parts| {
+            parts
+                .iter()
+                .map(|part| {
+                    if part["type"] == "text" {
+                        json!("user.text")
+                    } else {
+                        json!("user.attachment")
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    json!([{"id":id,"type":"userMessage","content":content,"contentItemKinds":kinds,"turnId":id,"timestamp":time,"submittedAt":time,"status":"completed"}])
 }
 pub fn text(content: &Value) -> String {
     if let Some(text) = content.as_str() {
@@ -503,4 +541,11 @@ pub fn text(content: &Value) -> String {
         .filter_map(|part| part["text"].as_str())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn compare_entries(a: &Entry, b: &Entry) -> std::cmp::Ordering {
+    b.session["updatedAt"]
+        .as_i64()
+        .cmp(&a.session["updatedAt"].as_i64())
+        .then(a.session["id"].as_str().cmp(&b.session["id"].as_str()))
 }

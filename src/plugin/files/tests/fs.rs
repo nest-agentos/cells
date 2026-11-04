@@ -200,3 +200,35 @@ fn file_metadata_is_lazy_remote_durable_and_mount_independent() {
         .metadata
         .is_empty());
 }
+
+#[test]
+fn entry_projection_never_opens_unneeded_metadata() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("note.md"), "content").unwrap();
+    let metadata = root.path().join(".nestos");
+    std::fs::create_dir(&metadata).unwrap();
+    let database = metadata.join("meta.sqlite");
+    std::fs::write(&database, "invalid database").unwrap();
+    std::fs::set_permissions(database, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let export = Export::open(root.path()).unwrap();
+    let entry = export
+        .stat_fields("note.md", cells::fs::model::ReadFields::Entry)
+        .unwrap()
+        .unwrap();
+    assert!(entry.metadata.is_empty());
+    assert!(entry.revision.is_none());
+    assert_eq!(
+        export
+            .list_fields(
+                "",
+                &tokio_util::sync::CancellationToken::new(),
+                cells::fs::model::ReadFields::Entry
+            )
+            .unwrap()
+            .entries
+            .len(),
+        1
+    );
+    assert!(export.stat("note.md").is_err());
+}

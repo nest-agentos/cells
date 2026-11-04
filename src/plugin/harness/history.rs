@@ -228,6 +228,13 @@ fn record_item(record: &Value, at: u64, turn: Option<&str>) -> Option<Value> {
         .map(|id| json!(id))
         .unwrap_or_else(|| json!(format!("rollout:{at}")));
     entry["timestamp"] = super::presentation::time_ms(&record["timestamp"]);
+    if entry["type"] == "userMessage" {
+        entry["submittedAt"] = entry["timestamp"].clone();
+    }
+    if entry["type"] == "agentMessage" || entry["type"] == "reasoning" {
+        entry["completedAt"] = entry["timestamp"].clone();
+        entry["status"] = json!("completed");
+    }
     entry["turnId"] = json!(record["payload"]["turn_id"]
         .as_str()
         .or(record["payload"]["internal_chat_message_metadata_passthrough"]["turn_id"].as_str())

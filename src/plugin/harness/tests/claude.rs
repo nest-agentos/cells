@@ -1118,3 +1118,51 @@ async fn streaming_steering_reports_a_native_next_turn_when_the_original_finishe
     assert_eq!(receipt, result);
     service.close().await;
 }
+
+#[tokio::test]
+async fn listing_reads_only_the_requested_metadata_window_after_sorting_file_times() {
+    let root = tempfile::tempdir().unwrap();
+    let service = fixture(root.path());
+    let cwd = root.path().join("workspace");
+    let key = cwd
+        .to_str()
+        .unwrap()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect::<String>();
+    let directory = root.path().join("native/projects").join(key);
+    std::fs::create_dir_all(&directory).unwrap();
+    for index in 0..25 {
+        let id = format!("{:08x}-1111-4111-8111-111111111111", index);
+        let record = json!({"type":"user","sessionId":id,"cwd":cwd,"uuid":"user","message":{"content":format!("row-{index}")},"timestamp":"2026-10-09T03:00:00Z"});
+        let path = directory.join(format!("{id}.jsonl"));
+        // The oldest, undisplayed transcript is deliberately invalid; listing must not parse it.
+        std::fs::write(
+            &path,
+            if index == 0 {
+                "invalid-json\n".into()
+            } else {
+                format!("{record}\n")
+            },
+        )
+        .unwrap();
+        std::fs::File::open(path)
+            .unwrap()
+            .set_modified(
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000 + index),
+            )
+            .unwrap();
+    }
+    let page = call(&service, "harness_sessions", json!({"limit":5})).await;
+    assert_eq!(page["sessions"].as_array().unwrap().len(), 5);
+    assert_eq!(page["sessions"][0]["title"], "row-24");
+    assert_eq!(page["nextCursor"], "5");
+    let next = call(
+        &service,
+        "harness_sessions",
+        json!({"limit":5,"cursor":"5"}),
+    )
+    .await;
+    assert_eq!(next["sessions"][0]["title"], "row-19");
+    service.close().await;
+}

@@ -30,7 +30,7 @@ impl Dsh {
             .await?;
         Ok(string(&result["workspace"], "workspaceId")?.to_owned())
     }
-    async fn catalog(&self, client: &Client) -> Result<Vec<Value>, Error> {
+    async fn catalog(&self, client: &Client) -> Result<Vec<(Value, bool)>, Error> {
         let (rows, baseline) = tokio::try_join!(
             client.call("session/list", json!({"_request":{}})),
             client.first("workspace/follow", json!({}))
@@ -42,18 +42,25 @@ impl Dsh {
         let workspaces = baseline["value"]["items"]
             .as_array()
             .ok_or_else(Error::invalid)?;
-        let archived = baseline["value"]["archivedSessionIds"].as_array();
+        let archived = baseline["value"]["archivedSessionIds"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect::<std::collections::HashSet<_>>();
+        let visible = self.visible_session_ids(workspaces);
         Ok(rows
             .iter()
-            .filter(|row| self.visible(row, workspaces))
+            .filter(|row| {
+                row["sessionId"]
+                    .as_str()
+                    .is_some_and(|id| visible.contains(id))
+                    && row["cwd"].as_str().is_some_and(|cwd| self.authorized(cwd))
+            })
             .map(|row| {
-                protocol::session(
-                    row,
-                    self.sessions
-                        .lock()
-                        .unwrap()
-                        .contains_key(row["sessionId"].as_str().unwrap_or("")),
-                    archived.is_some_and(|ids| ids.contains(&row["sessionId"])),
+                (
+                    row.clone(),
+                    archived.contains(row["sessionId"].as_str().unwrap_or("")),
                 )
             })
             .collect())
@@ -73,12 +80,10 @@ impl Dsh {
                 .iter()
                 .any(|w| path.starts_with(&w.path))
     }
-    fn visible(&self, row: &Value, workspaces: &[Value]) -> bool {
-        let Some(cwd) = row["cwd"].as_str() else {
-            return false;
-        };
-        self.authorized(cwd)
-            && workspaces.iter().any(|workspace| {
+    fn visible_session_ids(&self, workspaces: &[Value]) -> std::collections::HashSet<String> {
+        workspaces
+            .iter()
+            .filter(|workspace| {
                 workspace["path"].as_str().is_some_and(|path| {
                     self.runtime.as_ref().map_or_else(
                         || {
@@ -89,19 +94,26 @@ impl Dsh {
                         },
                         |runtime| runtime.resolve_cwd(path).is_ok(),
                     )
-                }) && workspace["sessionIds"]
-                    .as_array()
-                    .is_some_and(|ids| ids.contains(&row["sessionId"]))
+                })
             })
+            .flat_map(|workspace| workspace["sessionIds"].as_array().into_iter().flatten())
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect()
     }
 
     pub(super) async fn summary(&self, client: &Client, id: &str) -> Result<Value, Error> {
-        let mut session = self
+        let (row, archived) = self
             .catalog(client)
             .await?
             .into_iter()
-            .find(|s| s["id"] == id)
+            .find(|(row, _)| row["sessionId"] == id)
             .ok_or_else(|| Error::not_found("ENOENT"))?;
+        let mut session = protocol::session(
+            &row,
+            self.sessions.lock().unwrap().contains_key(id),
+            archived,
+        );
         session["interruptible"] = json!(false);
         if let Some(live) = self.sessions.lock().unwrap().get(id) {
             let cursor = live.cursor.lock().unwrap();
@@ -142,14 +154,12 @@ impl Dsh {
     }
     async fn list(&self, client: &Client, args: &Value) -> Result<Value, Error> {
         let mut sessions = self.catalog(client).await?;
-        sessions.retain(|s| {
-            s["archived"].as_bool() == Some(args["archived"].as_bool().unwrap_or(false))
-        });
+        sessions.retain(|(_, archived)| *archived == args["archived"].as_bool().unwrap_or(false));
         sessions.sort_by(|a, b| {
-            b["updatedAt"]
+            b.0["updatedAt"]
                 .as_i64()
-                .cmp(&a["updatedAt"].as_i64())
-                .then(a["id"].as_str().cmp(&b["id"].as_str()))
+                .cmp(&a.0["updatedAt"].as_i64())
+                .then(a.0["sessionId"].as_str().cmp(&b.0["sessionId"].as_str()))
         });
         let offset = offset(args)?;
         let limit = args["limit"].as_u64().unwrap_or(100).clamp(1, 100) as usize;
@@ -157,8 +167,19 @@ impl Dsh {
             return Err(Error::invalid());
         }
         let end = (offset + limit).min(sessions.len());
+        let live = self.sessions.lock().unwrap();
+        let page = sessions[offset..end]
+            .iter()
+            .map(|(row, archived)| {
+                protocol::session(
+                    row,
+                    live.contains_key(row["sessionId"].as_str().unwrap_or("")),
+                    *archived,
+                )
+            })
+            .collect::<Vec<_>>();
         Ok(
-            json!({"sessions":sessions[offset..end],"nextCursor":if end<sessions.len(){json!(end.to_string())}else{Value::Null}}),
+            json!({"sessions":page,"nextCursor":if end<sessions.len(){json!(end.to_string())}else{Value::Null}}),
         )
     }
 

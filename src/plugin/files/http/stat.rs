@@ -22,6 +22,8 @@ const MAX_PATH_BYTES: usize = 64 * 1024;
 #[serde(deny_unknown_fields)]
 pub struct StatRequest {
     paths: Vec<String>,
+    #[serde(default)]
+    fields: crate::fs::model::ReadFields,
 }
 
 pub async fn stat(
@@ -50,7 +52,7 @@ pub async fn stat(
                 if token.is_cancelled() {
                     return Err(Error::cancelled());
                 }
-                results.push(match export.stat(&path) {
+                results.push(match export.stat_fields(&path, input.fields) {
                     Ok(stat) => json!({"stat": stat}),
                     Err(error) => json!({"error": error.code}),
                 });

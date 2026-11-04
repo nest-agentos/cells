@@ -111,6 +111,22 @@ impl Export {
         }
     }
 
+    /// Basic facts never inspect sidecar metadata or reserve mutation/revision locks.
+    pub fn stat_fields(
+        &self,
+        path: &str,
+        fields: super::model::ReadFields,
+    ) -> Result<Option<Stat>, Error> {
+        if fields == super::model::ReadFields::Stat {
+            return self.stat(path);
+        }
+        match self.open_path(path, OFlags::PATH) {
+            Ok(file) => Ok(Some(attributes(&file)?)),
+            Err(error) if error.is_not_found() => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Open a regular file for reading together with its current revision.
     pub fn read(&self, path: &str) -> Result<(File, Option<String>), Error> {
         let mut revisions = self.lock_revisions();
@@ -131,6 +147,14 @@ impl Export {
 
     /// Sorted children of `path` plus diagnostics for skipped entries.
     pub fn list(&self, path: &str, cancelled: &CancellationToken) -> Result<Listing, Error> {
+        self.list_fields(path, cancelled, super::model::ReadFields::Stat)
+    }
+    pub fn list_fields(
+        &self,
+        path: &str,
+        cancelled: &CancellationToken,
+        fields: super::model::ReadFields,
+    ) -> Result<Listing, Error> {
         let directory = self.open_dir(path)?;
         let mut listing = Listing::default();
         for item in rustix::fs::Dir::read_from(&directory)? {
@@ -149,7 +173,7 @@ impl Export {
                 return Err(Error::too_large("DIRECTORY_LIMIT"));
             }
             let child = child_path(path, name);
-            match self.stat(&child) {
+            match self.stat_fields(&child, fields) {
                 Ok(Some(stat)) => listing.entries.push(Entry {
                     name: name.into(),
                     stat,

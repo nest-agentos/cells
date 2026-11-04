@@ -35,7 +35,9 @@ impl Events {
             last_activity: std::time::Instant::now(),
         }
     }
-    pub fn push(&mut self, message: Value) -> Result<(), Error> {
+    pub fn push(&mut self, mut message: Value) -> Result<(), Error> {
+        let observed_at = chrono::Utc::now().timestamp_millis();
+        super::presentation::stamp_event(&mut message, observed_at);
         let size = message.to_string().len();
         if size > MAX_BYTES {
             return Err(Error::too_large("EFBIG"));
@@ -49,12 +51,8 @@ impl Events {
         super::diagnostics::record(&message);
         self.next += 1;
         self.bytes += size;
-        self.entries.push_back((
-            self.next,
-            message,
-            size,
-            chrono::Utc::now().timestamp_millis(),
-        ));
+        self.entries
+            .push_back((self.next, message, size, observed_at));
         while self.entries.len() > MAX_EVENTS || self.bytes > MAX_BYTES {
             if let Some((_, _, size, _)) = self.entries.pop_front() {
                 self.bytes -= size;
@@ -85,8 +83,11 @@ impl Events {
         let (_, event, _, at) = self.entries.iter().rev().find(|(_, event, _, _)| {
             event["method"] == "thread/tokenUsage/updated" && event["params"]["threadId"] == thread
         })?;
-        let mut value = super::metrics::codex_context(&event["params"]["tokenUsage"]).unwrap_or(Value::Null);
-        if value.is_object() {value["observedAt"] = json!(at); }
+        let mut value =
+            super::metrics::codex_context(&event["params"]["tokenUsage"]).unwrap_or(Value::Null);
+        if value.is_object() {
+            value["observedAt"] = json!(at);
+        }
         Some(value)
     }
     pub fn runtime_metadata(&self, thread: &str) -> Value {
