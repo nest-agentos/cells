@@ -2,11 +2,11 @@
 
 cells 寓意蜂房中的单个巢室：将信息与 Agent 集成到 NestOS 的单个智能节点。每个 cells 节点连接设备上的文件、项目与执行环境，提供同步、受控访问和 AI harness 会话管理；多个节点共同构成 NestOS 的知识与智能协作网络。
 
-服务源码：[cells](https://github.com/nest-agentos/cells)；统一客户端：[cells-driver](https://github.com/nest-agentos/cells-driver)，npm 包为 `@itookit/cells-driver`。
+服务源码：[cells](https://github.com/nest-agentos/cells)；统一客户端：[cells-driver](https://github.com/nest-agentos/cells-driver)，npm 包为 `@nestos/cells-driver`。
 
 服务端目前支持 Linux（需要 `openat2`）；Web、Tauri 和 Node CLI 使用同一 HTTP 协议。服务启动时验证目录句柄能力，不支持时拒绝启动。
 
-包名与可执行命令均为 `cells`，统一客户端为 `@itookit/cells-driver`；环境变量使用 `CELLS_*`，MCP 能力工具为 `cells_capabilities`，发现元数据键为 `itookit/cells`，资源 URI 使用 `cells://`。
+包名与可执行命令均为 `cells`，统一客户端为 `@nestos/cells-driver`；环境变量使用 `CELLS_*`，MCP 能力工具为 `cells_capabilities`，发现元数据键为 `itookit/cells`，资源 URI 使用 `cells://`。
 
 节点功能已接入统一插件框架，可通过 `[plugins]` 分别开关文件接口、命令执行、同步、项目、Harness 和 MCP。未配置新开关时沿用原有行为。接口、装配顺序和独立验证见 [节点插件](doc/plugins.md)，配置见 [插件示例](config.plugins.example.toml)；可执行 `cells plugins check CONFIG [PLUGIN]` 校验全部或单个插件而不启动服务。
 
@@ -101,7 +101,7 @@ API：`GET /v1/exports`、`POST /v1/fs/:alias/stat`（`{paths}`）、`GET entrie
 
 ```bash
 cargo test                                  # 本项目根目录
-pnpm --filter @itookit/cells-driver test  # 在 itookit monorepo 内
+pnpm --filter @nestos/cells-driver test  # 在 itookit monorepo 内
 ```
 
 驱动测试在 Linux 启动真实 Rust 服务，验证协议、条件保存和 VFS 适配；其他平台跳过该服务端集成测试。设计和验收边界见 [设计文档](../../doc/design/vfs-http-driver.md)。
@@ -323,7 +323,7 @@ Claude 槽位已满时，先回收最久未活动且没有活动轮次、待处�
 ```bash
 cargo test --offline --manifest-path tools/cells/Cargo.toml
 CELLS_CODEX_TEST=1 cargo test --offline --manifest-path tools/cells/Cargo.toml --test harness
-CELLS_HARNESS_TEST=1 pnpm --filter @itookit/cells-driver test tests/network.test.ts
+CELLS_HARNESS_TEST=1 pnpm --filter @nestos/cells-driver test tests/network.test.ts
 ```
 
 第一项包含原生协议模拟测试；第二项用独立临时 CODEX_HOME 启动真实 Codex，只验证创建/历史，不调用模型，也不读取个人会话；第三项用真实 MCP SDK、Rust HTTP 服务和模拟 Codex 验证完整操作。
@@ -348,7 +348,7 @@ MCP 提供 project_roots/list/read/register/configure/exec；harness 工具增�
 回传复用 sync 的 CAS 发布与持久回执，关闭面板或未知结果时通过 status 继续同一计划。
 默认更新模式保留目标独有文件，不传播删除、不穿透附加挂载或 .nestos；镜像删除未开放。
 
-命名统一为 `cells`：包名、命令、仓库、日志、`CELLS_*` 环境变量、`cells_capabilities` 发现工具、`itookit/cells` 元数据键、`cells://` 资源 URI 与 `x-cells-*` 授权头均使用新名称。客户端使用 `@itookit/cells-driver` 和 `createCellsDriver()`，不提供旧名称兼容入口。
+命名统一为 `cells`：包名、命令、仓库、日志、`CELLS_*` 环境变量、`cells_capabilities` 发现工具、`itookit/cells` 元数据键、`cells://` 资源 URI 与 `x-cells-*` 授权头均使用新名称。客户端使用 `@nestos/cells-driver` 和 `createCellsDriver()`，不提供旧名称兼容入口。
 
 
 ### 项目与原生会话搜索
