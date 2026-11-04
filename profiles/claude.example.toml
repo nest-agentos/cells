@@ -1,0 +1,17 @@
+# Append to an existing multi-principal cells configuration.
+# Replace installed paths and bind an existing principal. Reuse the original
+# CLAUDE_CONFIG_DIR to discover native Claude Code session history.
+[[harnesses]]
+id = "claude"
+kind = "claude"
+principal_id = "owner"
+projects = true
+command = "/usr/local/bin/claude"
+home = "/home/USER/.claude"
+
+# Requires execution=true and [projects].network=true to send model requests.
+# The principal needs an execute grant to create/resume/send sessions.
+# History reads only need directory read access and never adopt a session.
+# Claude currently supports create/resume/interrupt, text/image attachments,
+# approvals/questions, history/search and usage; archive/delete/rename/fork
+# are not advertised. Do not add legacy workspaces in project mode.

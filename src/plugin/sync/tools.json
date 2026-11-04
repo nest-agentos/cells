@@ -1,0 +1,259 @@
+[
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Bind a files dataset to a writable project directory",
+    "inputSchema": {
+      "properties": {
+        "bindingId": {
+          "type": "string"
+        },
+        "datasetId": {
+          "type": "string"
+        },
+        "direction": {
+          "enum": [
+            "both",
+            "upload",
+            "download"
+          ],
+          "type": "string"
+        },
+        "historyEpoch": {
+          "type": "string"
+        },
+        "projectId": {
+          "description": "Identifier from project_list. Project context also requires revision; non-legacy principals require project context.",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "syncProjectId": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "bindingId",
+        "projectId",
+        "revision",
+        "syncProjectId",
+        "datasetId",
+        "historyEpoch"
+      ],
+      "type": "object"
+    },
+    "name": "project_sync_bind"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Read the durable directory synchronization status",
+    "inputSchema": {
+      "properties": {
+        "bindingId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "bindingId"
+      ],
+      "type": "object"
+    },
+    "name": "project_sync_status"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Preview directory changes without writing project files",
+    "inputSchema": {
+      "properties": {
+        "bindingId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "bindingId"
+      ],
+      "type": "object"
+    },
+    "name": "project_sync_preview"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Apply or resume an explicitly reviewed directory plan",
+    "inputSchema": {
+      "properties": {
+        "bindingId": {
+          "type": "string"
+        },
+        "planId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "bindingId",
+        "planId"
+      ],
+      "type": "object"
+    },
+    "name": "project_sync_execute"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Remove a completed directory binding without deleting files",
+    "inputSchema": {
+      "properties": {
+        "bindingId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "bindingId"
+      ],
+      "type": "object"
+    },
+    "name": "project_sync_unbind"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Change direction and invalidate the previous preview",
+    "inputSchema": {
+      "properties": {
+        "bindingId": {
+          "type": "string"
+        },
+        "direction": {
+          "enum": [
+            "both",
+            "upload",
+            "download"
+          ],
+          "type": "string"
+        },
+        "policyRevision": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "bindingId",
+        "policyRevision",
+        "direction"
+      ],
+      "type": "object"
+    },
+    "name": "project_sync_configure"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Compare bounded conflict content from a captured plan",
+    "inputSchema": {
+      "properties": {
+        "bindingId": {
+          "type": "string"
+        },
+        "path": {
+          "description": "Relative path within the selected export or synchronization directory; an empty string selects its root.",
+          "type": "string"
+        },
+        "planId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "bindingId",
+        "planId",
+        "path"
+      ],
+      "type": "object"
+    },
+    "name": "project_sync_compare"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Browse authorized project-relative synchronization directories",
+    "inputSchema": {
+      "properties": {
+        "path": {
+          "description": "Relative path within the selected export or synchronization directory; an empty string selects its root.",
+          "type": "string"
+        },
+        "projectId": {
+          "description": "Identifier from project_list. Project context also requires revision; non-legacy principals require project context.",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "projectId",
+        "revision",
+        "path"
+      ],
+      "type": "object"
+    },
+    "name": "project_sync_directories"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Select conflict sources and create a new plan for review",
+    "inputSchema": {
+      "properties": {
+        "bindingId": {
+          "type": "string"
+        },
+        "decisions": {
+          "additionalProperties": {
+            "enum": [
+              "dataset",
+              "directory"
+            ],
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "planId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "bindingId",
+        "planId",
+        "decisions"
+      ],
+      "type": "object"
+    },
+    "name": "project_sync_resolve"
+  }
+]

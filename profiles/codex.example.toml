@@ -1,0 +1,17 @@
+# Append to an existing multi-principal cells configuration.
+# Replace installed paths and bind an existing principal.
+[[harnesses]]
+id = "codex"
+kind = "codex"
+principal_id = "owner"
+projects = true
+command = "/usr/local/bin/codex"
+home = "/home/USER/.codex"
+
+# Preserve existing client references when renaming a previous profile.
+# aliases = ["codex-main"]
+
+# Optional per-turn summary override, including for resumed threads.
+# Omit to inherit the native thread's preference; unsupported requests remain explicit errors.
+[harnesses.codex]
+reasoning_summary = "auto"

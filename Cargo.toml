@@ -1,0 +1,160 @@
+[package]
+name = "cells"
+version = "0.4.3"
+edition = "2021"
+description = "A single intelligent node of NestOS, integrating information and agents like a cell in a honeycomb"
+repository = "https://github.com/nest-agentos/cells"
+homepage = "https://github.com/nest-agentos/cells"
+readme = "README.md"
+
+[dependencies]
+libc = "0.2"
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt", "io"] }
+tower-http = { version = "0.5", features = ["cors"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+toml = "0.8"
+toml_edit = "0.22"
+rustix = { version = "1", features = ["fs", "process", "param"] }
+futures-util = "0.3"
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+getrandom = "0.2"
+rusqlite = { version = "0.31", features = ["bundled", "serialize", "backup"] }
+tempfile = "3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "cookies", "stream", "rustls-tls"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+
+[dev-dependencies]
+axum = { version = "0.7", features = ["ws"] }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+
+[workspace]
+
+[features]
+sync-fault-injection = []
+
+[[test]]
+name = "fs"
+path = "src/plugin/files/tests/fs.rs"
+
+[[test]]
+name = "seq"
+path = "src/plugin/files/tests/seq.rs"
+
+[[test]]
+name = "upload_journal"
+path = "src/plugin/files/tests/upload_journal.rs"
+
+[[test]]
+name = "process"
+path = "src/plugin/process/tests/process.rs"
+
+[[test]]
+name = "directory_acl_execution"
+path = "src/plugin/process/tests/directory_acl_execution.rs"
+
+[[test]]
+name = "projects"
+path = "src/plugin/projects/tests/projects.rs"
+
+[[test]]
+name = "project_search"
+path = "src/plugin/projects/tests/project_search.rs"
+
+[[test]]
+name = "project_watch"
+path = "src/plugin/projects/tests/project_watch.rs"
+
+[[test]]
+name = "directory_sync"
+path = "src/plugin/projects/tests/directory_sync.rs"
+
+[[test]]
+name = "harness"
+path = "src/plugin/harness/tests/harness.rs"
+
+[[test]]
+name = "harness_concurrency"
+path = "src/plugin/harness/tests/harness_concurrency.rs"
+
+[[test]]
+name = "harness_plugins"
+path = "src/plugin/harness/tests/harness_plugins.rs"
+
+[[test]]
+name = "claude"
+path = "src/plugin/harness/tests/claude.rs"
+
+[[test]]
+name = "claude_project"
+path = "src/plugin/harness/tests/claude_project.rs"
+
+[[test]]
+name = "dsh"
+path = "src/plugin/harness/tests/dsh.rs"
+
+[[test]]
+name = "dsh_project"
+path = "src/plugin/harness/tests/dsh_project.rs"
+
+[[test]]
+name = "dsh_shutdown"
+path = "src/plugin/harness/tests/dsh_shutdown.rs"
+
+[[test]]
+name = "mcp"
+path = "src/plugin/mcp/tests/mcp.rs"
+
+[[test]]
+name = "config"
+path = "src/plugin/common/tests/config.rs"
+
+[[test]]
+name = "access_cli"
+path = "src/plugin/common/tests/access_cli.rs"
+
+[[test]]
+name = "logging"
+path = "src/plugin/common/tests/logging.rs"
+
+[[test]]
+name = "workspace"
+path = "src/plugin/common/tests/workspace.rs"
+
+[[test]]
+name = "node_plugins"
+path = "src/plugin/common/tests/node_plugins.rs"
+
+[[test]]
+name = "plugin_runtime"
+path = "src/plugin/common/tests/plugin_runtime.rs"
+
+[[test]]
+name = "directory_acl"
+path = "src/plugin/common/tests/directory_acl.rs"
+
+[[test]]
+name = "http"
+path = "src/plugin/files/tests/http/main.rs"
+
+[[test]]
+name = "sync"
+path = "src/plugin/sync/tests/integration/main.rs"
+
+[[test]]
+name = "contributions"
+path = "src/plugin/common/tests/contributions.rs"
+
+[[test]]
+name = "events"
+path = "src/plugin/common/tests/events.rs"
+
+[[test]]
+name = "plugin_layout"
+path = "src/plugin/common/tests/plugin_layout.rs"

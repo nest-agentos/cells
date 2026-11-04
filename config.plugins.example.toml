@@ -1,0 +1,19 @@
+listen = "127.0.0.1:8787"
+api_key_env = "CELLS_API_KEY"
+allowed_origins = ["http://localhost:3000"]
+execution = false
+
+# Explicit switches override legacy execution/sync/project/harness defaults.
+# Changes apply on restart. Optional services need their own configuration.
+[plugins]
+files = true
+process = false
+sync = false
+projects = false
+harness = false
+mcp = true
+
+[[exports]]
+alias = "docs"
+path = "/srv/shared/docs"
+access = "ro"

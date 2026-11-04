@@ -1,0 +1,35 @@
+listen = "127.0.0.1:8787"
+server_id = "office-node"
+execution = true
+api_key_env = "CELLS_API_KEY"
+
+[projects]
+root = "/var/lib/cells/projects"
+network = false
+
+# Each export root owns one .nestos/meta.sqlite, created only by the first metadata write.
+# Read-only access never creates or changes it; rw still requires project + principal grants.
+# Mounting subdirectories does not create another database: keys stay export-relative.
+# .nestos is private service state, hidden from file APIs. Back it up/move it with this root.
+# Do not delete it as a cache, edit SQLite by hand, or configure overlapping export roots.
+[[exports]]
+alias = "home"
+path = "/srv/work"
+access = "rw"
+
+[[exports]]
+alias = "reference"
+path = "/srv/reference"
+access = "ro"
+
+[[harnesses]]
+id = "codex"
+kind = "codex"
+command = "/opt/codex/codex"
+home = "/var/lib/cells/codex"
+projects = true
+
+# Enable to materialize uploaded files datasets into writable project directories.
+[sync]
+enabled = true
+root = "/var/lib/cells/sync"

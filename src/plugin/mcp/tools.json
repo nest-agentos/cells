@@ -1,0 +1,16 @@
+[
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Discover this gateway's same-origin HTTP file endpoint and installation identity",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "cells_capabilities"
+  }
+]

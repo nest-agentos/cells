@@ -1,0 +1,1561 @@
+[
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "List configured harness profiles and authorized workspaces",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "harness_profiles"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "List stored sessions, including explicit source and archive filtering",
+    "inputSchema": {
+      "dependentRequired": {
+        "projectId": [
+          "revision"
+        ],
+        "readOnly": [
+          "projectId",
+          "revision"
+        ],
+        "revision": [
+          "projectId"
+        ]
+      },
+      "properties": {
+        "archived": {
+          "type": "boolean"
+        },
+        "cursor": {
+          "type": "string"
+        },
+        "limit": {
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "profileId": {
+          "description": "Authorized identifier from harness_profiles.",
+          "type": "string"
+        },
+        "projectId": {
+          "description": "Identifier from project_list. Project context also requires revision; non-legacy principals require project context.",
+          "type": "string"
+        },
+        "readOnly": {
+          "type": "boolean"
+        },
+        "revision": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "profileId"
+      ],
+      "type": "object"
+    },
+    "name": "harness_sessions"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Read session history without resuming execution",
+    "inputSchema": {
+      "dependentRequired": {
+        "projectId": [
+          "revision"
+        ],
+        "readOnly": [
+          "projectId",
+          "revision"
+        ],
+        "revision": [
+          "projectId"
+        ]
+      },
+      "properties": {
+        "cursor": {
+          "type": "string"
+        },
+        "profileId": {
+          "description": "Authorized identifier from harness_profiles.",
+          "type": "string"
+        },
+        "projectId": {
+          "description": "Identifier from project_list. Project context also requires revision; non-legacy principals require project context.",
+          "type": "string"
+        },
+        "readOnly": {
+          "type": "boolean"
+        },
+        "revision": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "toolDetail": {
+          "enum": [
+            "summary"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "profileId",
+        "sessionId"
+      ],
+      "type": "object"
+    },
+    "name": "harness_session_read"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Read provenance-filtered user prompts and visible assistant text without reasoning or tools; no model invocation. Unknown user provenance is explicitly omitted.",
+    "inputSchema": {
+      "dependentRequired": {
+        "projectId": [
+          "revision"
+        ],
+        "readOnly": [
+          "projectId",
+          "revision"
+        ],
+        "revision": [
+          "projectId"
+        ]
+      },
+      "properties": {
+        "cursor": {
+          "type": "string"
+        },
+        "profileId": {
+          "description": "Authorized identifier from harness_profiles.",
+          "type": "string"
+        },
+        "projectId": {
+          "description": "Identifier from project_list. Project context also requires revision; non-legacy principals require project context.",
+          "type": "string"
+        },
+        "readOnly": {
+          "type": "boolean"
+        },
+        "revision": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "expectedRevision": {
+          "type": "string"
+        },
+        "metadataOnly": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "profileId",
+        "sessionId"
+      ],
+      "type": "object"
+    },
+    "name": "harness_session_digest"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Read session metadata without loading history or resuming execution",
+    "inputSchema": {
+      "dependentRequired": {
+        "projectId": [
+          "revision"
+        ],
+        "readOnly": [
+          "projectId",
+          "revision"
+        ],
+        "revision": [
+          "projectId"
+        ]
+      },
+      "properties": {
+        "profileId": {
+          "description": "Authorized identifier from harness_profiles.",
+          "type": "string"
+        },
+        "projectId": {
+          "description": "Identifier from project_list. Project context also requires revision; non-legacy principals require project context.",
+          "type": "string"
+        },
+        "readOnly": {
+          "type": "boolean"
+        },
+        "revision": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "profileId",
+        "sessionId"
+      ],
+      "type": "object"
+    },
+    "name": "harness_session_info"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Read native transcript token usage without execution or pricing",
+    "inputSchema": {
+      "dependentRequired": {
+        "projectId": [
+          "revision"
+        ],
+        "readOnly": [
+          "projectId",
+          "revision"
+        ],
+        "revision": [
+          "projectId"
+        ]
+      },
+      "properties": {
+        "profileId": {
+          "description": "Authorized identifier from harness_profiles.",
+          "type": "string"
+        },
+        "projectId": {
+          "description": "Identifier from project_list. Project context also requires revision; non-legacy principals require project context.",
+          "type": "string"
+        },
+        "readOnly": {
+          "type": "boolean"
+        },
+        "revision": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "profileId",
+        "sessionId"
+      ],
+      "type": "object"
+    },
+    "name": "harness_session_usage"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Search authorized native session titles, displayed content or user prompts with explicit capacity limits",
+    "inputSchema": {
+      "dependentRequired": {
+        "projectId": [
+          "revision"
+        ],
+        "readOnly": [
+          "projectId",
+          "revision"
+        ],
+        "revision": [
+          "projectId"
+        ]
+      },
+      "properties": {
+        "archived": {
+          "type": "boolean"
+        },
+        "mode": {
+          "enum": [
+            "title",
+            "content",
+            "prompt"
+          ],
+          "type": "string"
+        },
+        "profileId": {
+          "description": "Authorized identifier from harness_profiles.",
+          "type": "string"
+        },
+        "projectId": {
+          "description": "Identifier from project_list. Project context also requires revision; non-legacy principals require project context.",
+          "type": "string"
+        },
+        "query": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "type": "string"
+        },
+        "readOnly": {
+          "type": "boolean"
+        },
+        "revision": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "profileId",
+        "query",
+        "mode"
+      ],
+      "type": "object"
+    },
+    "name": "harness_session_search"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Rename an authorized native session without adopting execution",
+    "inputSchema": {
+      "dependentRequired": {
+        "projectId": [
+          "revision"
+        ],
+        "readOnly": [
+          "projectId",
+          "revision"
+        ],
+        "revision": [
+          "projectId"
+        ]
+      },
+      "properties": {
+        "epoch": {
+          "description": "Use harness_profiles.epoch for harness operations; /v1/capabilities.processEpoch for project_exec.",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "profileId": {
+          "description": "Authorized identifier from harness_profiles.",
+          "type": "string"
+        },
+        "projectId": {
+          "description": "Identifier from project_list. Project context also requires revision; non-legacy principals require project context.",
+          "type": "string"
+        },
+        "readOnly": {
+          "type": "boolean"
+        },
+        "requestId": {
+          "description": "Stable mutation identifier. Reuse it only for the same operation; receipts are scoped to the current epoch.",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "profileId",
+        "epoch",
+        "requestId",
+        "sessionId",
+        "name"
+      ],
+      "type": "object"
+    },
+    "name": "harness_rename"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Archive an idle session owned by this gateway; preserves native history",
+    "inputSchema": {
+      "dependentRequired": {
+        "projectId": [
+          "revision"
+        ],
+        "readOnly": [
+          "projectId",
+          "revision"
+        ],
+        "revision": [
+          "projectId"
+        ]
+      },
+      "properties": {
+        "epoch": {
+          "description": "Use harness_profiles.epoch for harness operations; /v1/capabilities.processEpoch for project_exec.",
+          "type": "string"
+        },
+        "profileId": {
+          "description": "Authorized identifier from harness_profiles.",
+          "type": "string"
+        },
+        "projectId": {
+          "description": "Identifier from project_list. Project context also requires revision; non-legacy principals require project context.",
+          "type": "string"
+        },
+        "readOnly": {
+          "type": "boolean"
+        },
+        "requestId": {
+          "description": "Stable mutation identifier. Reuse it only for the same operation; receipts are scoped to the current epoch.",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "profileId",
+        "epoch",
+        "requestId",
+        "sessionId"
+      ],
+      "type": "object"
+    },
+    "name": "harness_archive"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Permanently delete a native session and its authorized spawned descendants",
+    "inputSchema": {
+      "dependentRequired": {
+        "projectId": [
+          "revision"
+        ],
+        "readOnly": [
+          "projectId",
+          "revision"
+        ],
+        "revision": [
+          "projectId"
+        ]
+      },
+      "properties": {
+        "epoch": {
+          "description": "Use harness_profiles.epoch for harness operations; /v1/capabilities.processEpoch for project_exec.",
+          "type": "string"
+        },
+        "profileId": {
+          "description": "Authorized identifier from harness_profiles.",
+          "type": "string"
+        },
+        "projectId": {
+          "description": "Identifier from project_list. Project context also requires revision; non-legacy principals require project context.",
+          "type": "string"
+        },
+        "readOnly": {
+          "type": "boolean"
+        },
+        "requestId": {
+          "description": "Stable mutation identifier. Reuse it only for the same operation; receipts are scoped to the current epoch.",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "profileId",
+        "epoch",
+        "requestId",
+        "sessionId"
+      ],
+      "type": "object"
+    },
+    "name": "harness_delete"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Restore an archived native session without starting a turn",
+    "inputSchema": {
+      "dependentRequired": {
+        "projectId": [
+          "revision"
+        ],
+        "readOnly": [
+          "projectId",
+          "revision"
+        ],
+        "revision": [
+          "projectId"
+        ]
+      },
+      "properties": {
+        "epoch": {
+          "description": "Use harness_profiles.epoch for harness operations; /v1/capabilities.processEpoch for project_exec.",
+          "type": "string"
+        },
+        "profileId": {
+          "description": "Authorized identifier from harness_profiles.",
+          "type": "string"
+        },
+        "projectId": {
+          "description": "Identifier from project_list. Project context also requires revision; non-legacy principals require project context.",
+          "type": "string"
+        },
+        "readOnly": {
+          "type": "boolean"
+        },
+        "requestId": {
+          "description": "Stable mutation identifier. Reuse it only for the same operation; receipts are scoped to the current epoch.",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "profileId",
+        "epoch",
+        "requestId",
+        "sessionId"
+      ],
+      "type": "object"
+    },
+    "name": "harness_unarchive"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Create a native branch; lastTurnId requires checkpointFork and returns explicit boundary verification",
+    "inputSchema": {
+      "dependentRequired": {
+        "projectId": [
+          "revision"
+        ],
+        "readOnly": [
+          "projectId",
+          "revision"
+        ],
+        "revision": [
+          "projectId"
+        ]
+      },
+      "properties": {
+        "epoch": {
+          "description": "Use harness_profiles.epoch for harness operations; /v1/capabilities.processEpoch for project_exec.",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "profileId": {
+          "description": "Authorized identifier from harness_profiles.",
+          "type": "string"
+        },
+        "projectId": {
+          "description": "Identifier from project_list. Project context also requires revision; non-legacy principals require project context.",
+          "type": "string"
+        },
+        "readOnly": {
+          "type": "boolean"
+        },
+        "requestId": {
+          "description": "Stable mutation identifier. Reuse it only for the same operation; receipts are scoped to the current epoch.",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "lastTurnId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "Exact terminal native turn to copy through; requires capabilities.checkpointFork. Never falls back to latest."
+        }
+      },
+      "required": [
+        "profileId",
+        "epoch",
+        "requestId",
+        "sessionId"
+      ],
+      "type": "object"
+    },
+    "name": "harness_fork"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Query a retained mutation receipt without replaying its effect",
+    "inputSchema": {
+      "dependentRequired": {
+        "projectId": [
+          "revision"
+        ],
+        "readOnly": [
+          "projectId",
+          "revision"
+        ],
+        "revision": [
+          "projectId"
+        ]
+      },
+      "properties": {
+        "epoch": {
+          "description": "Use harness_profiles.epoch for harness operations; /v1/capabilities.processEpoch for project_exec.",
+          "type": "string"
+        },
+        "profileId": {
+          "description": "Authorized identifier from harness_profiles.",
+          "type": "string"
+        },
+        "projectId": {
+          "description": "Identifier from project_list. Project context also requires revision; non-legacy principals require project context.",
+          "type": "string"
+        },
+        "readOnly": {
+          "type": "boolean"
+        },
+        "requestId": {
+          "description": "Stable mutation identifier. Reuse it only for the same operation; receipts are scoped to the current epoch.",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "outputMode": {
+          "type": "string",
+          "enum": [
+            "reference"
+          ],
+          "description": "Opt in to a bounded output preview and immutable outputRef. Omit for the full compatible result; this does not change execution identity."
+        }
+      },
+      "required": [
+        "profileId",
+        "epoch",
+        "requestId"
+      ],
+      "type": "object"
+    },
+    "name": "harness_operation"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Read an immutable UTF-8 command output byte range retained in its original receipt without initializing a native driver",
+    "inputSchema": {
+      "dependentRequired": {
+        "projectId": [
+          "revision"
+        ],
+        "readOnly": [
+          "projectId",
+          "revision"
+        ],
+        "revision": [
+          "projectId"
+        ]
+      },
+      "properties": {
+        "epoch": {
+          "description": "Use harness_profiles.epoch for harness operations; /v1/capabilities.processEpoch for project_exec.",
+          "type": "string"
+        },
+        "profileId": {
+          "description": "Authorized identifier from harness_profiles.",
+          "type": "string"
+        },
+        "projectId": {
+          "description": "Identifier from project_list. Project context also requires revision; non-legacy principals require project context.",
+          "type": "string"
+        },
+        "readOnly": {
+          "type": "boolean"
+        },
+        "requestId": {
+          "description": "Stable mutation identifier. Reuse it only for the same operation; receipts are scoped to the current epoch.",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        }
+      },
+      "required": [
+        "profileId",
+        "epoch",
+        "requestId",
+        "sha256",
+        "bytes",
+        "offset",
+        "limit"
+      ],
+      "type": "object"
+    },
+    "name": "harness_command_output"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Create a session in a configured workspace",
+    "inputSchema": {
+      "dependentRequired": {
+        "projectId": [
+          "revision"
+        ],
+        "readOnly": [
+          "projectId",
+          "revision"
+        ],
+        "revision": [
+          "projectId"
+        ]
+      },
+      "properties": {
+        "epoch": {
+          "description": "Use harness_profiles.epoch for harness operations; /v1/capabilities.processEpoch for project_exec.",
+          "type": "string"
+        },
+        "profileId": {
+          "description": "Authorized identifier from harness_profiles.",
+          "type": "string"
+        },
+        "projectId": {
+          "description": "Identifier from project_list. Project context also requires revision; non-legacy principals require project context.",
+          "type": "string"
+        },
+        "readOnly": {
+          "type": "boolean"
+        },
+        "requestId": {
+          "description": "Stable mutation identifier. Reuse it only for the same operation; receipts are scoped to the current epoch.",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "workspaceId": {
+          "description": "Legacy workspace identifier, or projectId for a project-scoped harness.",
+          "type": "string"
+        },
+        "directory": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "description": "Optional existing directory relative to the authorized project; requires workingDirectory capability."
+        }
+      },
+      "required": [
+        "profileId",
+        "epoch",
+        "requestId",
+        "workspaceId"
+      ],
+      "type": "object"
+    },
+    "name": "harness_create"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Resume a stored session whose working directory is authorized",
+    "inputSchema": {
+      "dependentRequired": {
+        "projectId": [
+          "revision"
+        ],
+        "readOnly": [
+          "projectId",
+          "revision"
+        ],
+        "revision": [
+          "projectId"
+        ]
+      },
+      "properties": {
+        "epoch": {
+          "description": "Use harness_profiles.epoch for harness operations; /v1/capabilities.processEpoch for project_exec.",
+          "type": "string"
+        },
+        "profileId": {
+          "description": "Authorized identifier from harness_profiles.",
+          "type": "string"
+        },
+        "projectId": {
+          "description": "Identifier from project_list. Project context also requires revision; non-legacy principals require project context.",
+          "type": "string"
+        },
+        "readOnly": {
+          "type": "boolean"
+        },
+        "requestId": {
+          "description": "Stable mutation identifier. Reuse it only for the same operation; receipts are scoped to the current epoch.",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "profileId",
+        "epoch",
+        "requestId",
+        "sessionId"
+      ],
+      "type": "object"
+    },
+    "name": "harness_resume"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Submit a message to a session owned by this gateway",
+    "inputSchema": {
+      "dependentRequired": {
+        "projectId": [
+          "revision"
+        ],
+        "readOnly": [
+          "projectId",
+          "revision"
+        ],
+        "revision": [
+          "projectId"
+        ]
+      },
+      "properties": {
+        "attachments": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "content": {
+                "maxLength": 524288,
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "text",
+                  "image"
+                ]
+              },
+              "mimeType": {
+                "type": "string"
+              },
+              "name": {
+                "maxLength": 256,
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "name",
+              "content"
+            ],
+            "type": "object"
+          },
+          "maxItems": 5,
+          "type": "array"
+        },
+        "epoch": {
+          "description": "Use harness_profiles.epoch for harness operations; /v1/capabilities.processEpoch for project_exec.",
+          "type": "string"
+        },
+        "profileId": {
+          "description": "Authorized identifier from harness_profiles.",
+          "type": "string"
+        },
+        "projectId": {
+          "description": "Identifier from project_list. Project context also requires revision; non-legacy principals require project context.",
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "readOnly": {
+          "type": "boolean"
+        },
+        "requestId": {
+          "description": "Stable mutation identifier. Reuse it only for the same operation; receipts are scoped to the current epoch.",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "selection": {
+          "additionalProperties": false,
+          "properties": {
+            "modelId": {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            },
+            "reasoningEffort": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "modelId"
+          ],
+          "type": "object"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "profileId",
+        "epoch",
+        "requestId",
+        "sessionId",
+        "prompt"
+      ],
+      "type": "object"
+    },
+    "name": "harness_turn"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Read native models and per-model reasoning capabilities",
+    "inputSchema": {
+      "dependentRequired": {
+        "projectId": [
+          "revision"
+        ],
+        "readOnly": [
+          "projectId",
+          "revision"
+        ],
+        "revision": [
+          "projectId"
+        ]
+      },
+      "properties": {
+        "profileId": {
+          "description": "Authorized identifier from harness_profiles.",
+          "type": "string"
+        },
+        "projectId": {
+          "description": "Identifier from project_list. Project context also requires revision; non-legacy principals require project context.",
+          "type": "string"
+        },
+        "readOnly": {
+          "type": "boolean"
+        },
+        "revision": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "workspaceId": {
+          "description": "Legacy workspace identifier, or projectId for a project-scoped harness.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "profileId"
+      ],
+      "type": "object"
+    },
+    "name": "harness_models"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Read commands exposed by the selected native harness session",
+    "inputSchema": {
+      "dependentRequired": {
+        "projectId": [
+          "revision"
+        ],
+        "readOnly": [
+          "projectId",
+          "revision"
+        ],
+        "revision": [
+          "projectId"
+        ]
+      },
+      "properties": {
+        "profileId": {
+          "description": "Authorized identifier from harness_profiles.",
+          "type": "string"
+        },
+        "projectId": {
+          "description": "Identifier from project_list. Project context also requires revision; non-legacy principals require project context.",
+          "type": "string"
+        },
+        "readOnly": {
+          "type": "boolean"
+        },
+        "revision": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "workspaceId": {
+          "description": "Legacy workspace identifier, or projectId for a project-scoped harness.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "profileId"
+      ],
+      "type": "object"
+    },
+    "name": "harness_commands"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Read an advertised query command without resuming a session or creating a mutation receipt",
+    "inputSchema": {
+      "dependentRequired": {
+        "projectId": [
+          "revision"
+        ],
+        "readOnly": [
+          "projectId",
+          "revision"
+        ],
+        "revision": [
+          "projectId"
+        ]
+      },
+      "properties": {
+        "arguments": {
+          "maxLength": 131072,
+          "type": "string"
+        },
+        "command": {
+          "type": "string"
+        },
+        "profileId": {
+          "description": "Authorized identifier from harness_profiles.",
+          "type": "string"
+        },
+        "projectId": {
+          "description": "Identifier from project_list. Project context also requires revision; non-legacy principals require project context.",
+          "type": "string"
+        },
+        "readOnly": {
+          "type": "boolean"
+        },
+        "requestId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,128}$",
+          "description": "Correlation identifier for this read-only observation; not a mutation receipt."
+        },
+        "revision": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "expectedCommand": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "revision": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          }
+        }
+      },
+      "required": [
+        "profileId",
+        "requestId",
+        "sessionId",
+        "command"
+      ],
+      "type": "object"
+    },
+    "name": "harness_query"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Execute an advertised native command with the existing mutation receipt contract",
+    "inputSchema": {
+      "dependentRequired": {
+        "projectId": [
+          "revision"
+        ],
+        "readOnly": [
+          "projectId",
+          "revision"
+        ],
+        "revision": [
+          "projectId"
+        ]
+      },
+      "properties": {
+        "arguments": {
+          "maxLength": 131072,
+          "type": "string"
+        },
+        "command": {
+          "type": "string"
+        },
+        "epoch": {
+          "description": "Use harness_profiles.epoch for harness operations; /v1/capabilities.processEpoch for project_exec.",
+          "type": "string"
+        },
+        "profileId": {
+          "description": "Authorized identifier from harness_profiles.",
+          "type": "string"
+        },
+        "projectId": {
+          "description": "Identifier from project_list. Project context also requires revision; non-legacy principals require project context.",
+          "type": "string"
+        },
+        "readOnly": {
+          "type": "boolean"
+        },
+        "requestId": {
+          "description": "Stable mutation identifier. Reuse it only for the same operation; receipts are scoped to the current epoch.",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "selection": {
+          "additionalProperties": false,
+          "properties": {
+            "modelId": {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            },
+            "reasoningEffort": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "modelId"
+          ],
+          "type": "object"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "expectedCommand": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "revision": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          }
+        },
+        "outputMode": {
+          "type": "string",
+          "enum": [
+            "reference"
+          ],
+          "description": "Opt in to a bounded output preview and immutable outputRef. Omit for the full compatible result; this does not change execution identity."
+        }
+      },
+      "required": [
+        "profileId",
+        "epoch",
+        "requestId",
+        "sessionId",
+        "command"
+      ],
+      "type": "object"
+    },
+    "name": "harness_command"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Interrupt a turn owned by this gateway",
+    "inputSchema": {
+      "dependentRequired": {
+        "projectId": [
+          "revision"
+        ],
+        "readOnly": [
+          "projectId",
+          "revision"
+        ],
+        "revision": [
+          "projectId"
+        ]
+      },
+      "properties": {
+        "epoch": {
+          "description": "Use harness_profiles.epoch for harness operations; /v1/capabilities.processEpoch for project_exec.",
+          "type": "string"
+        },
+        "profileId": {
+          "description": "Authorized identifier from harness_profiles.",
+          "type": "string"
+        },
+        "projectId": {
+          "description": "Identifier from project_list. Project context also requires revision; non-legacy principals require project context.",
+          "type": "string"
+        },
+        "readOnly": {
+          "type": "boolean"
+        },
+        "requestId": {
+          "description": "Stable mutation identifier. Reuse it only for the same operation; receipts are scoped to the current epoch.",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "profileId",
+        "epoch",
+        "requestId",
+        "sessionId",
+        "turnId"
+      ],
+      "type": "object"
+    },
+    "name": "harness_interrupt"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Answer an outstanding native approval or user-input request",
+    "inputSchema": {
+      "dependentRequired": {
+        "projectId": [
+          "revision"
+        ],
+        "readOnly": [
+          "projectId",
+          "revision"
+        ],
+        "revision": [
+          "projectId"
+        ]
+      },
+      "properties": {
+        "epoch": {
+          "description": "Use harness_profiles.epoch for harness operations; /v1/capabilities.processEpoch for project_exec.",
+          "type": "string"
+        },
+        "nativeRequestId": {
+          "type": [
+            "string",
+            "integer"
+          ]
+        },
+        "profileId": {
+          "description": "Authorized identifier from harness_profiles.",
+          "type": "string"
+        },
+        "projectId": {
+          "description": "Identifier from project_list. Project context also requires revision; non-legacy principals require project context.",
+          "type": "string"
+        },
+        "readOnly": {
+          "type": "boolean"
+        },
+        "requestId": {
+          "description": "Stable mutation identifier. Reuse it only for the same operation; receipts are scoped to the current epoch.",
+          "type": "string"
+        },
+        "response": {
+          "type": "object"
+        },
+        "revision": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "profileId",
+        "epoch",
+        "requestId",
+        "nativeRequestId",
+        "response"
+      ],
+      "type": "object"
+    },
+    "name": "harness_respond"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Append context to the exact active native turn without starting another turn",
+    "inputSchema": {
+      "dependentRequired": {
+        "projectId": [
+          "revision"
+        ],
+        "readOnly": [
+          "projectId",
+          "revision"
+        ],
+        "revision": [
+          "projectId"
+        ]
+      },
+      "properties": {
+        "attachments": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "content": {
+                "maxLength": 524288,
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "text",
+                  "image"
+                ]
+              },
+              "mimeType": {
+                "type": "string"
+              },
+              "name": {
+                "maxLength": 256,
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "name",
+              "content"
+            ],
+            "type": "object"
+          },
+          "maxItems": 5,
+          "type": "array"
+        },
+        "epoch": {
+          "description": "Use harness_profiles.epoch for harness operations; /v1/capabilities.processEpoch for project_exec.",
+          "type": "string"
+        },
+        "profileId": {
+          "description": "Authorized identifier from harness_profiles.",
+          "type": "string"
+        },
+        "projectId": {
+          "description": "Identifier from project_list. Project context also requires revision; non-legacy principals require project context.",
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "readOnly": {
+          "type": "boolean"
+        },
+        "requestId": {
+          "description": "Stable mutation identifier. Reuse it only for the same operation; receipts are scoped to the current epoch.",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      },
+      "required": [
+        "profileId",
+        "epoch",
+        "requestId",
+        "sessionId",
+        "prompt",
+        "turnId"
+      ],
+      "type": "object"
+    },
+    "name": "harness_steer"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Read native context-window observations, quota windows and native cost estimates without starting or resuming a turn",
+    "inputSchema": {
+      "dependentRequired": {
+        "projectId": [
+          "revision"
+        ],
+        "readOnly": [
+          "projectId",
+          "revision"
+        ],
+        "revision": [
+          "projectId"
+        ]
+      },
+      "properties": {
+        "profileId": {
+          "description": "Authorized identifier from harness_profiles.",
+          "type": "string"
+        },
+        "projectId": {
+          "description": "Identifier from project_list. Project context also requires revision; non-legacy principals require project context.",
+          "type": "string"
+        },
+        "readOnly": {
+          "type": "boolean"
+        },
+        "revision": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "requestId": {
+          "type": "string",
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "profileId",
+        "sessionId"
+      ],
+      "type": "object"
+    },
+    "name": "harness_session_metrics"
+  }
+]

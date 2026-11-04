@@ -1,0 +1,22 @@
+# Append this profile to an existing multi-principal cells configuration.
+# Replace command/home with installed paths. Reuse the original DSH_HOME to
+# discover existing sessions; an empty home has no historical conversations.
+# The principal must already exist and have execute grants for the project.
+[[harnesses]]
+id = "dsh"
+kind = "dsh"
+principal_id = "owner"
+projects = true
+command = "/usr/local/bin/dsh"
+home = "/home/USER/.dsh"
+
+[harnesses.dsh]
+startup_timeout_ms = 120000
+request_timeout_ms = 25000
+# Independent from short catalog/status requests; bounded to 100..1800000 ms.
+command_timeout_ms = 600000
+max_sessions = 64
+
+# Requires execution=true and [projects].network=true in the host config.
+# Install the executable and all dependencies under sandbox-visible system
+# directories, not an npx cache. Do not add legacy workspaces in this mode.

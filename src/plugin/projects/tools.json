@@ -1,0 +1,411 @@
+[
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "List authorized roots in which projects may be registered",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "project_roots"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "List executable directory projects, separate from sync datasets",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "project_list"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Read the project directory grant and mount policy",
+    "inputSchema": {
+      "properties": {
+        "projectId": {
+          "description": "Identifier from project_list. Project context also requires revision; non-legacy principals require project context.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectId"
+      ],
+      "type": "object"
+    },
+    "name": "project_read"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Search literal names, paths or text in the pinned read-only project view; optional directory limits descendants",
+    "inputSchema": {
+      "properties": {
+        "directory": {
+          "maxLength": 4096,
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "name",
+            "path",
+            "content"
+          ],
+          "type": "string"
+        },
+        "projectId": {
+          "description": "Identifier from project_list. Project context also requires revision; non-legacy principals require project context.",
+          "type": "string"
+        },
+        "query": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "projectId",
+        "revision",
+        "query",
+        "mode"
+      ],
+      "type": "object"
+    },
+    "name": "project_search"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Register an existing directory or create one child under an authorized parent",
+    "inputSchema": {
+      "properties": {
+        "access": {
+          "enum": [
+            "ro",
+            "rw"
+          ],
+          "type": "string"
+        },
+        "alias": {
+          "type": "string"
+        },
+        "createDirectory": {
+          "type": "boolean"
+        },
+        "mounts": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "access": {
+                "enum": [
+                  "ro",
+                  "rw"
+                ],
+                "type": "string"
+              },
+              "alias": {
+                "type": "string"
+              },
+              "at": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "alias",
+              "path",
+              "at",
+              "access"
+            ],
+            "type": "object"
+          },
+          "maxItems": 31,
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "description": "Relative path within the selected export or synchronization directory; an empty string selects its root.",
+          "type": "string"
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]*$"
+        }
+      },
+      "required": [
+        "name",
+        "alias",
+        "path",
+        "access"
+      ],
+      "type": "object"
+    },
+    "name": "project_register"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Replace project mounts using a revision fence; refuses active execution",
+    "inputSchema": {
+      "properties": {
+        "mounts": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "access": {
+                "enum": [
+                  "ro",
+                  "rw"
+                ],
+                "type": "string"
+              },
+              "alias": {
+                "type": "string"
+              },
+              "at": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "alias",
+              "path",
+              "at",
+              "access"
+            ],
+            "type": "object"
+          },
+          "maxItems": 31,
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "projectId": {
+          "description": "Identifier from project_list. Project context also requires revision; non-legacy principals require project context.",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "projectId",
+        "revision",
+        "name",
+        "mounts"
+      ],
+      "type": "object"
+    },
+    "name": "project_configure"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Forget a project grant without deleting directory contents",
+    "inputSchema": {
+      "properties": {
+        "projectId": {
+          "description": "Identifier from project_list. Project context also requires revision; non-legacy principals require project context.",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "projectId",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "name": "project_forget"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Change project root access with a revision fence; preserves files and sessions, refuses active execution",
+    "inputSchema": {
+      "properties": {
+        "access": {
+          "enum": [
+            "ro",
+            "rw"
+          ],
+          "type": "string"
+        },
+        "projectId": {
+          "description": "Identifier from project_list. Project context also requires revision; non-legacy principals require project context.",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "projectId",
+        "revision",
+        "access"
+      ],
+      "type": "object"
+    },
+    "name": "project_remount"
+  },
+  {
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Run a command using only the server-owned project grants",
+    "inputSchema": {
+      "properties": {
+        "args": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "command": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "epoch": {
+          "description": "Use harness_profiles.epoch for harness operations; /v1/capabilities.processEpoch for project_exec.",
+          "type": "string"
+        },
+        "projectId": {
+          "description": "Identifier from project_list. Project context also requires revision; non-legacy principals require project context.",
+          "type": "string"
+        },
+        "readOnly": {
+          "type": "boolean"
+        },
+        "requestId": {
+          "description": "Stable mutation identifier. Reuse it only for the same operation; receipts are scoped to the current epoch.",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "timeoutMs": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "projectId",
+        "revision",
+        "epoch",
+        "requestId",
+        "command",
+        "args"
+      ],
+      "type": "object"
+    },
+    "name": "project_exec"
+  },
+  {
+    "name": "project_execution",
+    "description": "Read project execution environment",
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": true
+    },
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "projectId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectId"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "project_set_execution",
+    "description": "Configure project execution environment with revision check",
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": true
+    },
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "projectId": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "execution": {
+          "type": "object",
+          "properties": {
+            "profile": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "variables": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "projectId",
+        "revision",
+        "execution"
+      ],
+      "additionalProperties": false
+    }
+  }
+]

@@ -1,0 +1,46 @@
+# Optional stable installation identity; keep unchanged across restarts.
+# server_id = "my-cells-node"
+# Execution is enabled by default and requires working Linux bubblewrap support.
+# execution = false  # explicitly select file-only service
+listen = "127.0.0.1:8787"
+# trace/debug/info/warn/error/off; successful reads stay silent at every level.
+log_level = "info"
+# Structured events also go to <config directory>/logs/cells-<time>-<PID>.jsonl.
+# Optional [logging] table: directory = "logs", max_file_bytes = 10485760,
+# retained_files = 5 (current file plus four rotated segments per startup).
+# Browser origins allowed to read responses: Web dev (3000) and Tauri dev (1420).
+# "tauri://localhost" / "http://tauri.localhost" cover packaged Tauri builds;
+# ["*"] allows every origin (trusted, local-only setups); [] blocks all browsers.
+allowed_origins = ["http://localhost:3000", "http://localhost:1420"]
+
+# API Key uses Bearer authentication and needs no username; choose one source.
+api_key_env = "CELLS_API_KEY"  # at least 24 bytes
+# api_key = "replace-with-at-least-24-bytes"
+# Legacy password/password_env and token/token_env remain supported.
+# Do not combine an API Key with username or password authentication.
+
+# Each export root owns one .nestos/meta.sqlite, created only by the first metadata write.
+# Read-only access never creates or changes it; rw still requires project + principal grants.
+# Mounting subdirectories does not create another database: keys stay export-relative.
+# .nestos is private service state, hidden from file APIs. Back it up/move it with this root.
+# Do not delete it as a cache, edit SQLite by hand, or configure overlapping export roots.
+# Each [[exports]] section exposes one host directory. The client path prefix
+# (alias) defaults to the directory name; set `alias` to override it.
+[[exports]]
+path = "/srv/shared/docs"
+access = "ro"        # default; "rw" takes an exclusive lock for writes
+
+# [[exports]]
+# alias = "demo"
+# path = "/srv/projects/demo"
+# access = "rw"
+
+# Optional sync storage in the same process and on the same listening port.
+# Keep this private root separate from all exports and sandbox runtime mounts.
+# Initialize it once: cells sync init /path/to/config.toml
+# [sync]
+# enabled = true
+# root = "/srv/cells-sync"
+
+# External harness control can be enabled separately from shell execution.
+# See config.harness.example.toml for an explicit Codex home/workspace profile.
