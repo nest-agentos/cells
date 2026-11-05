@@ -5,9 +5,10 @@ use serde_json::{json, Value};
 use std::{path::Path, sync::Mutex};
 
 mod exchange;
+mod client_state;
 mod servers;
 
-pub struct Channels(Mutex<Connection>, tokio::sync::watch::Sender<u64>);
+pub struct Channels(Mutex<Connection>, tokio::sync::watch::Sender<u64>,Mutex<Connection>);
 impl Channels {
     pub fn open(root: &Path) -> Result<Self, Error> {
         let path = root.join("session-channels.sqlite");
@@ -24,7 +25,7 @@ impl Channels {
             CREATE TABLE IF NOT EXISTS publications(project TEXT,scope TEXT,id TEXT,origin TEXT NOT NULL,PRIMARY KEY(project,scope,id));
             CREATE UNIQUE INDEX IF NOT EXISTS active_scope ON scopes(project,cwd) WHERE closed=0;").map_err(storage)?;
         db.execute("UPDATE scopes SET execution=json_set(execution,'$.status','unknown','$.recoveryReason','CELLS_RESTARTED') WHERE json_extract(execution,'$.status') IN ('running','submitting')",[]).map_err(storage)?;
-        Ok(Self(Mutex::new(db),tokio::sync::watch::channel(0).0))
+        Ok(Self(Mutex::new(db),tokio::sync::watch::channel(0).0,Mutex::new(client_state::open(root)?)))
     }
     fn touch(&self) {self.1.send_modify(|revision|*revision=revision.wrapping_add(1));}
     pub fn watch(&self) -> tokio::sync::watch::Receiver<u64> {self.1.subscribe()}

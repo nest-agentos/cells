@@ -16,6 +16,12 @@ pub async fn call(
         .get::<crate::projects::ProjectService>()
         .ok_or_else(Error::unsupported)?;
     match name {
+        "project_client_state"=>{
+            let project=service.get(identity,text(&args,"projectId")?)?;authorize(state,identity,&project)?;
+            if project.revision!=args["revision"].as_u64().ok_or_else(Error::invalid)? {return Err(Error::conflict("CLIENT_STATE_BINDING_CHANGED"));}
+            if args["action"]!="read"&&project.access!="rw" {return Err(Error::forbidden("CLIENT_STATE_READ_ONLY"));}
+            service.channels.client_state(&project.id,&project.owner,&args)
+        },
         "project_channel_open" | "project_channel_messages" | "project_channel_close" | "project_channel_requests" | "project_channel_respond" | "project_channel_current" | "project_channel_acknowledge" => {
             let project = service.get(identity, text(&args, "projectId")?)?;
             authorize(state, identity, &project)?;

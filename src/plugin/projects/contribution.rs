@@ -11,7 +11,7 @@ pub(super) fn capabilities(state: &State, identity: usize, enabled: bool) -> Cap
     Capabilities {
         http: Default::default(),
         node: object(
-            json!({"projectExecutionEnvironment":projects,"projects":projects,"directoryEvents":projects,"directoryScopes":projects,"fileSearchVersion":2,"searchKeywords":projects,
+            json!({"projectClientState":1,"projectExecutionEnvironment":projects,"projects":projects,"directoryEvents":projects,"directoryScopes":projects,"fileSearchVersion":2,"searchKeywords":projects,
         "fileSearch":projects && state.services.get::<crate::process::Execution>().is_some_and(|s|s.ready()) && std::path::Path::new("/usr/bin/rg").is_file(),"projectProtocol":"fs-agent-project-v1"}),
         ),
     }
