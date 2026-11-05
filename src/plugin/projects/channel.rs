@@ -60,7 +60,7 @@ impl Channels {
         let rows: Vec<(String,String)> = db.prepare("SELECT token,endpoint FROM scopes WHERE project=?1 AND cwd=?2 AND closed=0 AND expires_at>unixepoch()*1000 ORDER BY rowid DESC LIMIT 2").map_err(storage)?
             .query_map(params![project,cwd], |r| Ok((r.get(0)?,r.get(1)?))).map_err(storage)?.collect::<Result<_,_>>().map_err(storage)?;
         if rows.len() > 1 {return Err(Error::conflict("CHANNEL_BINDING_AMBIGUOUS"));}
-        let scoped=rows.first().map(|(token,endpoint)| json!({"features.mcp_2026_07_28":true,"mcp_servers.cells_session":{"url":endpoint,"required":true,"http_headers":{"Authorization":format!("Bearer {token}")}}}));
+        let scoped=rows.first().map(|(token,endpoint)| json!({"features.mcp_2026_07_28":true,"mcp_servers.cells_session":{"url":endpoint,"required":true,"default_tools_approval_mode":"approve","enabled_tools":["session_context","session_report","session_receipt","session_request","session_response"],"http_headers":{"Authorization":format!("Bearer {token}")}}}));
         drop(db);self.agent_config(owner,scoped)
     }
     pub fn agent(&self, token: &str, method: &str, args: &Value) -> Result<Value, Error> {
@@ -220,6 +220,18 @@ mod tests {
     use super::*;
     fn args() -> Value {json!({"scopeId":"attempt-1","cwd":"/projects/p/work","endpoint":"http://localhost/v1/channel/mcp","snapshot":{"task":{"title":"test"}}})}
     fn token(store:&Channels)->String {store.0.lock().unwrap().query_row("SELECT token FROM scopes",[],|r|r.get(0)).unwrap()}
+    #[test]
+    fn scoped_native_config_authorizes_only_the_bound_communication_tools() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Channels::open(root.path()).unwrap();
+        store.create("p", &args()).unwrap();
+        let config = store.config("p", "/projects/p/work", "owner").unwrap().unwrap();
+        let server = &config["mcp_servers.cells_session"];
+        assert_eq!(server["default_tools_approval_mode"], "approve");
+        assert_eq!(server["enabled_tools"], json!(["session_context","session_report","session_receipt","session_request","session_response"]));
+        assert_eq!(server["required"], true);
+        assert!(config.get("approval_policy").is_none());
+    }
     #[test]
     fn immutable_scope_and_message_survive_restart() {
         let root=tempfile::tempdir().unwrap();
