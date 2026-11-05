@@ -1,4 +1,5 @@
 //! Host harness profiles, separate from short-lived sandboxed shell commands.
+mod context_identity;
 mod attachments;
 mod bridge;
 #[path = "drivers/claude/mod.rs"]

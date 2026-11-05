@@ -27,6 +27,7 @@ pub(super) struct Profile {
     pub(super) driver: DriverSlot,
     receipts: ReceiptScope,
     mutations: MutationQueues,
+    context_id: String,
 }
 
 impl Harnesses {
@@ -75,12 +76,14 @@ impl Harnesses {
             .into_iter()
             .map(|config| {
                 let scope = receipts.scoped(json!(["installation", config.id]).to_string());
+                let context_id = super::context_identity::load(&config)?;
                 Ok((
                     config.id.clone(),
                     Arc::new(Profile {
                         driver: DriverSlot::new(plugins.clone(), config, None)?,
                         receipts: scope,
                         mutations: MutationQueues::default(),
+                        context_id,
                     }),
                 ))
             })
@@ -107,6 +110,7 @@ impl Harnesses {
             .iter()
             .map(|config| {
                 let mut descriptor = self.profiles[&config.id].driver.descriptor();
+                descriptor["contextId"] = json!(self.profiles[&config.id].context_id);
                 descriptor["capabilities"]["commandOutputs"] = json!(true);
                 descriptor["capabilities"]["sessionDigest"] =
                     json!(descriptor["capabilities"]["history"] == true);
@@ -332,6 +336,7 @@ impl Harnesses {
             scoped.insert(
                 key.clone(),
                 Arc::new(Profile {
+                    context_id: self.profiles[&config.id].context_id.clone(),
                     driver: DriverSlot::new(self.plugins.clone(), config, Some(runtime))
                         .map_err(|_| Error::unsupported())?,
                     receipts,
@@ -882,7 +887,8 @@ fn constrain_session_channels(result: &mut Value, available: bool) {
 mod tests {
     #[test]
     fn configured_codex_channels_do_not_require_an_active_project_runtime() {
-        let config = serde_json::from_value(serde_json::json!({"id":"codex","kind":"codex","home":"/unused","projects":true})).unwrap();
+        let home=tempfile::tempdir().unwrap();
+        let config = serde_json::from_value(serde_json::json!({"id":"codex","kind":"codex","home":home.path(),"projects":true})).unwrap();
         let harness = super::Harnesses::new(vec![config], "epoch".into()).unwrap();
         assert_eq!(harness.profiles()["profiles"][0]["capabilities"]["sessionChannels"], true);
     }
@@ -957,6 +963,7 @@ mod tests {
                     entered: entered.clone(),
                     release: release.clone(),
                 })),
+                context_id: "test-context".into(),
                 receipts: harness.receipts.scoped("slow-test".into()),
                 mutations: MutationQueues::default(),
             }),
