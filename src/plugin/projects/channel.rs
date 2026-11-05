@@ -177,7 +177,8 @@ fn replace_scope(db:&rusqlite::Transaction,project:&str,cwd:&str,args:&Value)->R
     };
     if args["previousScopeId"].as_str()!=Some(&id) {return Err(Error::conflict("CHANNEL_PREDECESSOR_CHANGED"));}
     let execution:Value=serde_json::from_str(&raw).map_err(storage)?;
-    if !["completed","failed","interrupted","cancelled","rejected"].contains(&execution["status"].as_str().unwrap_or("")) {return Err(Error::busy());}
+    let unsubmitted=execution["status"]=="idle" && execution["operationId"].is_null() && execution["turnId"].is_null();
+    if !unsubmitted && !["completed","failed","interrupted","cancelled","rejected"].contains(&execution["status"].as_str().unwrap_or("")) {return Err(Error::busy());}
     if !args["previousSessionId"].is_string() || args["previousSessionId"]!=execution["sessionId"] {return Err(Error::conflict("CHANNEL_SESSION_CHANGED"));}
     db.execute("UPDATE scopes SET closed=1 WHERE project=?1 AND id=?2",params![project,id]).map_err(storage)?;
     Ok(json!({"sessionId":args["sessionId"],"previousTurnId":if args["sessionId"]==execution["sessionId"] {execution["turnId"].clone()}else{Value::Null},"status":"idle","revision":1}))
@@ -278,6 +279,17 @@ mod tests {
         next["previousSessionId"]=json!("s");store.create("p",&next).unwrap();assert!(!store.token_valid(&old_token));
         store.observe("p",&json!({"method":"turn/completed","params":{"threadId":"s","turn":{"id":"t","status":"completed"}}})).unwrap();
         assert_eq!(store.list("p","attempt-2").unwrap()["execution"]["status"],"idle");
+    }
+    #[test]
+    fn unsubmitted_idle_scope_can_be_replaced_but_a_pending_submission_cannot() {
+        let root=tempfile::tempdir().unwrap();let store=Channels::open(root.path()).unwrap();
+        store.create("p",&args()).unwrap();store.bind("p","/projects/p/work","s").unwrap();
+        let old=token(&store);
+        let mut next=args();next["scopeId"]=json!("next");next["previousScopeId"]=json!("attempt-1");next["previousSessionId"]=json!("s");next["sessionId"]=json!("s");
+        store.create("p",&next).unwrap();assert!(!store.token_valid(&old));
+        store.prepare_turn("p","s","pending").unwrap();
+        next["scopeId"]=json!("later");next["previousScopeId"]=json!("next");
+        assert_eq!(store.create("p",&next).unwrap_err().code,"EBUSY");
     }
     #[test]
     fn terminal_scope_can_handoff_to_a_separate_hook_then_resume_the_original_session() {
