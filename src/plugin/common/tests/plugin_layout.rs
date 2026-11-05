@@ -17,7 +17,7 @@ fn rust_sources(root: &Path) -> Vec<PathBuf> {
 #[test]
 fn common_framework_and_mcp_transport_do_not_import_business_plugins() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    for folder in ["plugin/common", "plugin/mcp", "http"] {
+    for folder in ["plugin/common", "plugin/mcp"] {
         for path in rust_sources(&root.join(folder)) {
             let source = std::fs::read_to_string(&path).unwrap();
             for feature in ["harness", "projects", "process", "sync"] {

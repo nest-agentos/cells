@@ -1,4 +1,4 @@
-//! Real service and MCP reads never manufacture a submission or reopen a native writer.
+//! Real service and fixed API reads never manufacture a submission or reopen a native writer.
 use super::fixture;
 use axum::{body::Body, http::Request};
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -8,27 +8,15 @@ use serde_json::{json, Value};
 use std::sync::{atomic::Ordering, Arc};
 use tower::ServiceExt;
 
-async fn mcp(state: &Arc<State>, name: &str, arguments: Value) -> Value {
-    let body = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":arguments,
-        "_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}});
-    let request = Request::post("/mcp")
+async fn api(state: &Arc<State>, name: &str, arguments: Value) -> Value {
+    let operation = name.strip_prefix("harness_").unwrap();
+    let request = Request::post(format!("/v1/api/harness/{operation}"))
         .header("content-type", "application/json")
-        .header("accept", "application/json, text/event-stream")
-        .header("mcp-method", "tools/call")
-        .header("mcp-name", name)
-        .header("mcp-protocol-version", "2026-07-28")
         .header("authorization", "Bearer fixture-api-key-at-least-24-bytes")
-        .body(Body::from(body.to_string()))
-        .unwrap();
-    let response = cells::router(state.clone(), &[])
-        .unwrap()
-        .oneshot(request)
-        .await
-        .unwrap();
+        .body(Body::from(arguments.to_string())).unwrap();
+    let response = cells::router(state.clone(), &[]).unwrap().oneshot(request).await.unwrap();
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    let envelope: Value = serde_json::from_slice(&bytes).unwrap();
-    assert!(envelope.get("error").is_none(), "{envelope}");
-    envelope["result"].clone()
+    serde_json::from_slice(&bytes).unwrap()
 }
 fn read_args(reference: &Value) -> Value {
     let mut args = reference.clone();
@@ -48,30 +36,30 @@ async fn legacy_full_results_and_negotiated_previews_share_one_native_execution(
     let harness = state.services.require::<Harnesses>().unwrap();
     let mut args = command(&harness.profiles()["epoch"], "mode-once");
     args.as_object_mut().unwrap().remove("outputMode");
-    let raw = mcp(&state, "harness_command", args.clone()).await["structuredContent"].clone();
+    let raw = api(&state, "harness_command", args.clone()).await["value"].clone();
     assert_eq!(raw["result"]["output"].as_str().unwrap().len(), 280000);
     assert!(raw.get("_commandOutput").is_none());
     assert!(raw["result"].get("outputRef").is_none());
     let mut referenced = args.clone();
     referenced["outputMode"] = json!("reference");
     let view =
-        mcp(&state, "harness_command", referenced.clone()).await["structuredContent"].clone();
+        api(&state, "harness_command", referenced.clone()).await["value"].clone();
     assert!(view["result"]["output"].as_str().unwrap().len() <= 65536);
     assert!(view["result"]["outputRef"].is_object());
     assert!(view.get("_commandOutput").is_none());
     assert_eq!(
-        mcp(&state, "harness_operation", args.clone()).await["structuredContent"],
+        api(&state, "harness_operation", args.clone()).await["value"],
         raw
     );
     assert_eq!(
-        mcp(&state, "harness_operation", referenced).await["structuredContent"],
+        api(&state, "harness_operation", referenced).await["value"],
         view
     );
     for operation in ["harness_command", "harness_operation"] {
         for mode in [json!("raw"), json!("invalid"), Value::Null] {
             let mut invalid = args.clone();
             invalid["outputMode"] = mode;
-            assert_eq!(mcp(&state, operation, invalid).await["isError"], true);
+            assert_eq!(api(&state, operation, invalid).await["ok"], false);
         }
     }
     assert_eq!(executions.load(Ordering::SeqCst), 1);
@@ -79,7 +67,7 @@ async fn legacy_full_results_and_negotiated_previews_share_one_native_execution(
 }
 
 #[tokio::test]
-async fn mcp_serves_scoped_unicode_bytes_and_missing_output_does_not_fence_future_execution() {
+async fn api_serves_scoped_unicode_bytes_and_missing_output_does_not_fence_future_execution() {
     let (_root, mut config, plugins, executions, _) = fixture();
     let mut other = config.harnesses[0].clone();
     other.id = "other".into();
@@ -92,13 +80,13 @@ async fn mcp_serves_scoped_unicode_bytes_and_missing_output_does_not_fence_futur
         true
     );
     let args = command(&profiles["epoch"], "output-once");
-    let receipt = mcp(&state, "harness_command", args.clone()).await["structuredContent"].clone();
+    let receipt = api(&state, "harness_command", args.clone()).await["value"].clone();
     let reference = &receipt["result"]["outputRef"];
     assert_eq!(receipt["outcome"], "committed");
     let read = read_args(reference);
-    let reply = mcp(&state, "harness_command_output", read.clone()).await;
-    assert_eq!(reply["isError"], false);
-    let result = &reply["structuredContent"];
+    let reply = api(&state, "harness_command_output", read.clone()).await;
+    assert_eq!(reply["ok"], true);
+    let result = &reply["value"];
     assert_eq!(
         STANDARD
             .decode(result["data"].as_str().unwrap())
@@ -118,21 +106,21 @@ async fn mcp_serves_scoped_unicode_bytes_and_missing_output_does_not_fence_futur
         let mut invalid = read.clone();
         invalid[key] = value;
         assert_eq!(
-            mcp(&state, "harness_command_output", invalid).await["isError"],
-            true
+            api(&state, "harness_command_output", invalid).await["ok"],
+            false
         );
     }
     assert_eq!(
-        mcp(&state, "harness_operation", args).await["structuredContent"],
+        api(&state, "harness_operation", args).await["value"],
         receipt
     );
     assert_eq!(
-        mcp(
+        api(
             &state,
             "harness_command",
             command(&profiles["epoch"], "missing-output")
         )
-        .await["structuredContent"]["outcome"],
+        .await["value"]["outcome"],
         "committed"
     );
     assert_eq!(executions.load(Ordering::SeqCst), 2);
@@ -189,21 +177,21 @@ async fn project_output_read_is_readonly_and_does_not_reopen_the_closed_project_
     read["revision"] = a["revision"].clone();
     read["readOnly"] = json!(true);
     assert_eq!(
-        mcp(&state, "harness_command_output", read.clone()).await["isError"],
-        false
+        api(&state, "harness_command_output", read.clone()).await["ok"],
+        true
     );
     let mut foreign = read.clone();
     foreign["projectId"] = b["id"].clone();
     foreign["revision"] = b["revision"].clone();
     assert_eq!(
-        mcp(&state, "harness_command_output", foreign).await["isError"],
-        true
+        api(&state, "harness_command_output", foreign).await["ok"],
+            false
     );
     let mut stale = read;
     stale["revision"] = json!(999);
     assert_eq!(
-        mcp(&state, "harness_command_output", stale).await["isError"],
-        true
+        api(&state, "harness_command_output", stale).await["ok"],
+            false
     );
     assert_eq!(executions.load(Ordering::SeqCst), 1);
     harness.close().await;

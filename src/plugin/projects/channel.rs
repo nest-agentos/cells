@@ -206,7 +206,14 @@ fn publish(tx:&rusqlite::Transaction,project:&str,scope:&str,args:&Value)->Resul
 fn identifier<'a>(args: &'a Value, key: &str) -> Result<&'a str,Error> {
     args[key].as_str().filter(|s|crate::core::ids::is_identifier_within(s,128)).ok_or_else(Error::invalid)
 }
-fn storage<T>(_: T) -> Error {Error::new(axum::http::StatusCode::SERVICE_UNAVAILABLE,"CHANNEL_STORAGE")}
+#[track_caller]
+fn storage<T>(_: T) -> Error {
+    let caller = std::panic::Location::caller();
+    crate::core::events::emit(crate::core::events::Level::Warn, "channel.storage.failed",
+        json!({"operation":"channel.storage","stage":"persist","result":"failure","code":"CHANNEL_STORAGE",
+        "errorType":std::any::type_name::<T>(),"source":caller.file(),"line":caller.line()}));
+    Error::new(axum::http::StatusCode::SERVICE_UNAVAILABLE,"CHANNEL_STORAGE")
+}
 
 #[cfg(test)]
 mod tests {

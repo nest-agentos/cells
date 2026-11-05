@@ -509,122 +509,31 @@ fn rejects_profiles_overlapping_exclusive_exports() {
     assert!(cells::harness::config::validate(&config).is_err());
 }
 
-fn body(method: &str) -> Value {
-    json!({"jsonrpc":"2.0","id":1,"method":method,"params":{"_meta":{
-        "io.modelcontextprotocol/protocolVersion":"2026-07-28",
-        "io.modelcontextprotocol/clientInfo":{"name":"test","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}}}})
-}
-
 #[tokio::test]
-async fn mcp_auth_version_metadata_origin_and_discovery() {
+async fn fixed_capabilities_require_auth_and_describe_native_harness() {
     let root = tempfile::tempdir().unwrap();
-    let state = State::from_config(&config(root.path(), "codex")).unwrap();
-    let app = cells::router(state, &[]).unwrap();
-    let request = |auth: bool, version: &str, origin: Option<&str>| {
-        let mut builder = Request::post("/mcp")
-            .header("content-type", "application/json")
-            .header("mcp-method", "server/discover")
-            .header("mcp-protocol-version", version);
-        if auth {
-            builder = builder.header("authorization", "Bearer test-harness-token-0123456789");
-        }
-        if let Some(origin) = origin {
-            builder = builder.header("origin", origin);
-        }
-        builder
-            .body(Body::from(body("server/discover").to_string()))
-            .unwrap()
+    let app = cells::router(State::from_config(&config(root.path(), "codex")).unwrap(), &[]).unwrap();
+    let request = |auth: bool| {
+        let mut builder = Request::get("/v1/capabilities");
+        if auth { builder = builder.header("authorization", "Bearer test-harness-token-0123456789"); }
+        builder.body(Body::empty()).unwrap()
     };
-    assert_eq!(
-        app.clone()
-            .oneshot(request(false, "2026-07-28", None))
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::UNAUTHORIZED
-    );
-    assert_eq!(
-        app.clone()
-            .oneshot(request(true, "2025-11-25", None))
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::BAD_REQUEST
-    );
-    assert_eq!(
-        app.clone()
-            .oneshot(request(true, "2026-07-28", Some("https://evil.example")))
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::FORBIDDEN
-    );
-    let response = app
-        .oneshot(request(true, "2026-07-28", None))
-        .await
-        .unwrap();
+    assert_eq!(app.clone().oneshot(request(false)).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+    let response = app.oneshot(request(true)).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let result: Value =
-        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(result["result"]["supportedVersions"][0], "2026-07-28");
-    assert_eq!(
-        result["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
-        "cells"
-    );
-    assert_eq!(
-        result["result"]["_meta"]["itookit/cells"],
-        result["result"]["_meta"]["itookit/cells"]
-    );
-    assert_eq!(result["result"]["_meta"]["itookit/cells"]["version"], 1);
-    assert_eq!(
-        result["result"]["_meta"]["itookit/cells"]["harness"],
-        true
-    );
-    assert_eq!(
-        result["result"]["_meta"]["itookit/cells"]["fileProtocol"],
-        "fs-agent-http-v1"
-    );
+    let value: Value = serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(value["node"]["api"]["version"], 1);
+    assert_eq!(value["node"]["fileProtocol"], "fs-agent-http-v1");
+    assert_eq!(value["node"]["harness"], true);
+    assert!(value.get("jsonrpc").is_none());
 }
 
 #[tokio::test]
-async fn cells_capability_tool_returns_the_node_identity() {
+async fn management_mcp_endpoint_is_not_exposed() {
     let root = tempfile::tempdir().unwrap();
-    let app = cells::router(
-        State::from_config(&config(root.path(), "codex")).unwrap(),
-        &[],
-    )
-    .unwrap();
-    let mut descriptors = Vec::new();
-    for name in [
-        "cells_capabilities",
-    ] {
-        let mut request = body("tools/call");
-        request["params"]["name"] = json!(name);
-        request["params"]["arguments"] = json!({});
-        let response = app
-            .clone()
-            .oneshot(
-                Request::post("/mcp")
-                    .header("content-type", "application/json")
-                    .header("authorization", "Bearer test-harness-token-0123456789")
-                    .header("mcp-method", "tools/call")
-                    .header("mcp-name", name)
-                    .header("mcp-protocol-version", "2026-07-28")
-                    .body(Body::from(request.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let result: Value =
-            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
-                .unwrap();
-        assert!(result.get("error").is_none());
-        let descriptor = result["result"]["structuredContent"].clone();
-        assert_eq!(descriptor["fileProtocol"], "fs-agent-http-v1");
-        descriptors.push(descriptor);
-    }
-    assert_eq!(descriptors.len(), 1);
+    let app = cells::router(State::from_config(&config(root.path(), "codex")).unwrap(), &[]).unwrap();
+    let response = app.oneshot(Request::post("/mcp").body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
