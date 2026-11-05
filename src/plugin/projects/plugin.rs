@@ -9,7 +9,10 @@ impl NodePlugin for Projects {
         identity: usize,
         args: serde_json::Value,
     ) -> crate::plugins::EventFuture<'a> {
-        Box::pin(async move { super::watch::subscribe(state.clone(), identity, args).await })
+        Box::pin(async move {
+            if args.get("channelId").is_some() {super::channel_subscription::subscribe(state.clone(),identity,args).await}
+            else {super::watch::subscribe(state.clone(), identity, args).await}
+        })
     }
     fn path_headers(&self) -> &'static [&'static str] {
         &[
@@ -32,9 +35,7 @@ impl NodePlugin for Projects {
             access.metadata,
         )
     }
-    fn mcp(&self) -> Option<&dyn crate::plugin::common::McpContribution> {
-        Some(self)
-    }
+
     fn capabilities(
         &self,
         state: &State,

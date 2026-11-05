@@ -46,7 +46,7 @@ impl Bridge {
     ) -> Result<Arc<Self>, Error> {
         let mut prepared = runtime
             .as_ref()
-            .map(|r| r.prepare(config, vec!["app-server".into()]))
+            .map(|r| r.prepare(config, vec!["app-server".into(),"-c".into(),"thread_unload_delay_secs=0".into()]))
             .transpose()?;
         let mut command = match prepared.as_mut() {
             Some(p) => {
@@ -71,7 +71,7 @@ impl Bridge {
         }
         super::environment::inherit(&mut command);
         if runtime.is_none() {
-            command.arg("app-server");
+            command.args(["app-server","-c","thread_unload_delay_secs=0"]);
         }
         if let Some(runtime) = &runtime {
             command

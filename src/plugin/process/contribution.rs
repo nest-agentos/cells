@@ -15,6 +15,6 @@ pub(super) fn capabilities(state: &State, identity: usize, enabled: bool) -> Cap
             json!({"process":{"exec":execution},"executionModel":if execution{"sandbox"}else{"none"},
         "workspaceConsistency":if execution{"isolated"}else{"none"},"readOnlyEnforcement":if execution{"kernel-enforced"}else{"none"},"pathModel":if execution{"virtual-root"}else{"none"}}),
         ),
-        mcp: Default::default(),
+        node: Default::default(),
     }
 }

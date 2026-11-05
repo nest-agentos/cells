@@ -14,6 +14,9 @@ pub(crate) async fn authenticate(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, Error> {
+    if request.uri().path() == "/v1/channel/mcp" && super::agent_mcp::authorized(&state,request.headers()) {
+        return Ok(next.run(request).await);
+    }
     identity(&state, request.headers())?;
     Ok(next.run(request).await)
 }

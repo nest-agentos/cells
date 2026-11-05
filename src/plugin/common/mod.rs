@@ -66,9 +66,7 @@ pub trait NodePlugin: Send + Sync {
     ) -> Result<Option<tokio::sync::OwnedRwLockReadGuard<()>>, crate::core::error::Error> {
         Ok(None)
     }
-    fn mcp(&self) -> Option<&dyn McpContribution> {
-        None
-    }
+
     fn capabilities(&self, _state: &State, _identity: usize, _enabled: bool) -> Capabilities {
         Capabilities::default()
     }
@@ -129,7 +127,7 @@ impl From<crate::core::error::Error> for PluginFailure {
 }
 
 mod extension;
-pub use extension::{object, Capabilities, McpContribution, ToolFuture};
+pub use extension::{object, Capabilities};
 
 mod configuration;
 pub use configuration::{PluginConfiguration, PluginSettings};

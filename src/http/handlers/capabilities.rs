@@ -11,7 +11,10 @@ pub async fn capabilities(
         json!({"processEpoch":state.epoch,"version":1,"serverId":state.auth.server_id(),
         "authorization":state.auth.client(identity).authorization(),"plugins":state.plugins.statuses(),"terminal":{"pty":false},"events":crate::http::subscriptions::capability()}),
     );
-    Ok(Json(
-        state.plugins.capabilities(&state, identity, base, true)?,
-    ))
+    let mut http = state.plugins.capabilities(&state, identity, base.clone(), true)?;
+    let mut node = state.plugins.capabilities(&state, identity, base, false)?;
+    node["httpEndpoint"] = json!("./");
+    node["api"] = json!({"version":1,"endpoint":"v1/api/"});
+    http["node"] = node;
+    Ok(Json(http))
 }

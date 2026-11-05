@@ -7,6 +7,8 @@
 
 pub mod access;
 mod events;
+mod operations;
+pub(crate) mod agent_mcp;
 pub mod handlers;
 pub mod query;
 pub mod range;
@@ -16,7 +18,7 @@ use crate::app::State;
 use axum::{
     http::{HeaderName, HeaderValue, Method},
     middleware,
-    routing::get,
+    routing::{get, post},
     Router,
 };
 use std::sync::Arc;
@@ -58,6 +60,7 @@ pub fn router(state: Arc<State>, origins: &[String]) -> Result<Router, String> {
             "/v1/capabilities",
             get(handlers::capabilities::capabilities),
         )
+        .route("/v1/api/:domain/:operation", post(operations::invoke))
         .merge(state.plugins.routes())
         .merge(subscriptions::routes())
         .route_layer(middleware::from_fn_with_state(

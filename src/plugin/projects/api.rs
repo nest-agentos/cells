@@ -16,6 +16,29 @@ pub async fn call(
         .get::<crate::projects::ProjectService>()
         .ok_or_else(Error::unsupported)?;
     match name {
+        "project_channel_open" | "project_channel_messages" | "project_channel_close" | "project_channel_requests" | "project_channel_respond" | "project_channel_current" | "project_channel_acknowledge" => {
+            let project = service.get(identity, text(&args, "projectId")?)?;
+            authorize(state, identity, &project)?;
+            if project.revision != args["revision"].as_u64().ok_or_else(Error::invalid)? || project.access != "rw" {return Err(Error::forbidden("CHANNEL_BINDING_CHANGED"));}
+            match name {
+                "project_channel_open" => {
+                    let cwd=text(&args,"cwd")?;
+                    let prefix=format!("/projects/{}/",project.id);
+                    let relative=cwd.strip_prefix(&prefix).ok_or_else(||Error::forbidden("CHANNEL_WORKSPACE_INVALID"))?;
+                    crate::fs::path::validate(relative)?;
+                    if !service.channels_enabled || !state.plugins.enabled("mcp") {return Err(Error::unsupported());}
+                    let endpoint=reqwest::Url::parse(text(&args,"endpoint")?).map_err(|_|Error::invalid())?;
+                    if !["http","https"].contains(&endpoint.scheme()) || !endpoint.username().is_empty() || endpoint.password().is_some() || endpoint.query().is_some() || endpoint.fragment().is_some() {return Err(Error::invalid());}
+                    service.channels.create(&project.id, &args)
+                },
+                "project_channel_current" => service.channels.current(&project.id,text(&args,"cwd")?),
+                "project_channel_acknowledge" => service.channels.acknowledge(&project.id,text(&args,"scopeId")?,&args),
+                "project_channel_requests" => service.channels.requests(&project.id,text(&args,"scopeId")?),
+                "project_channel_respond" => service.channels.respond(&project.id,text(&args,"scopeId")?,&args),
+                "project_channel_messages" => service.channels.list(&project.id, text(&args,"scopeId")?),
+                _ => service.channels.close(&project.id,text(&args,"scopeId")?),
+            }
+        }
         "project_roots" => Ok(
             json!({"roots":state.auth.client(identity).exports().iter().map(|alias|json!({"alias":alias,"access":if state.auth.client(identity).may_write(alias){"rw"}else{"ro"},"capabilities":{"fileRead":true,"fileWrite":state.auth.client(identity).may_write(alias),"run":state.auth.client(identity).may_execute(alias)}})).collect::<Vec<_>>(),"execution":state.services.get::<crate::process::Execution>().is_some_and(|service| service.ready()) && state.auth.client(identity).has_execution(),"authorization":state.auth.client(identity).authorization(),"backend":"bubblewrap"}),
         ),

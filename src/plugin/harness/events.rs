@@ -182,6 +182,10 @@ impl Events {
     pub fn position(&self) -> Value {
         json!({"after":self.next,"eventEpoch":self.epoch})
     }
+    pub fn watch(&self)->tokio::sync::watch::Receiver<u64> {self.changed.subscribe()}
+    pub fn closed_since(&self,thread:&str,after:u64)->bool {
+        self.entries.iter().rev().take_while(|(seq,_,_,_)|*seq>after).any(|(_,message,_,_)|message["method"]=="thread/closed"&&message["params"]["threadId"]==thread)
+    }
     pub fn thread_idle(&self, id: &str) -> bool {
         !self.active.contains(id)
             && !self

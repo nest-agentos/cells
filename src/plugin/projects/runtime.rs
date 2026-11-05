@@ -252,6 +252,9 @@ impl ProjectRuntime {
     pub fn begin(&self, thread: &str, operation: &str) -> Result<(), Error> {
         let state = self.state()?;
         self.active.begin(&state.files, thread, operation)?;
+        if let Err(error)=state.services.require::<super::ProjectService>()?.channels.prepare_turn(&self.project.id,thread,operation) {
+            self.reject(thread,operation);return Err(error);
+        }
         if let Err(error) = self.state() {
             self.reject(thread, operation);
             return Err(error);
@@ -272,6 +275,13 @@ impl ProjectRuntime {
         self.retire(self.active.reject(thread, operation));
     }
     pub fn submission_failed(&self, thread: &str, operation: &str, error: &Error) {
+        if let Ok(state)=self.state() {
+            if let Some(service)=state.services.get::<super::ProjectService>() {
+                if let Err(failure)=service.channels.submission_failed(&self.project.id,thread,operation,error) {
+                    crate::core::events::emit(crate::core::events::Level::Warn,"channel.submission.persist",serde_json::json!({"operationId":operation,"sessionId":thread,"stage":"persist","result":"failure","code":failure.code}));
+                }
+            }
+        }
         if !matches!(error.code, "EIO" | "ETIMEDOUT") {
             self.reject(thread, operation);
         }
@@ -284,6 +294,13 @@ impl ProjectRuntime {
         drop(permit);
     }
     pub fn event(&self, message: &Value) {
+        if let Ok(state)=self.state() {
+            if let Some(service)=state.services.get::<super::ProjectService>() {
+                if let Err(error)=service.channels.observe(&self.project.id,message) {
+                    crate::core::events::emit(crate::core::events::Level::Warn,"channel.execution.persist",serde_json::json!({"projectId":self.project.id,"stage":"persist","result":"failure","code":error.code}));
+                }
+            }
+        }
         if message["method"] == "turn/completed" {
             if let (Some(thread), Some(turn), Some(state)) = (
                 message["params"]["threadId"].as_str(),
@@ -301,6 +318,9 @@ impl ProjectRuntime {
         self.stop(Some(thread), clean);
     }
     fn stop(&self, thread: Option<&str>, clean: bool) {
+        for session in self.active.sessions().into_iter().filter(|id| thread.is_none_or(|target|target==id)) {
+            self.event(&serde_json::json!({"method":"harness/disconnected","params":{"threadId":session}}));
+        }
         let (affected, permits) = self.active.stopped(thread, clean);
         if affected {
             if clean {

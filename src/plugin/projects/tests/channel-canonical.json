@@ -1,0 +1,15 @@
+{
+  "value": {
+    "id": "canonical",
+    "scopeId": "attempt-1",
+    "method": "echo",
+    "params": {
+      "10": 1.0,
+      "2": -0.0,
+      "😀": 1e-06,
+      "דּ": 1e+30
+    }
+  },
+  "canonical": "{\"id\":\"canonical\",\"method\":\"echo\",\"params\":{\"10\":1,\"2\":0,\"😀\":0.000001,\"דּ\":1e+30},\"scopeId\":\"attempt-1\"}",
+  "sha256": "847df38227a4ddadc9342c2563f3834f29dc1db8ebf014ee6aefe4e91b3d66a1"
+}

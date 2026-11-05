@@ -1,5 +1,7 @@
 //! Project catalog and authorization shared by files, processes and harnesses.
 mod activity;
+pub mod channel;
+mod channel_subscription;
 mod api;
 mod descriptor;
 pub(crate) mod directory_sync;

@@ -11,9 +11,7 @@ impl NodePlugin for Sync {
     fn request_headers(&self) -> &'static [&'static str] {
         &["x-sync-history-epoch"]
     }
-    fn mcp(&self) -> Option<&dyn crate::plugin::common::McpContribution> {
-        Some(self)
-    }
+
     fn capabilities(
         &self,
         state: &State,

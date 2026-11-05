@@ -18,6 +18,9 @@ struct Active {
 #[derive(Default)]
 pub(super) struct Activities(Mutex<HashMap<String, Active>>);
 impl Activities {
+    pub fn sessions(&self) -> Vec<String> {
+        self.0.lock().map(|active|active.keys().cloned().collect()).unwrap_or_default()
+    }
     pub fn begin(&self, gate: &FileGate, session: &str, operation: &str) -> Result<(), Error> {
         let mut active = self.0.lock().map_err(|_| Error::internal())?;
         if active.contains_key(session) {

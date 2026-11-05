@@ -1,51 +1,17 @@
 //! Protocol contributions are declared by feature owners and collected without feature-name branches.
 use crate::{app::State, core::error::Error};
 use serde_json::{Map, Value};
-use std::{future::Future, pin::Pin, sync::Arc};
 use tokio_util::sync::CancellationToken;
-pub type ToolFuture<'a> = Pin<Box<dyn Future<Output = Result<Value, Error>> + Send + 'a>>;
 #[derive(Default)]
 pub struct Capabilities {
     pub http: Map<String, Value>,
-    pub mcp: Map<String, Value>,
+    pub node: Map<String, Value>,
 }
 pub fn object(value: Value) -> Map<String, Value> {
     value
         .as_object()
         .cloned()
         .expect("Plugin declaration is an object")
-}
-pub trait McpContribution: Send + Sync {
-    fn tools(&self) -> &[Value] {
-        &[]
-    }
-    fn available(&self, _state: &State, _identity: usize, _name: &str) -> bool {
-        true
-    }
-    fn call<'a>(
-        &'a self,
-        _state: &'a Arc<State>,
-        _identity: usize,
-        _name: &'a str,
-        _args: Value,
-    ) -> ToolFuture<'a> {
-        Box::pin(async { Err(Error::unsupported()) })
-    }
-    fn error_outcome(&self, _name: &str, _error: Error) -> &'static str {
-        "not-committed"
-    }
-    fn resources(&self, _state: &State, _identity: usize) -> Vec<Value> {
-        vec![]
-    }
-    fn read<'a>(
-        &'a self,
-        _state: &'a Arc<State>,
-        _identity: usize,
-        _uri: &'a str,
-        _deadline: tokio::time::Instant,
-    ) -> ToolFuture<'a> {
-        Box::pin(async { Err(Error::not_found("RESOURCE_UNKNOWN")) })
-    }
 }
 pub(crate) fn merge(
     target: &mut Map<String, Value>,

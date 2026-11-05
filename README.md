@@ -300,7 +300,7 @@ Web/Tauri 在工具箱 MCP 配置并测试连接后，在支持 harness 的 cell
 
 资源读取复用文件 worker 的并发预算、超时和共享 gate，按本次请求的身份重新投影目录；授权已撤销、符号链接或物理身份已替换的项目不进入清单。不返回宿主物理路径、harness home、内部目录身份、数据库目录、凭据或文件内容。未知资源 URI 返回 -32602；读取的 Mcp-Name 必须与 params.uri 一致，支持标准 Base64 header 编码。跨身份读取同一个 URI 会得到各自的授权清单。
 
-MCP 代码分为 [传输入口](src/plugin/mcp/mod.rs)、[协议校验](src/plugin/mcp/protocol.rs)、[方法路由](src/plugin/mcp/requests.rs)、[通用工具分派](src/plugin/mcp/tools/mod.rs) 和 [资源适配](src/plugin/mcp/resources.rs)。工具 Schema 归各插件的 tools.json，调用、权限、能力和错误语义由各自 contribution.rs 提供；目录投影同样按插件聚合。相关协议和权限回归见 [MCP 测试](src/plugin/mcp/tests/mcp.rs)，独立插件扩展见 [contributions 测试](src/plugin/common/tests/contributions.rs)。
+远程 Harness 的 MCP 通道由 [传输插件](src/plugin/mcp/mod.rs) 和 [通道协议与工具](src/http/agent_mcp.rs) 提供；节点管理走固定 HTTP 接口，入口见 [管理操作](src/http/operations.rs)。能力与目录投影由各插件贡献。相关协议和权限回归位于 [MCP 测试](src/plugin/mcp/tests/mcp.rs) 与 [contributions 测试](src/plugin/common/tests/contributions.rs)。
 
 已验证 Codex CLI 0.159.2。项目沙箱在配置的真实绝对路径挂载 harness home，并保留 `/harness` 兼容入口，避免原生 SQLite 索引中的绝对日志路径失效。`harness_session_info` 只读取元信息；普通会话历史优先原生 API，paginated 会话及 `toolDetail: "summary"` 请求读取 home 下 sessions/archived_sessions JSONL。历史使用 8 MiB 的日志窗口，必要时通过有界缓冲向前查找真实 turn_context/task_started，返回最多 100 项/2 MiB，通过 `nextCursor` 加载更早内容。保留真实 turnId、时间和消息内容数组，兼容 custom_tool_call；摘要模式在分页预算前去除工具参数和输出，只返回工具名称、操作、首个非空命令行（最多 240 个字符）和目标文件。事件也支持摘要模式并保留原始游标及审批请求。原生 createdAt/updatedAt 分别统一转换为毫秒，缺失时间返回 null；空名称回退原生请求预览，branchName 独立返回；session.native 不重复附带整份 turns。路径禁止符号链接，未完成尾行等待刷新；不修改原生索引或日志。继续会话使用 `thread/resume` 的 `excludeTurns`，由原生 CLI 确认可用性。
 
@@ -556,3 +556,11 @@ Executable directory projects use immutable readable IDs (1–64 ASCII letters/d
 ### Harness 消息时间
 
 原生消息可携带 Unix 毫秒 `submittedAt`、`startedAt`、`completedAt` 和失败/取消的 `endedAt`。节点在生命周期事件进入 replay buffer 前保留原生时间，缺失时记录该事件的节点接收时间；该值不来自浏览器渲染。Codex、Claude 与 DSH 可确认的持久消息完成记录保留完成时间，工具摘要透传时间字段。旧 `timestamp` 不等同于完成时间，未知历史时间不补造；客户端重连合并保留已有明确时间，显示时钟不改变原生状态。
+
+## NestOS 固定接口与 Agent MCP 2.0
+
+NestOS 使用 `GET /v1/capabilities` 的 `node` 描述和 `POST /v1/api/harness/<operation>`、`POST /v1/api/projects/<operation>`，请求正文为操作参数，响应为 `{ok:true,value}` 或 `{ok:false,error:{code,outcome}}`。固定 API 不依赖 MCP 插件开关。Agent 的 scope 通道使用 `/v1/channel/mcp` 与 MCP 2.0 `2026-07-28`；scope capability 不能调用固定 API。通道冻结上下文与消息回执保存在项目私有目录的 `session-channels.sqlite`，不写入工作区。
+
+Agent 通道提供 session_context/report/receipt/request/response 五个工具。请求 pending 必须让出本轮，由宿主固定 API 冻结响应并续办同一个 Session；业务 acknowledge 与运输接受分开。Cells 记录精确 session/turn 状态，重启运行中变 unknown，禁止按缺回执重发。scope 轮换先核对已终结和同一 Session，再原子撤销旧 token。Codex thread 配置使用 `features.mcp_2026_07_28=true` 与扁平 `mcp_servers.cells_session`，已加载 thread 必须 unsubscribe、等待 closed、再 resume 才刷新 MCP 配置；app-server 使用 `thread_unload_delay_secs=0`。
+
+真实原生验收脚本 `src/plugin/harness/tests/real_channel.py` 需要已安装 Codex CLI。通过 temporary-process CLI 在同一有界作用域运行，验证发现、上下文、不可变请求响应、卸载续办及原 turn 历史；模型请求只到本地拒绝 fixture，不调用外部模型。

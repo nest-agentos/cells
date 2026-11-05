@@ -76,7 +76,7 @@ fn summary(
     let mut lines = vec![
         format!("  Server ID: {}", server_id.unwrap_or("not configured")),
         format!(
-            "  MCP endpoint: {}",
+            "  Agent MCP endpoint: {}",
             if config.plugins.get("mcp") == Some(&false) {
                 "disabled".into()
             } else {
@@ -98,7 +98,7 @@ fn summary(
                     "  Remote MCP candidate: {} (verify client reachability)",
                     endpoint(SocketAddr::new(ip, bound.port()))
                 ),
-                None => format!("  Remote MCP: http://<server-ip>:{}/mcp", bound.port()),
+                None => format!("  Remote MCP: http://<server-ip>:{}/v1/channel/mcp", bound.port()),
             },
         );
     }
@@ -106,7 +106,7 @@ fn summary(
 }
 
 fn endpoint(address: SocketAddr) -> String {
-    format!("http://{address}/mcp")
+    format!("http://{address}/v1/channel/mcp")
 }
 
 fn authentication(config: &Config) -> String {
@@ -171,8 +171,8 @@ mod tests {
             Some("node"),
             Some("192.168.1.12".parse().unwrap()),
         );
-        assert!(text.contains("http://127.0.0.1:8787/mcp"));
-        assert!(text.contains("http://192.168.1.12:8787/mcp"));
+        assert!(text.contains("http://127.0.0.1:8787/v1/channel/mcp"));
+        assert!(text.contains("http://192.168.1.12:8787/v1/channel/mcp"));
         assert!(text.contains("Basic; username=li; password from config field password"));
         assert!(!text.contains("private-password-value"));
         assert!(!text.contains("http://0.0.0.0"));
@@ -187,7 +187,7 @@ mod tests {
             None,
             Some("192.168.1.12".parse().unwrap()),
         );
-        assert!(text.contains("http://[::1]:8787/mcp"));
+        assert!(text.contains("http://[::1]:8787/v1/channel/mcp"));
         assert!(text.contains("Bearer (MCP API Key); token from config field api_key"));
         assert!(!text.contains("private-token-value"));
         assert!(!text.contains("Remote MCP"));

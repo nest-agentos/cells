@@ -350,3 +350,38 @@ async fn invalid_tool_requests_and_invalid_json_do_not_look_like_execution_resul
     assert_eq!(value["error"]["code"], -32700);
     assert!(value.get("id").is_none());
 }
+
+#[tokio::test]
+async fn fixed_api_has_no_mcp_envelopes_and_preserves_principal_checks() {
+    let (_root,state)=support::fixture();
+    let call=|token:&str| Request::post("/v1/api/projects/list").header("authorization",format!("Bearer {token}"))
+        .header("content-type","application/json").body(Body::from("{}")).unwrap();
+    let (status,value)=response(&state,call(ALICE)).await;
+    assert_eq!(status,StatusCode::OK);assert_eq!(value["ok"],true);assert!(value.get("jsonrpc").is_none());
+    assert!(value["value"]["projects"].is_array());
+    let (status,_)=response(&state,call("foreign-token")).await;assert_eq!(status,StatusCode::UNAUTHORIZED);
+    let (_,caps)=response(&state,Request::get("/v1/capabilities").header("authorization",format!("Bearer {ALICE}")).body(Body::empty()).unwrap()).await;
+    assert_eq!(caps["node"]["api"]["version"],1);assert_eq!(caps["node"]["httpEndpoint"],"./");
+}
+
+#[tokio::test]
+async fn scoped_mcp_reports_are_readable_only_through_the_authorized_fixed_api() {
+    let (_root,state)=support::fixture();
+    let project=projects::call(&state,state.auth.index("alice").unwrap(),"project_register",json!({"name":"scope-test","alias":"docs","path":"","access":"rw","mounts":[]})).await.unwrap()["project"].clone();
+    let service=state.services.get::<projects::ProjectService>().unwrap();
+    let id=project["id"].as_str().unwrap();let cwd=format!("/projects/{id}/work");
+    service.channels.create(id,&json!({"scopeId":"attempt","cwd":cwd,"endpoint":"http://localhost/v1/channel/mcp","snapshot":{"task":{"title":"Task"}}})).unwrap();
+    let config=service.channels.config(id,&cwd).unwrap().unwrap();
+    let authorization=config["mcp_servers.cells_session"]["http_headers"]["Authorization"].as_str().unwrap();
+    let token=authorization.strip_prefix("Bearer ").unwrap();
+    let mut publish=request(Some(token),"tools/call",json!({"name":"session_report","arguments":{"id":"result-1","message":{"type":"result","content":"Evidence"}}}));
+    *publish.uri_mut()="/v1/channel/mcp".parse().unwrap();
+    let (status,receipt)=response(&state,publish).await;assert_eq!(status,StatusCode::OK);assert_eq!(receipt["result"]["structuredContent"]["accepted"],true);
+    let call=Request::post("/v1/api/projects/channel_messages").header("authorization",format!("Bearer {ALICE}")).header("content-type","application/json").body(Body::from(json!({"projectId":id,"revision":project["revision"],"scopeId":"attempt"}).to_string())).unwrap();
+    let (_,value)=response(&state,call).await;assert_eq!(value["value"]["messages"][0]["id"],"result-1");
+    let forbidden=Request::post("/v1/api/projects/list").header("authorization",authorization).header("content-type","application/json").body(Body::from("{}")).unwrap();
+    assert_eq!(response(&state,forbidden).await.0,StatusCode::UNAUTHORIZED);
+    service.channels.close(id,"attempt").unwrap();
+    let mut discover=request(Some(token),"server/discover",json!({}));*discover.uri_mut()="/v1/channel/mcp".parse().unwrap();
+    assert_eq!(response(&state,discover).await.0,StatusCode::UNAUTHORIZED);
+}

@@ -21,9 +21,7 @@ impl NodePlugin for Harness {
                 .await
         })
     }
-    fn mcp(&self) -> Option<&dyn crate::plugin::common::McpContribution> {
-        Some(self)
-    }
+
     fn capabilities(
         &self,
         state: &State,

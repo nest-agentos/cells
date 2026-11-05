@@ -12,6 +12,8 @@ use crate::{
 use std::sync::{Arc, Mutex};
 
 pub struct ProjectService {
+    pub channels: super::channel::Channels,
+    pub channels_enabled: bool,
     pub(super) watch_slots: Arc<tokio::sync::Semaphore>,
     pub(super) store: Store,
     pub launcher: Arc<dyn super::runtime::ProjectLauncher>,
@@ -53,6 +55,8 @@ impl ProjectService {
             }
         }
         Ok(Self {
+            channels_enabled: config.network,
+            channels: super::channel::Channels::open(store.root()).map_err(|_| "Cannot open session channels")?,
             watch_slots: Arc::new(tokio::sync::Semaphore::new(16)),
             store,
             launcher: Arc::new(super::runtime::Bubblewrap {
@@ -62,6 +66,13 @@ impl ProjectService {
             execution_profiles: config.execution_profiles.clone(),
             owners: crate::config::authorization::identity_ids(deployment),
         })
+    }
+    pub fn authorize_channel(&self, state: &State, token: &str) -> bool {
+        let Some(id)=self.channels.token_project(token) else {return false;};
+        let Ok(projects)=self.store.all() else {return false;};
+        let Some(project)=projects.iter().find(|p|p.id==id) else {return false;};
+        let Ok(identity)=state.auth.index(&project.owner) else {return false;};
+        authorize(state,identity,project).is_ok()
     }
     pub fn restore_metadata(&self, state: &State) -> Result<(), Error> {
         for project in self.store.all()? {
