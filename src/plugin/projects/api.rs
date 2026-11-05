@@ -36,6 +36,7 @@ pub async fn call(
                 "project_channel_requests" => service.channels.requests(&project.id,text(&args,"scopeId")?),
                 "project_channel_respond" => service.channels.respond(&project.id,text(&args,"scopeId")?,&args),
                 "project_channel_messages" => service.channels.list(&project.id, text(&args,"scopeId")?),
+                _ if args["requireIdle"]==true => service.channels.close_idle(&project.id,text(&args,"scopeId")?,&args),
                 _ => service.channels.close(&project.id,text(&args,"scopeId")?),
             }
         }

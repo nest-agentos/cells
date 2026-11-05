@@ -21,6 +21,7 @@ impl Channels {
             CREATE TABLE IF NOT EXISTS messages(seq INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT, scope TEXT,
             id TEXT, body TEXT, ack TEXT, UNIQUE(project,scope,id));
             CREATE TABLE IF NOT EXISTS agent_servers(owner TEXT,id TEXT,revision INTEGER,body TEXT,PRIMARY KEY(owner,id));
+            CREATE TABLE IF NOT EXISTS publications(project TEXT,scope TEXT,id TEXT,origin TEXT NOT NULL,PRIMARY KEY(project,scope,id));
             CREATE UNIQUE INDEX IF NOT EXISTS active_scope ON scopes(project,cwd) WHERE closed=0;").map_err(storage)?;
         db.execute("UPDATE scopes SET execution=json_set(execution,'$.status','unknown','$.recoveryReason','CELLS_RESTARTED') WHERE json_extract(execution,'$.status') IN ('running','submitting')",[]).map_err(storage)?;
         Ok(Self(Mutex::new(db),tokio::sync::watch::channel(0).0))
@@ -71,7 +72,8 @@ impl Channels {
             "session_context" => {
                 let section = args["section"].as_str().unwrap_or("index");
                 let snapshot: Value = serde_json::from_str(&snapshot).map_err(storage)?;
-                if section == "index" {json!({"scopeId":scope,"sections":snapshot.as_object().unwrap().keys().collect::<Vec<_>>()})}
+                if section == "index" {let mut sections=snapshot.as_object().unwrap().keys().cloned().collect::<Vec<_>>();sections.push("channel-status".into());json!({"scopeId":scope,"sections":sections})}
+                else if section=="channel-status" {channel_status(&tx,&project,&scope)?}
                 else {snapshot.get(section).cloned().ok_or_else(|| Error::not_found("CHANNEL_SECTION_UNKNOWN"))?}
             }
             "session_request" => exchange::request(&tx,&project,&scope,args)?,
@@ -102,7 +104,7 @@ impl Channels {
         if raw.len()>65536 || !args["ack"].is_object() {return Err(Error::invalid());}
         let mut connection=self.0.lock().map_err(storage)?;let db=connection.transaction().map_err(storage)?;
         let previous:Option<Option<String>>=db.query_row("SELECT ack FROM messages WHERE project=?1 AND scope=?2 AND id=?3",params![project,scope,id],|r|r.get(0)).optional().map_err(storage)?;
-        match previous {None=>return Err(Error::not_found("CHANNEL_MESSAGE_UNKNOWN")),Some(Some(previous)) if previous!=raw=>return Err(Error::conflict("CHANNEL_ACK_CHANGED")),_=>()}
+        match previous {None=>return Err(Error::not_found("CHANNEL_MESSAGE_UNKNOWN")),Some(Some(previous))=>{if previous!=raw{return Err(Error::conflict("CHANNEL_ACK_CHANGED"));}return Ok(json!({"id":id,"acknowledged":true}));},_=>()}
         db.execute("UPDATE messages SET ack=?4 WHERE project=?1 AND scope=?2 AND id=?3",params![project,scope,id,raw]).map_err(storage)?;
         db.commit().map_err(storage)?;self.touch();Ok(json!({"id":id,"acknowledged":true}))
     }
@@ -114,10 +116,10 @@ impl Channels {
     }
     pub fn list(&self, project: &str, scope: &str) -> Result<Value, Error> {
         let db = self.0.lock().map_err(storage)?;
-        let mut stmt = db.prepare("SELECT id,body FROM messages WHERE project=?1 AND scope=?2 ORDER BY seq LIMIT 200").map_err(storage)?;
-        let rows = stmt.query_map(params![project,scope],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).map_err(storage)?;
+        let mut stmt = db.prepare("SELECT m.id,m.body,p.origin FROM messages m LEFT JOIN publications p ON p.project=m.project AND p.scope=m.scope AND p.id=m.id WHERE m.project=?1 AND m.scope=?2 ORDER BY m.seq LIMIT 200").map_err(storage)?;
+        let rows = stmt.query_map(params![project,scope],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<String>>(2)?))).map_err(storage)?;
         let mut messages = Vec::new();
-        for row in rows {let (id,body) = row.map_err(storage)?; messages.push(json!({"id":id,"message":serde_json::from_str::<Value>(&body).map_err(storage)?}));}
+        for row in rows {let (id,body,origin) = row.map_err(storage)?; messages.push(json!({"id":id,"message":serde_json::from_str::<Value>(&body).map_err(storage)?,"origin":origin.map(|raw|serde_json::from_str::<Value>(&raw)).transpose().map_err(storage)?}));}
         let execution:Option<String>=db.query_row("SELECT execution FROM scopes WHERE project=?1 AND id=?2",params![project,scope],|r|r.get(0)).optional().map_err(storage)?;
         Ok(json!({"messages":messages,"execution":execution.and_then(|s|serde_json::from_str::<Value>(&s).ok())}))
     }
@@ -164,6 +166,18 @@ impl Channels {
         }
         tx.commit().map_err(storage)?; self.touch(); Ok(())
     }
+    pub fn close_idle(&self, project:&str, scope:&str, args:&Value)->Result<Value,Error> {
+        let mut db=self.0.lock().map_err(storage)?;let tx=db.transaction().map_err(storage)?;
+        let row:Option<(String,bool)>=tx.query_row("SELECT execution,closed FROM scopes WHERE project=?1 AND id=?2",params![project,scope],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(storage)?;
+        let Some((raw,closed))=row else {return Err(Error::not_found("CHANNEL_SCOPE_UNKNOWN"));};
+        if !closed {
+            let execution:Value=serde_json::from_str(&raw).map_err(storage)?;
+            if !["completed","failed","interrupted","cancelled","rejected","idle"].contains(&execution["status"].as_str().unwrap_or("")) {return Err(Error::busy());}
+            if args["expectedExecutionRevision"]!=execution["revision"] {return Err(Error::conflict("CHANNEL_EXECUTION_CHANGED"));}
+            tx.execute("UPDATE scopes SET closed=1 WHERE project=?1 AND id=?2",params![project,scope]).map_err(storage)?;
+        }
+        tx.commit().map_err(storage)?;self.touch();Ok(json!({"closed":true}))
+    }
     pub fn close(&self, project: &str, scope: &str) -> Result<Value, Error> {
         self.0.lock().map_err(storage)?.execute("UPDATE scopes SET closed=1 WHERE project=?1 AND id=?2",params![project,scope]).map_err(storage)?;
         self.touch(); Ok(json!({"closed":true}))
@@ -184,6 +198,15 @@ fn replace_scope(db:&rusqlite::Transaction,project:&str,cwd:&str,args:&Value)->R
     Ok(json!({"sessionId":args["sessionId"],"previousTurnId":if args["sessionId"]==execution["sessionId"] {execution["turnId"].clone()}else{Value::Null},"status":"idle","revision":1}))
 }
 
+fn channel_status(db:&rusqlite::Transaction,project:&str,scope:&str)->Result<Value,Error> {
+    let mut stmt=db.prepare("SELECT id,body,ack FROM messages WHERE project=?1 AND scope=?2 ORDER BY seq LIMIT 200").map_err(storage)?;
+    let rows=stmt.query_map(params![project,scope],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,Option<String>>(2)?))).map_err(storage)?;
+    let mut messages=Vec::new();
+    for row in rows {let(id,raw,ack)=row.map_err(storage)?;let body:Value=serde_json::from_str(&raw).map_err(storage)?;
+        messages.push(json!({"id":id,"type":body["type"],"replyTo":body["replyTo"],"ack":ack.map(|v|serde_json::from_str::<Value>(&v)).transpose().map_err(storage)?}));}
+    Ok(json!({"scopeId":scope,"messages":messages}))
+}
+
 fn publish(tx:&rusqlite::Transaction,project:&str,scope:&str,args:&Value)->Result<Value,Error> {
                 let id = identifier(args, "id")?; let message = &args["message"];
                 if !message.is_object() || message.as_object().unwrap().keys().any(|key|!["type","content","payload","replyTo"].contains(&key.as_str()))
@@ -200,6 +223,10 @@ fn publish(tx:&rusqlite::Transaction,project:&str,scope:&str,args:&Value)->Resul
                     if bytes+body.len() as u64>4*1024*1024 {return Err(Error::too_large("CHANNEL_MESSAGE_LIMIT"));}
                     if count >= 200 {return Err(Error::too_many("CHANNEL_MESSAGE_LIMIT"));}
                     tx.execute("INSERT INTO messages(project,scope,id,body) VALUES(?1,?2,?3,?4)",params![project,scope,id,body]).map_err(storage)?;
+                    let execution:String=tx.query_row("SELECT execution FROM scopes WHERE project=?1 AND id=?2",params![project,scope],|row|row.get(0)).map_err(storage)?;
+                    let execution:Value=serde_json::from_str(&execution).map_err(storage)?;
+                    let origin=json!({"sessionId":execution["sessionId"],"turnId":execution["turnId"],"operationId":execution["operationId"],"revision":execution["revision"]});
+                    tx.execute("INSERT INTO publications(project,scope,id,origin) VALUES(?1,?2,?3,?4)",params![project,scope,id,origin.to_string()]).map_err(storage)?;
                 }
                 Ok(json!({"id":id,"accepted":true,"scopeId":scope}))
 }
@@ -254,6 +281,35 @@ mod tests {
         assert_eq!(store.agent(&token,"session_context",&json!({"section":"task"})).unwrap()["title"],"test");
         assert!(store.agent(&token,"project_exec",&json!({})).is_err());
         store.close("p","attempt-1").unwrap();assert!(!store.token_valid(&token));
+    }
+    #[test]
+    fn idle_close_is_fenced_against_a_new_turn_and_retries_are_idempotent() {
+        let root=tempfile::tempdir().unwrap();let store=Channels::open(root.path()).unwrap();store.create("p",&args()).unwrap();
+        store.bind("p","/projects/p/work","s").unwrap();store.prepare_turn("p","s","op1").unwrap();
+        store.observe("p",&json!({"method":"turn/started","params":{"threadId":"s","turn":{"id":"t1"}}})).unwrap();
+        assert_eq!(store.close_idle("p","attempt-1",&json!({})).unwrap_err().code,"EBUSY");
+        store.observe("p",&json!({"method":"turn/completed","params":{"threadId":"s","turn":{"id":"t1","status":"completed"}}})).unwrap();
+        let revision=store.list("p","attempt-1").unwrap()["execution"]["revision"].clone();
+        assert_eq!(store.close_idle("p","attempt-1",&json!({"expectedExecutionRevision":0})).unwrap_err().code,"CHANNEL_EXECUTION_CHANGED");
+        let request=json!({"expectedExecutionRevision":revision});store.close_idle("p","attempt-1",&request).unwrap();
+        store.close_idle("p","attempt-1",&request).unwrap();assert!(!store.token_valid(&token(&store)));
+    }
+    #[test]
+    fn publication_origin_survives_replay_and_restart_without_exposing_content_in_status() {
+        let root=tempfile::tempdir().unwrap();let store=Channels::open(root.path()).unwrap();store.create("p",&args()).unwrap();
+        let secret=token(&store);store.bind("p","/projects/p/work","s").unwrap();store.prepare_turn("p","s","op1").unwrap();
+        store.observe("p",&json!({"method":"turn/started","params":{"threadId":"s","turn":{"id":"t1"}}})).unwrap();
+        let report=json!({"id":"q","message":{"type":"clarification","content":"Private question"}});
+        store.agent(&secret,"session_report",&report).unwrap();
+        let original=store.list("p","attempt-1").unwrap()["messages"][0]["origin"].clone();
+        assert_eq!(original["sessionId"],"s");assert_eq!(original["turnId"],"t1");assert_eq!(original["operationId"],"op1");
+        store.prepare_turn("p","s","op2").unwrap();
+        store.observe("p",&json!({"method":"turn/started","params":{"threadId":"s","turn":{"id":"t2"}}})).unwrap();
+        store.agent(&secret,"session_report",&report).unwrap();
+        drop(store);let store=Channels::open(root.path()).unwrap();
+        assert_eq!(store.list("p","attempt-1").unwrap()["messages"][0]["origin"],original);
+        let status=store.agent(&secret,"session_context",&json!({"section":"channel-status"})).unwrap();
+        assert!(!status.to_string().contains("Private question"));assert!(status.to_string().contains("clarification"));
     }
     #[test]
     fn terminal_is_bound_to_the_exact_turn_and_running_restarts_unknown() {
