@@ -547,6 +547,7 @@ impl Codex {
             }
         }
         thread["turns"] = page["turns"].clone();
+        restore_history_head(&mut thread,args);
         let mut session = self.session(&thread);
         if let Some(revision) = revision {
             session["historyRevision"] = json!(revision);
@@ -836,6 +837,14 @@ fn log_history_terminals(args: &Value, page: &Value, started: std::time::Instant
     }
 }
 
+fn restore_history_head(thread: &mut Value, args: &Value) {
+    if args["cursor"].is_string() || thread["lastTurnId"].is_string() || thread["status"]["type"]=="active" {return;}
+    let latest=thread["turns"].as_array().and_then(|turns|turns.last());
+    let Some(turn)=latest.filter(|turn|turn["id"].is_string() && matches!(turn["status"].as_str(),Some("completed"|"failed"|"interrupted"|"cancelled"))) else {return;};
+    thread["lastTurnId"]=turn["id"].clone();
+    thread["lastTurnResult"]=last_turn_result(thread);
+}
+
 fn last_turn_result(thread: &Value) -> Value {
     if let Some(result) = thread
         .get("lastTurnResult")
@@ -913,5 +922,19 @@ mod recovery_tests {
             session["writerLock"]["status"] = json!(status);
             assert_ne!(recovery_state(&session), "detached");
         }
+    }
+}
+
+#[cfg(test)]
+mod persisted_head_tests {
+    use super::*;
+    #[test]
+    fn cold_history_restores_the_head_without_using_older_pages_or_unfinished_turns() {
+        let original=json!({"status":{"type":"notLoaded"},"turns":[{"id":"old","status":"completed"},{"id":"last","status":"failed"}]});
+        let mut thread=original.clone();restore_history_head(&mut thread,&json!({}));
+        assert_eq!(thread["lastTurnId"],"last");assert_eq!(thread["lastTurnResult"],"failed");
+        let mut older=original.clone();restore_history_head(&mut older,&json!({"cursor":"older"}));assert!(older["lastTurnId"].is_null());
+        let mut active=original.clone();active["status"]["type"]=json!("active");restore_history_head(&mut active,&json!({}));assert!(active["lastTurnId"].is_null());
+        let mut pending=original;pending["turns"][1]["status"]=json!("inProgress");restore_history_head(&mut pending,&json!({}));assert!(pending["lastTurnId"].is_null());
     }
 }
