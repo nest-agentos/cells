@@ -150,6 +150,9 @@ impl Harnesses {
         let client = state.auth.try_client(identity)?;
         if name == "harness_profiles" {
             let mut result = self.profiles();
+            let channels = state.plugins.enabled("mcp") && state.services.get::<crate::projects::ProjectService>()
+                .is_some_and(|service| service.channels_enabled);
+            constrain_session_channels(&mut result, channels);
             result["profiles"]
                 .as_array_mut()
                 .unwrap()
@@ -864,8 +867,35 @@ fn is_mutation(name: &str) -> bool {
     )
 }
 
+/// Driver support is intersected with node availability without starting a project runtime.
+fn constrain_session_channels(result: &mut Value, available: bool) {
+    if let Some(profiles) = result["profiles"].as_array_mut() {
+        for profile in profiles {
+            if profile["capabilities"]["sessionChannels"] == true {
+                profile["capabilities"]["sessionChannels"] = json!(available);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn configured_codex_channels_do_not_require_an_active_project_runtime() {
+        let config = serde_json::from_value(serde_json::json!({"id":"codex","kind":"codex","home":"/unused","projects":true})).unwrap();
+        let harness = super::Harnesses::new(vec![config], "epoch".into()).unwrap();
+        assert_eq!(harness.profiles()["profiles"][0]["capabilities"]["sessionChannels"], true);
+    }
+    #[test]
+    fn channel_availability_never_grants_support_to_an_unsupported_driver() {
+        let mut profiles = serde_json::json!({"profiles":[{"capabilities":{"sessionChannels":true}},{"capabilities":{}},{"capabilities":{"sessionChannels":false}}]});
+        super::constrain_session_channels(&mut profiles, false);
+        assert_eq!(profiles["profiles"][0]["capabilities"]["sessionChannels"], false);
+        super::constrain_session_channels(&mut profiles, true);
+        assert_eq!(profiles["profiles"][2]["capabilities"]["sessionChannels"], false);
+        assert!(profiles["profiles"][1]["capabilities"].get("sessionChannels").is_none());
+    }
+
     use super::*;
     use crate::harness::driver::HarnessDriver;
     use futures_util::future::BoxFuture;

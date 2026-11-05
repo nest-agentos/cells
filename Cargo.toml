@@ -1,6 +1,6 @@
 [package]
 name = "cells"
-version = "0.4.3"
+version = "0.4.4"
 edition = "2021"
 description = "A single intelligent node of NestOS, integrating information and agents like a cell in a honeycomb"
 repository = "https://github.com/nest-agentos/cells"

@@ -51,13 +51,11 @@ path={home:?}
         .unwrap();
     let mut ready = false;
     for _ in 0..100 {
-        if let Ok(response)=http.post(format!("http://{address}/mcp"))
+        if let Ok(response) = http.post(format!("http://{address}/v1/api/harness/sessions"))
             .bearer_auth("shutdown-fixture-token-0123456789")
-            .header("mcp-protocol-version","2026-07-28").header("mcp-method","tools/call").header("mcp-name","harness_sessions")
-            .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"harness_sessions","arguments":{"profileId":"dsh"},"_meta":{
-                "io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"shutdown-test","version":"1"}}}}))
+            .json(&json!({"profileId":"dsh"}))
             .send().await {
-            if response.status().is_success() && pid_file.exists(){ready=true;break;}
+            if response.status().is_success() && pid_file.exists() { ready = true; break; }
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }

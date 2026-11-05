@@ -71,9 +71,9 @@ metadata 修改不会改变正文 revision，也不会使原本合法的正文�
 
 `exclusive` 要求所有修改经本服务完成；目录上的 advisory lock 阻止合作的同根实例，不能阻止编辑器、Git 或其他外部程序。配置内拒绝重叠根与重复别名；不同实例的父子导出根仍需部署侧禁止。共享修改目录使用 `ro`。服务支持 HTTP；公网部署在 TLS 反向代理之后。Origin 白名单只解决浏览器访问，不代替身份认证。用户名/密码使用 UTF-8 HTTP Basic，密码至少 8 字节：用户名取 `username`，未写时读环境变量 `FS_SERVER_USER`；密码取内联 `password` 或 `password_env` 指向的环境变量。Basic 凭据不加密，非可信本机网络应使用 HTTPS。推荐 `api_key` 或 `api_key_env`（至少 24 字节、不设置 `username`），使用 Bearer 认证；旧名称 `token`/`token_env` 仍兼容，但不能和对应新名称同时配置。API Key 与密码认证互斥；同时设置 `username` 与 `token`/`token_env` 会启动失败，避免看起来是 Basic 实际只收 Bearer。内联 secret 写在服务端配置文件中。API Key 按启动连接提示输出到 console，不放入结构化事件或 HTTP 响应；旧 Basic 密码不输出。
 
-在“工具箱 → MCP”新增 HTTP 配置，填写完整 MCP 地址（例如 `http://127.0.0.1:8787/mcp`），将服务启动时输出的 API Key 填入同名字段并测试连接。通用发现响应已携带 cells 能力描述；应用扩展验证后启用项目绑定，不需要额外用户名、密码或勾选框。旧服务器使用其已声明的能力工具。测试后的保存和改名复用验证结果，普通 MCP 不发 cells 专用探测。只有验证成功的 cells 配置可以用于目录绑定，普通 MCP 即使同名也不能绑定。可配置多条连接；工作台新建远程项目选择 MCP 配置和 `/alias/path`。项目展示“服务器名:项目名”，同一服务器、账号与规范化路径复用已有项目，改名不移动目录。
+在“工具箱 → Cells”（技能前面）配置节点地址，例如 `http://127.0.0.1:8787`，填写 API Key 或用户名/密码并检查连接。NestOS 通过固定 HTTP API 发现节点和访问项目/Harness，不创建 Cells MCP 服务器条目。工作台新建远程项目选择 Cells 连接和 `/alias/path`；同一节点、账号与规范化路径复用既有项目，改名不移动目录。
 
-连接配置、API Key 和项目引用通过现有 MCP 配置持久保存；应用重启时从已验证的 MCP 配置恢复驱动凭据，无需重新输入。旧 Basic 配置的密码仍只保存在宿主运行期。CLI 持久配置引用由 `NESTOS_REMOTE_<credentialRef中横线替换为下划线>` 环境变量解析。直接 `nestos fs` 使用 `FS_SERVER_USER` + `FS_SERVER_PASSWORD`；未设置用户名时兼容 `FS_SERVER_TOKEN`。
+连接配置、凭据和项目引用保存在独立 Cells 权威目录，重启从该目录恢复。旧 MCP Cells 记录经过服务器和授权身份校验后只迁移一次，迁入成功后清理旧条目。CLI 持久配置引用由 `NESTOS_REMOTE_<credentialRef中横线替换为下划线>` 环境变量解析。直接 `nestos fs` 使用 `FS_SERVER_USER` + `FS_SERVER_PASSWORD`；未设置用户名时兼容 `FS_SERVER_TOKEN`。
 
 ```bash
 # 使用已构建的 CLI；也可以通过现有 CLI 开发入口运行。
@@ -147,7 +147,7 @@ NestOS 项目右键菜单选择“启用远程命令”后，File Tools 和 Bash
 | `plugin/sync/` | 同步存储、维护、传输和同步工具契约 |
 | `plugin/projects/` | 项目目录、授权、目录同步集成和项目工具 |
 | `plugin/harness/` | 会话状态与工具；drivers/ 包含 Codex、Claude、DSH |
-| `plugin/mcp/` | 通用 MCP 传输、发现与资源适配，功能由插件贡献 |
+| `plugin/mcp/` | 仅对 Agent scope 开放的 MCP 会话通道 |
 | `http/` | 共享认证、CORS、缓存策略、范围读取与宿主能力发现 |
 
 策略与机制的分界举例：`fs::path` 决定「什么路径合法」，`fs::export` 决定「如何用 `openat2` 打开」；`process::policy` 决定「哪些挂载被授权」，`process::sandbox` 决定「如何拼装 bwrap 参数」；`workspace::lease` 管租约状态机，`workspace::journal` 管 `write → fsync → rename → fsync` 的持久化与故障分级；`operations` 管收据语义，handler 只负责解析与转发。
@@ -277,28 +277,13 @@ DSH 0.2.0-rc.2 的 `command/run.source` 只有 `kind=user`，原生 `commandId` 
 
 `execution = false` 关闭原有 shell 服务，但仍可启用 harness；无需 exports 即可仅运行控制中心。workspace 必须与 exclusive rw exports 分离（启动时拒绝重叠），可用 ro export 浏览相同目录。`server_id` 可设置稳定服务身份。
 
-Web/Tauri 在工具箱 MCP 配置并测试连接后，在支持 harness 的 cells 配置中点击“控制中心”。支持 profile/workspace、新建、分页/归档列表、历史、继续、发送、增量输出、命令/文件审批、用户问题、显式中断和未知请求收据确认。历史浏览不会接管会话；继续仅允许授权 cwd、拒绝接管其他宿主的活跃线程。关闭面板只释放客户端连接，服务端 turn 继续运行。CLI 宿主已统一 adapter 接入，独立 harness 命令行界面尚未提供。
+Web/Tauri 在工具箱 Cells 配置并检查连接后，通过远程项目工作台访问 Harness。支持 profile/workspace、新建、分页/归档列表、历史、继续、发送、增量输出、命令/文件审批、用户问题、显式中断和未知请求收据确认。历史浏览不会接管会话；继续仅允许授权 cwd、拒绝接管其他宿主的活跃线程。关闭面板只释放客户端连接，服务端 turn 继续运行。CLI 宿主已统一 adapter 接入，独立 harness 命令行界面尚未提供。
 
-服务提供认证后的 `POST /mcp`：实现 MCP 协议 2026-07-28，与 MCP 客户端 SDK 2.0.0 对接，支持 server/discover、tools/list/call、resources/list/read、resources/templates/list、ping；不宣告 Tasks 扩展。发现工具为 cells_capabilities，其余工具按项目、目录同步和 harness 分组。请求验证 protocol/version、method/name 和客户端 metadata；clientInfo 可省略，携带时验证 name/version。带 Origin 的请求还验证允许列表。Codex 控制采用官方 app-server stdio JSON-RPC，命令和目录只来自服务端配置。
+NestOS 使用固定 HTTP API 与节点通信，管理接口不使用 MCP envelope；旧的全局 `/mcp` 与目录 MCP resources 不再提供。
 
-`tools/list` 根据部署配置与当前身份返回可用工具：项目服务未配置时不列出项目工具，目录同步只对所属身份开放，harness 只对有 profile 授权的身份开放；project_exec/project_search 还检查执行服务与搜索程序是否可用。相同工具的参数契约固定，不因连接、会话或调用顺序变化。每个工具仅声明实际支持的必需/可选字段；project_search 的 mode 为 name/path/content，harness_session_search 为 title/content/prompt。项目范围的 harness 参数用 dependentRequired 声明 projectId/revision 的关联，具体 profile 的原生能力继续由 harness_profiles 返回。未知工具和畸形 tools/call 使用 JSON-RPC 错误；业务输入与执行失败仍返回 isError。
+### Agent 会话通道
 
-### MCP 目录资源
-
-`server/discover` 声明 `resources: {}`，不声明订阅或列表变化通知。`resources/list` 返回一个 `application/json` 资源 `cells://<serverId>/directories`，名称为 accessible_directories；通过 `resources/read` 按需读取，不会自动扫描或附带文件内容。未显式配置 server_id 时沿用认证层生成的安装身份。首版没有参数化资源，resources/templates/list 返回空数组。列表和读取结果均为 ttlMs=0、cacheScope=private；HTTP 响应继续使用 Cache-Control: no-store。
-
-读取结果为 version=1 的 JSON 文本，包含 serverId、authorization（principalId/revision）和以下集合：
-
-| 字段 | 内容与路径语义 |
-| --- | --- |
-| exports[] | 当前身份可读的 alias、path=""、逻辑 virtualPath（例如 /docs）、有效 access、nameSemantics、strongRevision、authorization 与 capabilities.fileRead/fileWrite/run |
-| projects[] | 当前身份拥有且通过现时授权/目录身份校验的 id、name、revision、root、mounts[] 和项目 capabilities |
-| root / mounts[] | 来源 alias、export 相对 path、逻辑 virtualPath、执行空间位置 at（根为 /workspace）、有效 access 与文件/执行 capabilities；附加挂载保留各自权限 |
-| workspaces[] | 当前身份获授权的旧版 harness profileId、workspaceId 和 capabilities.sessionCreate；workspace 标识本身不授予 HTTP 文件访问权限 |
-
-例如项目 root 可以是 `{ "alias": "docs", "path": "notes", "virtualPath": "/docs/notes", "at": "/workspace", "access": "ro", "capabilities": { "fileRead": true, "fileWrite": false, "run": false } }`。逻辑 virtualPath 不是宿主绝对路径，at 只用于执行空间；run 同时检查服务就绪与身份执行授权，项目还要求所有挂载均获执行授权。权限描述仅用于发现，后续文件、项目与 harness 操作仍逐请求鉴权并校验自己的修订号。
-
-资源读取复用文件 worker 的并发预算、超时和共享 gate，按本次请求的身份重新投影目录；授权已撤销、符号链接或物理身份已替换的项目不进入清单。不返回宿主物理路径、harness home、内部目录身份、数据库目录、凭据或文件内容。未知资源 URI 返回 -32602；读取的 Mcp-Name 必须与 params.uri 一致，支持标准 Base64 header 编码。跨身份读取同一个 URI 会得到各自的授权清单。
+只有执行中的 Agent 使用 `POST /v1/channel/mcp`，协议为 MCP 2.0 / 2026-07-28。每个通道的凭据只授权其冻结 scope，可调用 session_context、session_report、session_receipt、session_request、session_response，不能调用节点管理 API。Node API 凭据也不能冒充 scope 凭据。Codex 的通道能力由驱动支持与节点实际启用条件共同决定，不依赖项目运行时是否已经创建。
 
 远程 Harness 的 MCP 通道由 [传输插件](src/plugin/mcp/mod.rs) 和 [通道协议与工具](src/http/agent_mcp.rs) 提供；节点管理走固定 HTTP 接口，入口见 [管理操作](src/http/operations.rs)。能力与目录投影由各插件贡献。相关协议和权限回归位于 [MCP 测试](src/plugin/mcp/tests/mcp.rs) 与 [contributions 测试](src/plugin/common/tests/contributions.rs)。
 
@@ -328,7 +313,7 @@ CELLS_HARNESS_TEST=1 pnpm --filter @nestos/cells-driver test tests/network.test.
 
 第一项包含原生协议模拟测试；第二项用独立临时 CODEX_HOME 启动真实 Codex，只验证创建/历史，不调用模型，也不读取个人会话；第三项用真实 MCP SDK、Rust HTTP 服务和模拟 Codex 验证完整操作。
 
-server/discover 的 `_meta['itookit/cells']`返回文件协议版本、同源相对 HTTP 端点、安装 serverId、项目和 harness 支持；cells_capabilities 返回同一描述。客户端优先复用标准发现响应，不根据名字判断服务；该描述是本服务扩展，不是 MCP 标准保证。建议显式配置全局唯一且稳定的 server_id，以识别同一安装的不同访问地址。多个原生 harness 由服务端插件注册表适配，共用这一 MCP 连接；当前内置 Codex、Claude Code 与 DSH。
+`GET /v1/capabilities` 返回节点的固定 API 描述及安装身份；建议显式设置稳定、唯一的 server_id。原生 harness 由服务端插件注册表适配，共用 Cells 连接，与 Agent scope MCP 凭据分离。
 
 
 ## 目录项目模式

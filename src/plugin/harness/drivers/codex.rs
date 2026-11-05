@@ -754,7 +754,7 @@ impl HarnessDriver for Codex {
         json!({"id":self.config.id,"kind":self.config.kind,
             "workspaces":self.config.workspaces.iter().map(|w| json!({"id":w.id})).collect::<Vec<_>>(),
             "projectRuntime":self.config.projects,
-            "capabilities":{"sessionChannels":self.runtime.as_ref().is_some_and(|r|r.state().ok().and_then(|s|s.services.get::<crate::projects::ProjectService>().map(|p|p.channels_enabled && s.plugins.enabled("mcp"))).unwrap_or(false)),"workingDirectory":self.config.projects,"executionRecovery":true,"metrics":true,"models":true,"slashCommands":true,"commandQueries":true,"usage":true,"history":true,"create":true,"resume":true,"interrupt":true,"steer":true,"interactions":true,"fork":true,"checkpointFork":true,"search":true,"searchPrompts":true,"searchKeywords":true,"rename":true,"archive":true,"unarchive":true,"delete":true,"attachments":["text","image"]}})
+            "capabilities":{"sessionChannels":self.config.projects,"workingDirectory":self.config.projects,"executionRecovery":true,"metrics":true,"models":true,"slashCommands":true,"commandQueries":true,"usage":true,"history":true,"create":true,"resume":true,"interrupt":true,"steer":true,"interactions":true,"fork":true,"checkpointFork":true,"search":true,"searchPrompts":true,"searchKeywords":true,"rename":true,"archive":true,"unarchive":true,"delete":true,"attachments":["text","image"]}})
     }
     fn read<'a>(&'a self, name: &'a str, args: Value) -> BoxFuture<'a, Result<Value, Error>> {
         Box::pin(async move { self.read(name, args).await })
