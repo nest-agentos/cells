@@ -14,3 +14,5 @@ pub mod search;
 pub mod workers;
 
 pub mod auth;
+
+pub mod trace;

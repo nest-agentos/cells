@@ -78,6 +78,7 @@ impl Workers {
         let cancellation = CancellationToken::new();
         // The token stops a blocking closure that outlives this future.
         let _cancel_on_drop = cancellation.clone().drop_guard();
+        let context = crate::core::trace::current();
         let task = async move {
             let permit = self.acquire(deadline).await?;
             tokio::task::spawn_blocking(move || {
@@ -85,7 +86,7 @@ impl Workers {
                 if cancellation.is_cancelled() {
                     return Err(Error::cancelled());
                 }
-                work(cancellation)
+                crate::core::trace::sync_scope(context, || work(cancellation))
             })
             .await
             .map_err(|_| Error::internal())?

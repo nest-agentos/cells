@@ -59,6 +59,10 @@ pub fn emit(level: Level, event: &str, fields: Value) {
     if !enabled(level) {
         return;
     }
+    let mut fields = fields;
+    if let Some(value) = fields.as_object_mut() {
+        value.extend(crate::core::trace::current());
+    }
     let record = Record::new(Local::now(), level, event, fields);
     // A closed logging sink must not interrupt process supervision or cleanup.
     if let Ok(line) = serde_json::to_string(&record) {

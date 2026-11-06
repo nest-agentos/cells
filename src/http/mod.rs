@@ -6,10 +6,10 @@
 //! into filesystem or process internals directly.
 
 pub mod access;
-mod events;
-mod operations;
 pub(crate) mod agent_mcp;
+mod events;
 pub mod handlers;
+mod operations;
 pub mod query;
 pub mod range;
 pub(crate) mod subscriptions;
@@ -25,7 +25,7 @@ use std::sync::Arc;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 /// Headers a browser client may send; anything else fails the CORS preflight.
-const ALLOWED_HEADERS: [&str; 10] = [
+const ALLOWED_HEADERS: [&str; 13] = [
     "x-cells-principal",
     "x-cells-grant-revision",
     "authorization",
@@ -36,6 +36,9 @@ const ALLOWED_HEADERS: [&str; 10] = [
     "if-none-match",
     "x-timeout-ms",
     "x-operation-id",
+    "traceparent",
+    "x-nestos-browser-session-id",
+    "x-parent-request-id",
 ];
 
 pub fn router(state: Arc<State>, origins: &[String]) -> Result<Router, String> {
@@ -54,6 +57,8 @@ pub fn router(state: Arc<State>, origins: &[String]) -> Result<Router, String> {
         .expose_headers([
             HeaderName::from_static("content-range"),
             HeaderName::from_static("etag"),
+            HeaderName::from_static("x-trace-id"),
+            HeaderName::from_static("x-request-id"),
         ]);
     Ok(Router::new()
         .route(
