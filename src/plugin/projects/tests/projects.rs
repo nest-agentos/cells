@@ -52,6 +52,43 @@ async fn register(state: &Arc<State>, path: &str, create: bool) -> Value {
 }
 
 #[tokio::test]
+async fn channel_relative_paths_follow_runtime_configuration_and_keep_legacy_clients_working() {
+    for isolation in [cells::projects::model::Isolation::Bubblewrap, cells::projects::model::Isolation::None] {
+        let root = tempfile::tempdir().unwrap();
+        let relative = "_nestos/kanban/conversations/check";
+        let physical = root.path().join("exports/group/existing").join(relative);
+        std::fs::create_dir_all(&physical).unwrap();
+        std::os::unix::fs::symlink(root.path().join("reference"), root.path().join("exports/group/existing/escape")).unwrap();
+        let mut config = deployment(root.path());
+        config.projects.as_mut().unwrap().isolation = isolation;
+        config.projects.as_mut().unwrap().network = true;
+        config.projects.as_mut().unwrap().channel_endpoint = Some("http://127.0.0.1:8787/v1/channel/mcp".into());
+        config.plugins.insert("mcp".into(), true);
+        let state = State::from_config(&config).unwrap();
+        let project = register(&state,"group/existing",false).await;
+        let stored = state.services.require::<cells::projects::ProjectService>().unwrap().get(0,project["id"].as_str().unwrap()).unwrap();
+        let runtime = ProjectRuntime::new(&state,0,stored).unwrap();
+        let expected = format!("{}/{relative}",runtime.cwd());
+        assert_eq!(runtime.channel_directory(relative).unwrap(),expected);
+        let mut args = json!({"projectId":project["id"],"revision":project["revision"],"scopeId":"channel-test",
+            "cwd":relative,"endpoint":"http://localhost/v1/channel/mcp","snapshot":{"context":{}}});
+        assert_eq!(call(&state,0,"project_channel_open",args.clone()).await.unwrap()["accepted"],true);
+        for cwd in [relative.to_string(),format!("/projects/{}/{relative}",project["id"].as_str().unwrap()),expected] {
+            args["cwd"] = json!(cwd);
+            assert_eq!(call(&state,0,"project_channel_current",args.clone()).await.unwrap()["scopeId"],"channel-test");
+            assert_eq!(call(&state,0,"project_channel_open",args.clone()).await.unwrap()["accepted"],true);
+        }
+        let channel = state.services.require::<cells::projects::ProjectService>().unwrap().channels.config(
+            project["id"].as_str().unwrap(),&runtime.working_directory(relative).unwrap(),&runtime.project.owner).unwrap().unwrap();
+        assert_eq!(channel["mcp_servers.cells_session"]["url"],"http://127.0.0.1:8787/v1/channel/mcp");
+        for cwd in ["../reference","/etc/passwd","/projects/another/work","escape/child",""] {
+            args["cwd"] = json!(cwd);
+            assert!(call(&state,0,"project_channel_open",args.clone()).await.is_err());
+        }
+    }
+}
+
+#[tokio::test]
 async fn harness_home_executable_can_read_sibling_resources_without_extra_mounts() {
     if std::env::var("CELLS_PROJECT_TEST").as_deref() != Ok("1") {return;}
     use std::os::unix::fs::PermissionsExt;
@@ -62,7 +99,7 @@ async fn harness_home_executable_can_read_sibling_resources_without_extra_mounts
     state.services.require::<cells::process::Execution>().unwrap().accept();
     let stored = state.services.require::<cells::projects::ProjectService>().unwrap()
         .get(0, project["id"].as_str().unwrap()).unwrap();
-    let runtime = ProjectRuntime::new(&state, 0, stored);
+    let runtime = ProjectRuntime::new(&state, 0, stored).unwrap();
     let mut profile = cells::harness::config::validate(&config).unwrap().remove(0);
     let binary = profile.home.join("native");
     std::fs::write(&binary, "#!/bin/sh\nexec /bin/cat \"$(dirname \"$0\")/resource\"\n").unwrap();
@@ -87,7 +124,7 @@ async fn source_aliases_refuse_runtime_paths_without_changing_default_namespaces
         .unwrap()
         .get(0, project["id"].as_str().unwrap())
         .unwrap();
-    let runtime = ProjectRuntime::new(&state, 0, stored);
+    let runtime = ProjectRuntime::new(&state, 0, stored).unwrap();
     state
         .services
         .require::<cells::process::Execution>()
@@ -258,7 +295,7 @@ async fn replacement_does_not_silently_retarget_projects_and_launcher_contains_o
         .unwrap()
         .get(0, project["id"].as_str().unwrap())
         .unwrap();
-    let runtime = ProjectRuntime::new(&state, 0, stored);
+    let runtime = ProjectRuntime::new(&state, 0, stored).unwrap();
     let fixture = root.path().join("codex-native");
     std::fs::create_dir_all(root.path().join("exports/group/existing/_nestos/worktrees/test")).unwrap();
     assert_eq!(runtime.working_directory("_nestos/worktrees/test").unwrap(), format!("{}/_nestos/worktrees/test", runtime.cwd()));
@@ -652,4 +689,71 @@ async fn execution_configuration_is_authorized_revision_checked_and_persistent()
     let reopened = State::from_config(&config).unwrap();
     let settings = call(&reopened, 0, "project_execution", json!({"projectId":id})).await.unwrap();
     assert_eq!(settings["execution"]["variables"]["GIT_AUTHOR_NAME"], "Rain Li");
+}
+
+#[tokio::test]
+async fn native_isolation_uses_real_cwd_and_keeps_package_siblings_visible() {
+    use std::os::unix::fs::PermissionsExt;
+    let root=tempfile::tempdir().unwrap();let mut config=deployment(root.path());
+    config.projects.as_mut().unwrap().isolation=cells::projects::model::Isolation::None;
+    let state=State::from_config(&config).unwrap();cells::process::enable(&state).await.unwrap();
+    let project=register(&state,"group/existing",false).await;
+    call(&state,0,"project_set_execution",json!({"projectId":project["id"],"revision":project["revision"],"execution":{"profile":null,"variables":{"CUSTOM_ENV":"kept"}}})).await.unwrap();
+    let stored=state.services.get::<cells::projects::ProjectService>().unwrap().get(0,project["id"].as_str().unwrap()).unwrap();
+    let runtime=ProjectRuntime::new(&state,0,stored).unwrap();assert!(!runtime.isolated());
+    assert_eq!(runtime.cwd(),root.path().join("exports/group/existing").to_str().unwrap());
+    let package=root.path().join("package");std::fs::create_dir(&package).unwrap();
+    std::fs::write(package.join("sibling"),"package-dependency").unwrap();
+    std::fs::write(package.join("entry"),"#!/bin/sh\nprintf '%s\\n' \"$PWD\"; cat \"$(dirname \"$0\")/sibling\"; printf '%s' \"$CUSTOM_ENV\"\n").unwrap();
+    std::fs::set_permissions(package.join("entry"),std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut profile=cells::harness::config::validate(&config).unwrap().remove(0);profile.command=package.join("entry").to_str().unwrap().into();
+    let mut prepared=runtime.prepare(&profile,vec![]).unwrap();runtime.finish_environment(&mut prepared.command).unwrap();
+    let output=prepared.command.output().await.unwrap();
+    assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
+    let text=String::from_utf8(output.stdout).unwrap();assert!(text.contains(&runtime.cwd()));assert!(text.contains("package-dependency"));assert!(text.ends_with("kept"));
+    assert_eq!(runtime.resolve_cwd(&runtime.cwd()).unwrap(),runtime.cwd());assert!(runtime.resolve_cwd("/etc").is_err());
+}
+
+#[test]
+fn project_isolation_defaults_to_bubblewrap_and_rejects_unknown_modes() {
+    use cells::projects::{Config,model::Isolation};
+    let default:Config=toml::from_str("root='/tmp/projects'").unwrap();assert!(default.isolation==Isolation::Bubblewrap);
+    let native:Config=toml::from_str("root='/tmp/projects'\nisolation='none'").unwrap();assert!(native.isolation==Isolation::None);
+    assert!(toml::from_str::<Config>("root='/tmp/projects'\nisolation='invalid'").is_err());
+}
+
+#[tokio::test]
+async fn native_mode_rejects_virtual_mount_replacement_and_retains_directory_pins() {
+    let root=tempfile::tempdir().unwrap();let mut config=deployment(root.path());config.projects.as_mut().unwrap().isolation=cells::projects::model::Isolation::None;
+    let state=State::from_config(&config).unwrap();cells::process::enable(&state).await.unwrap();
+    let project=call(&state,0,"project_register",json!({"name":"Native","alias":"home","path":"group/existing","access":"rw",
+        "mounts":[{"alias":"reference","path":"","at":"/workspace/ref","access":"ro"}]})).await.unwrap()["project"].clone();
+    let stored=state.services.get::<cells::projects::ProjectService>().unwrap().get(0,project["id"].as_str().unwrap()).unwrap();
+    let runtime=ProjectRuntime::new(&state,0,stored).unwrap();let profile=cells::harness::config::validate(&config).unwrap().remove(0);
+    assert_eq!(runtime.prepare(&profile,vec![]).err().unwrap().code,"NATIVE_MOUNT_REMAP_UNSUPPORTED");
+    let source=root.path().join("exports/group/existing");std::fs::rename(&source,root.path().join("original")).unwrap();std::fs::create_dir_all(source.join("ref")).unwrap();
+    assert_eq!(runtime.prepare(&profile,vec![]).err().unwrap().code,"PROJECT_DIRECTORY_CHANGED");
+}
+
+#[tokio::test]
+async fn native_process_api_advertises_cooperative_mode_and_cancels_owned_children() {
+    use tower::ServiceExt;
+    use http_body_util::BodyExt;
+    let root=tempfile::tempdir().unwrap();let mut config=deployment(root.path());config.projects.as_mut().unwrap().isolation=cells::projects::model::Isolation::None;
+    let state=State::from_config(&config).unwrap();cells::process::enable(&state).await.unwrap();
+    let response=cells::router(state.clone(),&[]).unwrap().oneshot(axum::http::Request::builder().uri("/v1/capabilities")
+        .header("authorization","Bearer project-test-secret-0123456789").body(axum::body::Body::empty()).unwrap()).await.unwrap();
+    let caps:Value=serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(caps["executionModel"],"trusted-cooperative-host");assert_eq!(caps["readOnlyEnforcement"],"none");assert_eq!(caps["pathModel"],"host-mapped");
+    let project=register(&state,"group/existing",false).await;let epoch=state.services.require::<cells::process::Execution>().unwrap().epoch();
+    call(&state,0,"project_exec",json!({"projectId":project["id"],"revision":project["revision"],"epoch":epoch,"requestId":"native-cancel",
+        "command":"/bin/sh","args":["-c","sleep 120 & echo $! > child; wait"],"timeoutMs":10000})).await.unwrap();
+    let child_path=root.path().join("exports/group/existing/child");
+    tokio::time::timeout(std::time::Duration::from_secs(3),async{while !child_path.exists(){tokio::time::sleep(std::time::Duration::from_millis(5)).await;}}).await.unwrap();
+    let pid:usize=std::fs::read_to_string(&child_path).unwrap().trim().parse().unwrap();
+    cells::process::cancel(&state,0,epoch,"native-cancel").unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(3),async{loop{
+        if cells::process::status(&state,0,epoch,"native-cancel").unwrap().state=="cancelled"{break;}tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }}).await.unwrap();
+    if let Ok(stat)=std::fs::read_to_string(format!("/proc/{pid}/stat")){assert!(stat.split_whitespace().nth(2).is_some_and(|state|state=="Z"||state=="X"));}
 }

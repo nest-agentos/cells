@@ -45,6 +45,7 @@ pub async fn run(
         );
         return;
     }
+    let native=crate::projects::native::enabled(&state);
     let mut child = match prepared.command.spawn() {
         Ok(child) => child,
         Err(error) => {
@@ -70,7 +71,13 @@ pub async fn run(
     let out_reader = tokio::spawn(output(stdout, process.token().clone()));
     let err_reader = tokio::spawn(output(stderr, process.token().clone()));
 
-    match supervise(&mut child, process.token(), timeout_ms).await {
+    let owned_group=if native {child.id()}else{None};
+    let result=supervise(&mut child, process.token(), timeout_ms).await;
+    if let Some(pid)=owned_group {
+        // The native launcher made the owned child the leader of its process group.
+        unsafe {libc::kill(-(pid as i32),libc::SIGKILL);}
+    }
+    match result {
         Ok((terminal, code)) => {
             let (stdout, stdout_truncated) = drain(out_reader).await;
             let (stderr, stderr_truncated) = drain(err_reader).await;

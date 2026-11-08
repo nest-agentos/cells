@@ -549,3 +549,31 @@ NestOS 使用 `GET /v1/capabilities` 的 `node` 描述和 `POST /v1/api/harness/
 Agent 通道提供 session_context/report/receipt/request/response 五个工具。请求 pending 必须让出本轮，由宿主固定 API 冻结响应并续办同一个 Session；业务 acknowledge 与运输接受分开。Cells 记录精确 session/turn 状态，重启运行中变 unknown，禁止按缺回执重发。scope 轮换先核对已终结和同一 Session，再原子撤销旧 token。Codex thread 配置使用 `features.mcp_2026_07_28=true` 与扁平 `mcp_servers.cells_session`，已加载 thread 必须 unsubscribe、等待 closed、再 resume 才刷新 MCP 配置；app-server 使用 `thread_unload_delay_secs=0`。
 
 真实原生验收脚本 `src/plugin/harness/tests/real_channel.py` 需要已安装 Codex CLI。通过 temporary-process CLI 在同一有界作用域运行，验证发现、上下文、不可变请求响应、卸载续办及原 turn 历史；模型请求只到本地拒绝 fixture，不调用外部模型。
+
+
+### Node resource status
+
+Authenticated `GET /v1/node/status` returns version 1 system CPU sampling (100 ms), available parallelism, load averages, memory, and filesystem capacity for readable exports. Export paths, file contents, credentials and process arguments are excluded. Anonymous requests are rejected. Filesystem capacities describe the backing filesystem, not directory sizes, and must not be summed across exports.
+
+`harness.activeSessions` counts active Cells-managed sessions visible to the caller, including pending interactions, without scanning history or starting native runtimes. Project runtimes are filtered by owner, harness authorization and readable exports. Unknown adapter counts use null. `loadedRuntimes` counts loaded adapters, not active sessions. Inside a VM system values describe the guest; container resource accounting is not a cgroup quota report.
+
+
+### Project isolation mode
+
+`[projects].isolation` defaults to `"bubblewrap"`. Explicit `"none"` runs project harnesses, project commands and process API commands directly as the Cells service user in the current OS (for example inside a dedicated Firecracker guest), using the real project directory and installed package tree. It does not launch anything on a VMM's physical host. Codex/Claude/DSH remain managed child processes; DSH web starts on demand on loopback with a random port and its own transport token.
+
+```toml
+[projects]
+root = "/home/agent/.local/share/cells/projects"
+isolation = "none"
+```
+
+Native mode advertises `executionModel="trusted-cooperative-host"`, `workspaceConsistency="cooperative"`, `readOnlyEnforcement="none"` and `pathModel="host-mapped"`. File APIs retain export/project grants and revision checks, but process access is governed by the service user's OS permissions; project read-only flags are not kernel process isolation. Network namespaces and filesystem remapping are not applied; network access follows the node/VM's network policy. Extra mounts must already identify the same physical directories at their native locations, and execution-profile mounts must have identical source/target paths; unsupported remapping is rejected as `NATIVE_MOUNT_REMAP_UNSUPPORTED`. Directory pins, process cancellation, owned process-group cleanup and service shutdown remain in effect. Switching modes does not rewrite native conversation history or its stored working directories.
+
+For Cells-managed DSH, unsupported SOCKS `ALL_PROXY`/`all_proxy` values fall back to an explicitly configured HTTP(S) proxy; without such a fallback the unsupported setting is omitted. This adaptation is local to DSH child processes. Other harnesses retain their original proxy settings, and URLs/tokens are not logged.
+
+Session channels accept project-relative `cwd` values (for example `_nestos/kanban/conversations/run`). Cells resolves them using the registered project root and `isolation`, so callers do not construct namespace or guest paths. Version 1 is advertised as `projectChannelPaths: 1`; clients retain the legacy virtual prefix for older nodes, and updated nodes still accept authorized legacy paths. Directory traversal and symlink escapes are rejected. `[projects].channel_endpoint` optionally fixes the MCP URL reachable by processes inside the node OS/VM, overriding a caller's externally forwarded URL. For a Cells service listening on guest port 8787 with `network=true`, use `channel_endpoint="http://127.0.0.1:8787/v1/channel/mcp"` even when the host publishes port 18787. Without this setting, the caller-provided endpoint remains in effect. Both namespace and direct VM execution use the same configuration fields.
+
+Virtio-fs directory identity uses the mount source, inode and birth time instead of the guest's temporary device number. Existing numeric-device records remain valid only when the current filesystem is verified as virtio-fs and inode/birth time match. Other filesystems retain device checks; newly recorded virtio-fs identities also reject mount-source changes. The authorization resource fingerprint uses the same stable filesystem identity. Existing connections need one explicit fingerprint update when upgrading this identity format; later VM reboots retain it.
+
+DSH model availability does not imply credential readiness. Failed native `turn/end` records appear as failed system messages with the native error code and bounded explanation (for example `MISSING_CREDENTIAL`), both in live events and after reopening history. Their stable record IDs prevent duplicate display when history replaces streamed items. Diagnostics retain the safe native error code, never the error text; an accepted prompt receipt still only confirms submission, not model success.

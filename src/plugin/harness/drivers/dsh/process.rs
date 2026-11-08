@@ -116,6 +116,8 @@ fn prepare(
         }
     };
     environment(&mut command, profile, runtime);
+    if let Some(runtime)=runtime {runtime.finish_environment(&mut command)?;}
+    normalize_proxy(&mut command);
     Ok((
         command,
         Resources {
@@ -146,13 +148,26 @@ fn environment(
     super::super::environment::inherit(command);
     command.env("DSH_HOME", &profile.home);
     if let Some(runtime) = runtime {
-        command
-            .env("HOME", "/tmp")
-            .env("CELLS_PROJECT", &runtime.project.id);
+        if runtime.isolated(){command.env("HOME", "/tmp");}
+        command.env("CELLS_PROJECT", &runtime.project.id);
     } else if let Some(workspace) = profile.workspaces.first() {
         command.current_dir(&workspace.path);
     }
 }
+fn normalize_proxy(command:&mut tokio::process::Command) {
+    let values:std::collections::BTreeMap<_,_>=command.as_std().get_envs().filter_map(|(key,value)|value.map(|v|(key.to_os_string(),v.to_os_string()))).collect();
+    let fallback=["http_proxy","HTTP_PROXY","https_proxy","HTTPS_PROXY"].into_iter()
+        .filter_map(|key|values.get(std::ffi::OsStr::new(key)))
+        .find(|value|value.to_str().is_some_and(|v|v.starts_with("http://")||v.starts_with("https://"))).cloned();
+    for key in ["all_proxy","ALL_PROXY"] {
+        if values.get(std::ffi::OsStr::new(key)).and_then(|v|v.to_str()).is_some_and(|v|v.starts_with("socks")) {
+            if let Some(value)=&fallback {command.env(key,value);}else{command.env_remove(key);}
+            crate::core::events::emit(crate::core::events::Level::Info,"harness.dsh.proxy.normalized",
+                serde_json::json!({"stage":"environment","result":"success","reason":"socks-unsupported","httpFallback":fallback.is_some()}));
+        }
+    }
+}
+
 fn spawn_supervisor(
     mut child: Child,
     output: tokio::process::ChildStdout,
@@ -281,5 +296,20 @@ mod tests {
         );
         drop(file);
         assert!(!path.exists());
+    }
+}
+
+#[cfg(test)]
+mod proxy_tests {
+    use super::*;
+    #[test]
+    fn dsh_uses_http_fallback_without_mutating_other_harness_environments() {
+        let mut command=tokio::process::Command::new("/bin/true");
+        command.env("ALL_PROXY","socks5://127.0.0.1:1234").env("http_proxy","http://127.0.0.1:7890");
+        normalize_proxy(&mut command);
+        let values:std::collections::BTreeMap<_,_>=command.as_std().get_envs().collect();
+        assert_eq!(values[std::ffi::OsStr::new("ALL_PROXY")],Some(std::ffi::OsStr::new("http://127.0.0.1:7890")));
+        let mut no_fallback=tokio::process::Command::new("/bin/true");no_fallback.env("all_proxy","socks5://127.0.0.1:1234");normalize_proxy(&mut no_fallback);
+        assert!(no_fallback.as_std().get_envs().any(|(key,value)|key=="all_proxy"&&value.is_none()));
     }
 }

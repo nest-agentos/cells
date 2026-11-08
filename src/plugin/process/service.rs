@@ -12,6 +12,7 @@ use crate::{
         policy, runner, sandbox,
     },
 };
+use crate::projects::runtime::ProjectLauncher;
 use std::sync::Arc;
 
 /// Start a command, or return the record of an identical earlier request.
@@ -61,7 +62,8 @@ fn start_authorized(
                         let fallback = crate::projects::execution::ExecutionProfile::default();
                         service.launcher.prepare_process(&plan, lock, Some((selected.unwrap_or(&fallback), &project.execution)))?
                     }
-                } else {sandbox::assemble(&plan, lock)?};
+                } else if crate::projects::native::enabled(state) {crate::projects::native::Native.prepare_process(&plan,lock,None)?}
+                else {sandbox::assemble(&plan, lock)?};
                 let process = Arc::new(Process::new());
                 crate::core::events::emit(crate::core::events::Level::Debug, "process.accepted", serde_json::json!({"requestId": request.request_id,
                     "identity": identity, "cwd": plan.cwd, "mountCount": plan.mounts.len(), "timeoutMs": plan.timeout_ms}));

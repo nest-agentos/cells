@@ -97,7 +97,10 @@ pub async fn enable(state: &crate::app::State) -> Result<(), String> {
         .map_err(|_| "Cannot retain execution lock")?;
     rustix::fs::flock(&lock, FlockOperation::NonBlockingLockExclusive)
         .map_err(|_| "Another execution server still owns this export")?;
-    sandbox::probe().await?;
+    if crate::projects::native::enabled(state) {
+        let result=tokio::process::Command::new("/bin/true").kill_on_drop(true).status().await.map_err(|_|"Native execution unavailable")?;
+        if !result.success(){return Err("Native execution probe failed".into());}
+    }else{sandbox::probe().await?;}
     state
         .services
         .get::<crate::process::Execution>()

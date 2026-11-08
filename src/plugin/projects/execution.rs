@@ -73,6 +73,34 @@ pub fn prepare(prepared: &mut Prepared, profile: Option<&ExecutionProfile>, envi
     for (key,value) in variables { prepared.command.args(["--setenv", &key, &value]); }
     Ok(())
 }
+pub fn prepare_native(command:&mut tokio::process::Command,profile:Option<&ExecutionProfile>,environment:&ProjectEnvironment)->Result<(),Error> {
+    let mut variables=BTreeMap::new();
+    if let Some(profile)=profile {
+        for mount in &profile.mounts {
+            if mount.source.canonicalize()?!=mount.target.canonicalize()? {return Err(Error::conflict("NATIVE_MOUNT_REMAP_UNSUPPORTED"));}
+        }
+        for key in &profile.inherit {variables.insert(key.clone(),std::env::var(key).map_err(|_|Error::not_found("PROJECT_ENV_SOURCE_MISSING"))?);}
+        variables.extend(profile.variables.clone());
+        if let Some(user)=&profile.user {native_user(command,user)?;}
+    }
+    variables.extend(environment.variables.clone());validate_variables(&variables)?;
+    command.envs(variables);Ok(())
+}
+fn native_user(command:&mut tokio::process::Command,user:&str)->Result<(),Error> {
+    let passwd=std::fs::read_to_string("/etc/passwd")?;
+    let fields=passwd.lines().find_map(|line|{let f:Vec<_>=line.split(':').collect();(f.len()>=7&&f[0]==user).then_some(f)}).ok_or_else(||Error::not_found("PROJECT_EXECUTION_USER_UNKNOWN"))?;
+    let uid:u32=fields[2].parse().map_err(|_|Error::invalid())?;
+    let gid:u32=fields[3].parse().map_err(|_|Error::invalid())?;
+    let current=rustix::process::geteuid().as_raw();
+    if current!=uid&&current!=0{return Err(Error::forbidden("PROJECT_EXECUTION_USER_UNAVAILABLE"));}
+    command.env("USER",user).env("LOGNAME",user).env("HOME",fields[5]);
+    if current!=uid {
+        // SAFETY: identity changes are limited to the child before exec.
+        unsafe {command.pre_exec(move||{if libc::setgroups(0,std::ptr::null())!=0||libc::setgid(gid)!=0||libc::setuid(uid)!=0{return Err(std::io::Error::last_os_error());}Ok(())});}
+    }
+    Ok(())
+}
+
 fn apply_user(command: &mut tokio::process::Command, user: &str) -> Result<(), Error> {
     let passwd = std::fs::read_to_string("/etc/passwd")?;
     let fields = passwd.lines().find_map(|line| {

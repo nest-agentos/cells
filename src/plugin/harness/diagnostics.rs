@@ -126,7 +126,8 @@ fn fields(p: &Value) -> Value {
     json!({"sessionId":label(&p["threadId"]),
         "turnId":label(p.get("turnId").unwrap_or(&p["turn"]["id"])),
         "status":label(&p["turn"]["status"]), "willRetry":p["willRetry"].as_bool(),
-        "errorInfo":error_info(error), "rpcCode":error["code"].as_i64()})
+        "errorInfo":error_info(error), "rpcCode":error["code"].as_i64(),
+        "nativeCode":label(&error["code"])})
 }
 fn label(value: &Value) -> Option<&str> {
     value.as_str().filter(|s| {

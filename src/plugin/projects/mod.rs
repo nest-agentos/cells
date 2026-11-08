@@ -7,6 +7,7 @@ mod descriptor;
 pub(crate) mod directory_sync;
 pub mod model;
 pub mod runtime;
+pub(crate) mod native;
 mod search;
 pub mod service;
 mod source_paths;

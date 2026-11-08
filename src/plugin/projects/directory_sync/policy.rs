@@ -41,7 +41,7 @@ pub(super) fn authorize<'a>(
         .exports
         .get(&project.alias)
         .ok_or_else(Error::invalid)?;
-    if service::identity_of(&export.open_dir(&binding.source)?)? != binding.target_identity {
+    if !service::identity_matches(&export.open_dir(&binding.source)?, &binding.target_identity)? {
         return Err(Error::conflict("TARGET_REPLACED"));
     }
     allowed(&project, &binding.target)?;

@@ -466,6 +466,15 @@ impl Claude {
     }
 }
 impl HarnessDriver for Claude {
+    fn active_sessions(&self) -> Option<usize> {
+        Some(
+            self.sessions
+                .live()
+                .iter()
+                .filter(|p| p.session.lock().unwrap()["activeTurnId"].is_string())
+                .count(),
+        )
+    }
     fn subscribe(&self, args: Value) -> crate::plugins::EventFuture<'_> {
         Box::pin(async move {
             self.check_read()?;

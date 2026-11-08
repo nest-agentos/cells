@@ -114,18 +114,23 @@ pub struct ProjectRuntime {
     pub project: Project,
     identity: usize,
     active: Activities,
+    isolation: super::model::Isolation,
+    cwd: String,
 }
 impl ProjectRuntime {
-    pub fn new(state: &Arc<State>, identity: usize, project: Project) -> Self {
-        Self {
+    pub fn new(state: &Arc<State>, identity: usize, project: Project) -> Result<Self,Error> {
+        let isolation=state.services.get::<super::ProjectService>().map(|s|s.isolation).unwrap_or_default();
+        let cwd=if isolation==super::model::Isolation::None {super::native::root(state,&project)?}else{format!("/projects/{}",project.id)};
+        Ok(Self {
             state: Arc::downgrade(state),
             identity,
             project,
-            active: Activities::default(),
-        }
+            active: Activities::default(),isolation,cwd,
+        })
     }
+    pub fn isolated(&self)->bool {self.isolation==super::model::Isolation::Bubblewrap}
     pub fn cwd(&self) -> String {
-        format!("/projects/{}", self.project.id)
+        self.cwd.clone()
     }
     pub fn working_directory(&self, relative: &str) -> Result<String, Error> {
         crate::fs::path::validate(relative)?;
@@ -136,6 +141,16 @@ impl ProjectRuntime {
             .filter(|part| !part.is_empty()).collect::<Vec<_>>().join("/");
         export.open_dir(&source)?;
         Ok(format!("{}/{}", self.cwd(), relative))
+    }
+    pub fn channel_directory(&self, cwd: &str) -> Result<String, Error> {
+        let logical = format!("/projects/{}/", self.project.id);
+        let physical = format!("{}/", self.cwd());
+        let relative = if cwd.starts_with('/') {
+            cwd.strip_prefix(&logical).or_else(|| cwd.strip_prefix(&physical))
+                .ok_or_else(|| Error::forbidden("CHANNEL_WORKSPACE_INVALID"))?
+        } else { cwd };
+        crate::fs::path::validate(relative)?;
+        self.working_directory(relative)
     }
     pub fn resolve_cwd(&self, cwd: &str) -> Result<String, Error> {
         let root = self.cwd();
@@ -201,7 +216,7 @@ impl ProjectRuntime {
         source_paths: bool,
     ) -> Result<Prepared, Error> {
         let (state, mut plan) = self.harness_plan(profile, args)?;
-        if source_paths {
+        if source_paths && self.isolated() {
             super::source_paths::expose(&state, self.identity, &mut plan)?;
         }
         project_paths(&mut plan, self.cwd());
@@ -221,7 +236,7 @@ impl ProjectRuntime {
         crate::core::events::emit(if result.is_ok() {crate::core::events::Level::Info} else {crate::core::events::Level::Warn},
             "project.execution.prepare", serde_json::json!({"projectId":self.project.id,
                 "operationId":format!("{}:{}", self.project.id, self.project.revision),
-                "stage":"harness-launch-plan","result":if result.is_ok(){"success"}else{"failure"},
+                "isolation":if self.isolated(){"bubblewrap"}else{"none"},"stage":"harness-launch-plan","result":if result.is_ok(){"success"}else{"failure"},
                 "code":result.as_ref().err().map(|e| e.code),"elapsedMs":started.elapsed().as_millis()}));
         result
     }
@@ -248,6 +263,13 @@ impl ProjectRuntime {
         let mut plan = crate::process::policy::plan(&state, self.identity, &request)?;
         service::pin(&mut plan, &self.project)?;
         Ok((state, plan))
+    }
+    pub fn finish_environment(&self,command:&mut tokio::process::Command)->Result<(),Error> {
+        if self.isolated(){return Ok(());}
+        let state=self.state()?;
+        let service=state.services.require::<super::ProjectService>()?;
+        let profile=super::execution::resolve(&service.execution_profiles,&self.project.owner,&self.project.execution)?;
+        super::execution::prepare_native(command,profile,&self.project.execution)
     }
     pub fn begin(&self, thread: &str, operation: &str) -> Result<(), Error> {
         let state = self.state()?;

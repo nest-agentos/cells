@@ -129,6 +129,19 @@ fn follow(
     })
 }
 impl HarnessDriver for Dsh {
+    fn active_sessions(&self) -> Option<usize> {
+        Some(
+            self.sessions
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|live| {
+                    live.cursor.lock().unwrap().busy()
+                        || live.session.lock().unwrap()["status"] == "active"
+                })
+                .count(),
+        )
+    }
     fn subscribe(&self, args: Value) -> crate::plugins::EventFuture<'_> {
         Box::pin(async move { Ok(crate::harness::events::stream(&self.events, args)) })
     }

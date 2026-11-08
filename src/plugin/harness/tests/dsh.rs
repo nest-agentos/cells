@@ -12,6 +12,30 @@ use cells::{config::Config, harness::Harnesses};
 use serde_json::{json, Value};
 
 #[tokio::test]
+async fn missing_credentials_remain_visible_in_live_events_and_reopened_history() {
+    let root = tempfile::tempdir().unwrap();
+    let host = fixture::Host::new(root.path()).await;
+    let service = service(root.path(), &host.url);
+    let created = mutate(&service,"harness_create","error-create",json!({"workspaceId":"project"})).await;
+    let id = created["result"]["session"]["id"].as_str().unwrap();
+    mutate(&service,"harness_turn","error-turn",json!({"sessionId":id,"prompt":"fixture"})).await;
+    host.emit(id,json!({"type":"event","event":{"seq":0,"type":"turn/start","data":{"turn":1}}}));
+    host.emit(id,json!({"type":"event","event":{"seq":2,"type":"turn/end","data":{"turn":1,
+        "reason":{"kind":"error","error":{"code":"MISSING_CREDENTIAL","message":"Configure DEEPSEEK_API_KEY"}}}}}));
+    wait_terminal(&service,id).await;
+    let snapshot = events(&service).await;
+    let live = snapshot["events"].as_array().unwrap().iter().find(|row|
+        row["message"]["method"]=="item/completed" && row["message"]["params"]["item"]["status"]=="failed").unwrap();
+    let item = &live["message"]["params"]["item"];
+    assert_eq!(item["text"],"[MISSING_CREDENTIAL] Configure DEEPSEEK_API_KEY");
+    let history = service.call("harness_session_read",json!({"profileId":"dsh","sessionId":id})).await.unwrap();
+    let items:Vec<_> = history["turns"].as_array().unwrap().iter().flat_map(|turn|turn["items"].as_array().unwrap()).collect();
+    assert!(items.iter().any(|row|row["id"]==item["id"] && row["text"]==item["text"]));
+    assert_eq!(host.state.calls.lock().unwrap().iter().filter(|row|row["method"]=="session/prompt").count(),1);
+    service.close().await;
+}
+
+#[tokio::test]
 async fn readonly_queries_bypass_native_discovery_and_never_create_mutation_receipts() {
     let root = tempfile::tempdir().unwrap();
     let host = fixture::Host::new(root.path()).await;

@@ -748,6 +748,13 @@ fn validate_response(request: &Value, result: Value) -> Result<(), Error> {
 }
 
 impl HarnessDriver for Codex {
+    fn active_sessions(&self) -> Option<usize> {
+        let bridge = self.bridge.try_lock().ok()?;
+        Some(match bridge.as_ref() {
+            Some(bridge) => bridge.events.lock().unwrap().active_count(),
+            None => 0,
+        })
+    }
     fn subscribe(&self, args: Value) -> crate::plugins::EventFuture<'_> {
         Box::pin(async move { Ok(super::events::stream(&self.bridge().await?.events, args)) })
     }

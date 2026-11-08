@@ -34,6 +34,11 @@ pub struct Export {
 }
 
 impl Export {
+    pub(crate) fn space(&self, alias: &str) -> serde_json::Value {
+        let space = rustix::fs::fstatvfs(&self.root).ok();
+        serde_json::json!({"alias":alias,"totalBytes":space.as_ref().and_then(|s|s.f_blocks.checked_mul(s.f_frsize)),
+            "availableBytes":space.as_ref().and_then(|s|s.f_bavail.checked_mul(s.f_frsize))})
+    }
     /// Open a read-only capability. Fails closed when `openat2` is unavailable.
     pub fn open(root: &Path) -> Result<Self, Error> {
         let root = File::open(root)?;

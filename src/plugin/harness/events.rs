@@ -182,9 +182,17 @@ impl Events {
     pub fn position(&self) -> Value {
         json!({"after":self.next,"eventEpoch":self.epoch})
     }
-    pub fn watch(&self)->tokio::sync::watch::Receiver<u64> {self.changed.subscribe()}
-    pub fn closed_since(&self,thread:&str,after:u64)->bool {
-        self.entries.iter().rev().take_while(|(seq,_,_,_)|*seq>after).any(|(_,message,_,_)|message["method"]=="thread/closed"&&message["params"]["threadId"]==thread)
+    pub fn watch(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changed.subscribe()
+    }
+    pub fn closed_since(&self, thread: &str, after: u64) -> bool {
+        self.entries
+            .iter()
+            .rev()
+            .take_while(|(seq, _, _, _)| *seq > after)
+            .any(|(_, message, _, _)| {
+                message["method"] == "thread/closed" && message["params"]["threadId"] == thread
+            })
     }
     pub fn thread_idle(&self, id: &str) -> bool {
         !self.active.contains(id)
@@ -195,6 +203,19 @@ impl Events {
     }
     pub fn idle_since(&self) -> Option<std::time::Instant> {
         (self.active.is_empty() && self.requests.is_empty()).then_some(self.last_activity)
+    }
+    pub fn active_count(&self) -> usize {
+        let mut ids = self
+            .active
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::HashSet<_>>();
+        ids.extend(
+            self.requests
+                .values()
+                .filter_map(|r| r["params"]["threadId"].as_str()),
+        );
+        ids.len()
     }
 }
 
@@ -297,6 +318,7 @@ mod tests {
             .push(json!({"method":"turn/started","params":{"threadId":"s"}}))
             .unwrap();
         assert!(events.idle_since().is_none());
+        assert_eq!(events.active_count(),1);
         events
             .push(json!({"id":"q","method":"item/tool/requestUserInput","params":{"threadId":"s"}}))
             .unwrap();
@@ -304,10 +326,12 @@ mod tests {
             .push(json!({"method":"turn/completed","params":{"threadId":"s"}}))
             .unwrap();
         assert!(events.idle_since().is_none());
+        assert_eq!(events.active_count(),1);
         events
             .push(json!({"method":"serverRequest/resolved","params":{"requestId":"q"}}))
             .unwrap();
         assert!(events.idle_since().is_some());
+        assert_eq!(events.active_count(),0);
     }
     #[test]
     fn reports_replay_gaps_and_epoch_reset() {

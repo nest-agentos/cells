@@ -74,9 +74,9 @@ impl Bridge {
             command.args(["app-server","-c","thread_unload_delay_secs=0"]);
         }
         if let Some(runtime) = &runtime {
-            command
-                .env("HOME", "/tmp")
-                .env("CELLS_PROJECT", &runtime.project.id);
+            if runtime.isolated(){command.env("HOME", "/tmp");}
+            command.env("CELLS_PROJECT", &runtime.project.id);
+            runtime.finish_environment(&mut command)?;
         }
         let mut child = command
             .env("CODEX_HOME", &config.home)

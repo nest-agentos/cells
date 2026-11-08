@@ -8,10 +8,22 @@ use std::path::PathBuf;
 pub struct Config {
     pub root: PathBuf,
     #[serde(default)]
+    pub isolation: Isolation,
+    #[serde(default)]
     pub network: bool,
+    #[serde(default)]
+    pub channel_endpoint: Option<String>,
     #[serde(default)]
     pub execution_profiles: Vec<super::execution::ExecutionProfile>,
 }
+#[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Isolation {
+    #[default]
+    Bubblewrap,
+    None,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Project {

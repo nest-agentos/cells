@@ -10,6 +10,10 @@ pub enum NativeExecution {
 }
 
 pub trait HarnessDriver: Send + Sync {
+    /// Count active managed sessions without starting or waking a native runtime.
+    fn active_sessions(&self) -> Option<usize> {
+        None
+    }
     fn subscribe(&self, _args: Value) -> crate::plugin::common::EventFuture<'_> {
         Box::pin(async { Err(Error::unsupported()) })
     }

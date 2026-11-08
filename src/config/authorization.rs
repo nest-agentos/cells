@@ -112,7 +112,7 @@ fn resource_identity(roots: &Exports, alias: &str) -> Result<String, String> {
         .map_err(|_| "Directory identity unavailable")?;
     Ok(format!(
         "{alias}:{}:{}:{:?}",
-        meta.dev(),
+        crate::fs::directory_identity::device(&directory).map_err(|_| "Directory filesystem identity unavailable")?,
         meta.ino(),
         meta.created().ok()
     ))

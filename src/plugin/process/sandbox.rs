@@ -40,9 +40,8 @@ pub fn mount_plan(plan: &Plan, lock: File) -> Result<Prepared, Error> {
     let mut command = base();
     for mount in &plan.mounts {
         let directory = mount.export.open_dir(&mount.path)?;
-        if mount.identity.as_ref().is_some_and(|expected| {
-            crate::projects::service::identity_of(&directory).as_ref() != Ok(expected)
-        }) {
+        if mount.identity.as_ref().map(|expected|crate::projects::service::identity_matches(&directory,expected))
+            .transpose()?.is_some_and(|matches|!matches) {
             return Err(Error::conflict("PROJECT_DIRECTORY_CHANGED"));
         }
         command

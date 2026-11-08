@@ -337,7 +337,11 @@ fn launch(
             .args(args)
             .current_dir(session["cwd"].as_str().ok_or_else(Error::invalid)?);
     }
-    environment(&mut command, config, runtime.is_some());
+    environment(&mut command, config, runtime.as_ref().is_some_and(|r|r.isolated()));
+    if let Some(runtime)=runtime {
+        if !runtime.isolated(){command.env("HOME",std::env::var_os("HOME").unwrap_or_else(||"/tmp".into()));}
+        runtime.finish_environment(&mut command)?;
+    }
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

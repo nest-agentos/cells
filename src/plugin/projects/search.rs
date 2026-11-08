@@ -56,7 +56,10 @@ pub async fn search(state: &Arc<State>, identity: usize, args: Value) -> Result<
     {
         return Err(Error::unsupported());
     }
-    let prepared = Bubblewrap { network: false }.prepare_process(
+    let isolated=Bubblewrap {network:false};
+    let native=super::native::Native;
+    let launcher:&dyn ProjectLauncher=if super::native::enabled(state){&native}else{&isolated};
+    let prepared = launcher.prepare_process(
         &plan,
         state
             .services

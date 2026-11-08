@@ -66,6 +66,7 @@ pub fn router(state: Arc<State>, origins: &[String]) -> Result<Router, String> {
             get(handlers::capabilities::capabilities),
         )
         .route("/v1/api/:domain/:operation", post(operations::invoke))
+        .route("/v1/node/status", get(handlers::node_status::status))
         .merge(state.plugins.routes())
         .merge(subscriptions::routes())
         .route_layer(middleware::from_fn_with_state(

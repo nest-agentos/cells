@@ -28,6 +28,7 @@ pub(super) struct Profile {
     receipts: ReceiptScope,
     mutations: MutationQueues,
     context_id: String,
+    activity_scope: Option<(String, String, Vec<String>)>,
 }
 
 impl Harnesses {
@@ -84,6 +85,7 @@ impl Harnesses {
                         receipts: scope,
                         mutations: MutationQueues::default(),
                         context_id,
+                        activity_scope: None,
                     }),
                 ))
             })
@@ -100,6 +102,37 @@ impl Harnesses {
     }
     pub fn enabled(&self) -> bool {
         !self.profiles.is_empty()
+    }
+    pub async fn node_activity(&self, client: &crate::auth::Client) -> Value {
+        let mut drivers = self
+            .profiles
+            .iter()
+            .filter(|(id, _)| client.may_harness(id))
+            .filter_map(|(_, p)| p.driver.peek())
+            .collect::<Vec<_>>();
+        {
+            let scoped = self.scoped.lock().await;
+            drivers.extend(
+                scoped
+                    .values()
+                    .filter(|p| {
+                        p.activity_scope
+                            .as_ref()
+                            .is_some_and(|(owner, profile, aliases)| {
+                                owner == client.id()
+                                    && client.may_harness(profile)
+                                    && aliases.iter().all(|a| client.may_read(a))
+                            })
+                    })
+                    .filter_map(|p| p.driver.peek()),
+            );
+        }
+        let active = drivers
+            .iter()
+            .map(|driver| driver.active_sessions())
+            .collect::<Option<Vec<_>>>()
+            .map(|counts| counts.iter().sum::<usize>());
+        json!({"activeSessions":active,"loadedRuntimes":drivers.len()})
     }
     pub fn private_homes(&self) -> impl Iterator<Item = &std::path::Path> {
         self.configs.iter().map(|profile| profile.home.as_path())
@@ -154,8 +187,11 @@ impl Harnesses {
         let client = state.auth.try_client(identity)?;
         if name == "harness_profiles" {
             let mut result = self.profiles();
-            let channels = state.plugins.enabled("mcp") && state.services.get::<crate::projects::ProjectService>()
-                .is_some_and(|service| service.channels_enabled);
+            let channels = state.plugins.enabled("mcp")
+                && state
+                    .services
+                    .get::<crate::projects::ProjectService>()
+                    .is_some_and(|service| service.channels_enabled);
             constrain_session_channels(&mut result, channels);
             result["profiles"]
                 .as_array_mut()
@@ -330,12 +366,18 @@ impl Harnesses {
             if scoped.len() >= 128 {
                 return Err(Error::too_many("PROJECT_HARNESS_LIMIT"));
             }
+            let activity_scope = Some((
+                project.owner.clone(),
+                config.id.clone(),
+                project.mounts.iter().map(|m| m.alias.clone()).collect(),
+            ));
             let runtime = Arc::new(crate::projects::runtime::ProjectRuntime::new(
                 state, identity, project,
-            ));
+            )?);
             scoped.insert(
                 key.clone(),
                 Arc::new(Profile {
+                    activity_scope,
                     context_id: self.profiles[&config.id].context_id.clone(),
                     driver: DriverSlot::new(self.plugins.clone(), config, Some(runtime))
                         .map_err(|_| Error::unsupported())?,
@@ -887,19 +929,33 @@ fn constrain_session_channels(result: &mut Value, available: bool) {
 mod tests {
     #[test]
     fn configured_codex_channels_do_not_require_an_active_project_runtime() {
-        let home=tempfile::tempdir().unwrap();
-        let config = serde_json::from_value(serde_json::json!({"id":"codex","kind":"codex","home":home.path(),"projects":true})).unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let config = serde_json::from_value(
+            serde_json::json!({"id":"codex","kind":"codex","home":home.path(),"projects":true}),
+        )
+        .unwrap();
         let harness = super::Harnesses::new(vec![config], "epoch".into()).unwrap();
-        assert_eq!(harness.profiles()["profiles"][0]["capabilities"]["sessionChannels"], true);
+        assert_eq!(
+            harness.profiles()["profiles"][0]["capabilities"]["sessionChannels"],
+            true
+        );
     }
     #[test]
     fn channel_availability_never_grants_support_to_an_unsupported_driver() {
         let mut profiles = serde_json::json!({"profiles":[{"capabilities":{"sessionChannels":true}},{"capabilities":{}},{"capabilities":{"sessionChannels":false}}]});
         super::constrain_session_channels(&mut profiles, false);
-        assert_eq!(profiles["profiles"][0]["capabilities"]["sessionChannels"], false);
+        assert_eq!(
+            profiles["profiles"][0]["capabilities"]["sessionChannels"],
+            false
+        );
         super::constrain_session_channels(&mut profiles, true);
-        assert_eq!(profiles["profiles"][2]["capabilities"]["sessionChannels"], false);
-        assert!(profiles["profiles"][1]["capabilities"].get("sessionChannels").is_none());
+        assert_eq!(
+            profiles["profiles"][2]["capabilities"]["sessionChannels"],
+            false
+        );
+        assert!(profiles["profiles"][1]["capabilities"]
+            .get("sessionChannels")
+            .is_none());
     }
 
     use super::*;
@@ -953,6 +1009,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn node_activity_hides_other_principals_and_revoked_exports() {
+        let harness=Harnesses::new(Vec::new(),"epoch".into()).unwrap();
+        harness.scoped.lock().await.insert("private".into(),Arc::new(Profile {
+            driver:DriverSlot::testing(Box::new(SlowDrain{entered:Arc::new(Notify::new()),release:Arc::new(Notify::new())})),
+            context_id:"private".into(),receipts:harness.receipts.scoped("private".into()),mutations:MutationQueues::default(),
+            activity_scope:Some(("alice".into(),"codex".into(),vec!["docs".into()])),
+        }));
+        let client=|owner:&str,grants:Vec<String>|crate::auth::Client::new("fixture".into(),None,grants,vec![]).scoped(owner.into(),vec![],vec!["codex".into()]);
+        let visible=harness.node_activity(&client("alice",vec!["docs".into()])).await;
+        assert_eq!(visible["loadedRuntimes"],1);assert!(visible["activeSessions"].is_null());
+        assert_eq!(harness.node_activity(&client("bob",vec!["docs".into()])).await["loadedRuntimes"],0);
+        assert_eq!(harness.node_activity(&client("alice",vec![])).await["loadedRuntimes"],0);
+    }
+
+    #[tokio::test]
     async fn draining_a_project_does_not_hold_the_registry_lock() {
         let harness = Arc::new(Harnesses::new(Vec::new(), "epoch".into()).unwrap());
         let (entered, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
@@ -964,6 +1035,7 @@ mod tests {
                     release: release.clone(),
                 })),
                 context_id: "test-context".into(),
+                activity_scope: None,
                 receipts: harness.receipts.scoped("slow-test".into()),
                 mutations: MutationQueues::default(),
             }),

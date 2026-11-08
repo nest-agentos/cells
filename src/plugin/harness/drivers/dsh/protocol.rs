@@ -79,6 +79,9 @@ fn record_items(event: &Value, cursor: &mut Cursor, session: &str) -> Vec<Value>
         return vec![];
     }
     cursor.seq = Some(seq);
+    if event["type"] == "turn/end" && terminal_result(&event["data"]["reason"]) == "failed" {
+        return vec![failure_item(event, cursor, session)];
+    }
     if let Some(admission) = cursor.admission.as_mut() {
         admission.observe(event, session);
     }
@@ -163,6 +166,22 @@ fn visible_turn(cursor: &Cursor, session: &str) -> String {
             .unwrap_or_default();
     }
     cursor.turn.clone()
+}
+fn failure_item(event: &Value, cursor: &Cursor, session: &str) -> Value {
+    let reason = &event["data"]["reason"];
+    let error = &reason["error"];
+    let code = error["code"].as_str().filter(|code| crate::core::ids::is_identifier_within(code, 128));
+    let message = error["message"].as_str().filter(|message| !message.trim().is_empty())
+        .map(|message| message.chars().take(4096).collect::<String>())
+        .unwrap_or_else(|| format!("DSH turn failed ({})", reason["kind"].as_str().unwrap_or("unknown")));
+    let turn = if cursor.native_turn.is_some() && cursor.native_turn == event["data"]["turn"].as_u64() {
+        visible_turn(cursor, session)
+    } else { format!("{session}-{}", event["data"]["turn"]) };
+    let text = code.map_or_else(|| message.clone(), |code| format!("[{code}] {message}"));
+    json!({"id":format!("dsh-error-{}",event["seq"]),"type":"systemMessage",
+        "turnId":turn,"status":"failed","text":text,"error":{"code":code,"message":message},
+        "timestamp":crate::harness::presentation::time_ms(&event["time"]),
+        "endedAt":crate::harness::presentation::time_ms(&event["time"])})
 }
 fn content_items(event: &Value, cursor: &mut Cursor, role: &str, seq: u64) -> Vec<Value> {
     let data = &event["data"];
@@ -272,6 +291,12 @@ fn event(frame: &Value, cursor: &mut Cursor, session: &str) -> Vec<Value> {
     let was_unbound = cursor.native_turn.is_none();
     let mut messages = records(std::slice::from_ref(frame), cursor, session).into_iter()
         .map(|item| json!({"method":"item/completed","params":{"threadId":session,"turnId":item["turnId"],"item":item}})).collect::<Vec<_>>();
+    if event["type"] == "turn/end" && terminal_result(&event["data"]["reason"]) == "failed"
+        && messages.first().is_some_and(|message| message["params"]["item"]["error"].is_object()) {
+        messages.push(json!({"method":"error","params":{"threadId":session,
+            "turnId":messages[0]["params"]["turnId"],"willRetry":false,
+            "error":messages[0]["params"]["item"]["error"]}}));
+    }
     if was_unbound && cursor.native_turn.is_some() {
         messages.push(json!({"method":"turn/started","params":{"threadId":session,"turn":{"id":cursor.turn,"status":"inProgress"}}}));
     }
@@ -356,6 +381,37 @@ pub(super) fn terminal_result(reason: &Value) -> &'static str {
 mod tests {
     use super::*;
     #[test]
+    fn failed_turn_is_visible_live_and_after_history_reload_without_replaying_a_prompt() {
+        let event = json!({"seq":3,"time":1794097654712_i64,"type":"turn/end",
+            "data":{"turn":1,"reason":{"kind":"error","error":{"code":"MISSING_CREDENTIAL",
+                "message":"No API key; configure DEEPSEEK_API_KEY in the credentials service"}}}});
+        let mut cursor = Cursor {turn:"operation".into(),native_turn:Some(1),..Default::default()};
+        let live = frame(&json!({"type":"event","event":event}), &mut cursor, "s");
+        let item = &live.iter().find(|row| row["method"] == "item/completed").unwrap()["params"]["item"];
+        assert_eq!(item["status"], "failed");
+        assert_eq!(item["turnId"], "operation");
+        assert!(item["text"].as_str().unwrap().contains("MISSING_CREDENTIAL"));
+        assert!(item["text"].as_str().unwrap().contains("DEEPSEEK_API_KEY"));
+        assert_eq!(item["endedAt"], 1794097654712_i64);
+        let history = history_records(&[json!({"event":event})], "s");
+        assert_eq!(history[0]["id"], item["id"]);
+        assert_eq!(history[0]["text"], item["text"]);
+        assert_eq!(history[0]["turnId"], "s-1");
+        assert_eq!(live.iter().find(|row|row["method"]=="error").unwrap()["params"]["error"]["code"], "MISSING_CREDENTIAL");
+        assert!(frame(&json!({"type":"event","event":event}), &mut cursor,"s").is_empty());
+    }
+    #[test]
+    fn failed_history_bounds_detail_and_provides_a_fallback_without_an_error_body() {
+        let long = "x".repeat(5000);
+        let records = [json!({"event":{"seq":1,"type":"turn/end","data":{"turn":1,
+            "reason":{"kind":"error","error":{"message":long,"code":"invalid code"}}}}}),
+            json!({"event":{"seq":2,"type":"turn/end","data":{"turn":2,"reason":{"kind":"max-tokens"}}}})];
+        let items = history_records(&records,"s");
+        assert_eq!(items[0]["text"].as_str().unwrap().len(),4096);
+        assert!(items[0]["error"]["code"].is_null());
+        assert_eq!(items[1]["text"],"DSH turn failed (max-tokens)");
+    }
+    #[test]
     fn attaching_to_a_running_attempt_includes_its_already_streamed_text() {
         let mut cursor = Cursor {
             turn: "active".into(),
@@ -420,7 +476,8 @@ mod tests {
                 &mut cursor,
                 "s",
             );
-            assert_eq!(output[0]["params"]["turn"]["status"], expected);
+            let terminal = output.iter().find(|message| message["method"] == "turn/completed").unwrap();
+            assert_eq!(terminal["params"]["turn"]["status"], expected);
             assert!(cursor.turn.is_empty());
         }
     }

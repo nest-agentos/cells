@@ -14,15 +14,20 @@ use std::sync::{Arc, Mutex};
 pub struct ProjectService {
     pub channels: super::channel::Channels,
     pub channels_enabled: bool,
+    pub channel_endpoint: Option<String>,
     pub(super) watch_slots: Arc<tokio::sync::Semaphore>,
     pub(super) store: Store,
     pub launcher: Arc<dyn super::runtime::ProjectLauncher>,
+    pub isolation: super::model::Isolation,
     admission: Mutex<()>,
     owners: Vec<String>,
     pub execution_profiles: Vec<super::execution::ExecutionProfile>,
 }
 impl ProjectService {
     pub fn open(config: &Config, deployment: &crate::config::Config) -> Result<Self, String> {
+        if config.channel_endpoint.as_deref().is_some_and(|endpoint| !super::api::valid_channel_endpoint(endpoint)) {
+            return Err("Invalid project channel endpoint".into());
+        }
         super::execution::validate_profiles(&config.execution_profiles)?;
         let store = Store::open(
             &config.root,
@@ -56,12 +61,15 @@ impl ProjectService {
         }
         Ok(Self {
             channels_enabled: config.network,
+            channel_endpoint: config.channel_endpoint.clone(),
             channels: super::channel::Channels::open(store.root()).map_err(|_| "Cannot open session channels")?,
             watch_slots: Arc::new(tokio::sync::Semaphore::new(16)),
             store,
-            launcher: Arc::new(super::runtime::Bubblewrap {
-                network: config.network,
-            }),
+            isolation: config.isolation,
+            launcher: match config.isolation {
+                super::model::Isolation::Bubblewrap=>Arc::new(super::runtime::Bubblewrap {network:config.network}),
+                super::model::Isolation::None=>Arc::new(super::native::Native),
+            },
             admission: Mutex::new(()),
             execution_profiles: config.execution_profiles.clone(),
             owners: crate::config::authorization::identity_ids(deployment),
@@ -331,7 +339,7 @@ fn validate(
             .get(&project.alias)
             .ok_or_else(Error::invalid)?
             .open_dir(&project.path)?;
-        if identity_of(&root)? != project.root_identity
+        if !identity_matches(&root, &project.root_identity)?
             || project.mount_identities.len() != project.mounts.len()
         {
             return Err(Error::conflict("PROJECT_DIRECTORY_CHANGED"));
@@ -342,7 +350,7 @@ fn validate(
                 .get(&mount.alias)
                 .ok_or_else(Error::invalid)?
                 .open_dir(&mount.path)?;
-            if identity_of(&directory)? != *expected {
+            if !identity_matches(&directory, expected)? {
                 return Err(Error::conflict("PROJECT_DIRECTORY_CHANGED"));
             }
         }
@@ -359,10 +367,13 @@ pub fn identity_of(directory: &std::fs::File) -> Result<String, Error> {
         .map_err(|_| Error::unsupported())?;
     Ok(format!(
         "{}:{}:{}",
-        metadata.dev(),
+        crate::fs::directory_identity::device(directory)?,
         metadata.ino(),
         created.as_nanos()
     ))
+}
+pub fn identity_matches(directory: &std::fs::File, expected: &str) -> Result<bool, Error> {
+    Ok(crate::fs::directory_identity::matches(expected, &identity_of(directory)?))
 }
 fn capture(state: &State, project: &mut Project) -> Result<(), Error> {
     project.root_identity = identity_of(

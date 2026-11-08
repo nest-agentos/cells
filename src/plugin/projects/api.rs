@@ -6,7 +6,7 @@ pub async fn call(
     state: &Arc<State>,
     identity: usize,
     name: &str,
-    args: Value,
+    mut args: Value,
 ) -> Result<Value, Error> {
     if name.starts_with("project_sync_") {
         return super::directory_sync::call(state, identity, name, args).await;
@@ -26,15 +26,23 @@ pub async fn call(
             let project = service.get(identity, text(&args, "projectId")?)?;
             authorize(state, identity, &project)?;
             if project.revision != args["revision"].as_u64().ok_or_else(Error::invalid)? || project.access != "rw" {return Err(Error::forbidden("CHANNEL_BINDING_CHANGED"));}
+            if matches!(name, "project_channel_open" | "project_channel_current") {
+                let started = std::time::Instant::now();
+                let result = super::runtime::ProjectRuntime::new(state, identity, project.clone())
+                    .and_then(|runtime| runtime.channel_directory(text(&args,"cwd")?));
+                crate::core::events::emit(crate::core::events::Level::Info, "project.channel.workspace",
+                    json!({"operation":name,"operationId":args["scopeId"],"projectId":project.id,
+                        "stage":"resolve","result":if result.is_ok(){"success"}else{"failure"},
+                        "code":result.as_ref().err().map(|error|error.code),
+                        "isolation":if super::native::enabled(state){"none"}else{"bubblewrap"},
+                        "elapsedMs":started.elapsed().as_millis()}));
+                args["cwd"] = json!(result?);
+            }
             match name {
                 "project_channel_open" => {
-                    let cwd=text(&args,"cwd")?;
-                    let prefix=format!("/projects/{}/",project.id);
-                    let relative=cwd.strip_prefix(&prefix).ok_or_else(||Error::forbidden("CHANNEL_WORKSPACE_INVALID"))?;
-                    crate::fs::path::validate(relative)?;
                     if !service.channels_enabled || !state.plugins.enabled("mcp") {return Err(Error::unsupported());}
-                    let endpoint=reqwest::Url::parse(text(&args,"endpoint")?).map_err(|_|Error::invalid())?;
-                    if !["http","https"].contains(&endpoint.scheme()) || !endpoint.username().is_empty() || endpoint.password().is_some() || endpoint.query().is_some() || endpoint.fragment().is_some() {return Err(Error::invalid());}
+                    if let Some(endpoint) = &service.channel_endpoint {args["endpoint"] = json!(endpoint);}
+                    if !valid_channel_endpoint(text(&args,"endpoint")?) {return Err(Error::invalid());}
                     service.channels.create(&project.id, &args)
                 },
                 "project_channel_current" => service.channels.current(&project.id,text(&args,"cwd")?),
@@ -47,7 +55,7 @@ pub async fn call(
             }
         }
         "project_roots" => Ok(
-            json!({"roots":state.auth.client(identity).exports().iter().map(|alias|json!({"alias":alias,"access":if state.auth.client(identity).may_write(alias){"rw"}else{"ro"},"capabilities":{"fileRead":true,"fileWrite":state.auth.client(identity).may_write(alias),"run":state.auth.client(identity).may_execute(alias)}})).collect::<Vec<_>>(),"execution":state.services.get::<crate::process::Execution>().is_some_and(|service| service.ready()) && state.auth.client(identity).has_execution(),"authorization":state.auth.client(identity).authorization(),"backend":"bubblewrap"}),
+            json!({"roots":state.auth.client(identity).exports().iter().map(|alias|json!({"alias":alias,"access":if state.auth.client(identity).may_write(alias){"rw"}else{"ro"},"capabilities":{"fileRead":true,"fileWrite":state.auth.client(identity).may_write(alias),"run":state.auth.client(identity).may_execute(alias)}})).collect::<Vec<_>>(),"execution":state.services.get::<crate::process::Execution>().is_some_and(|service| service.ready()) && state.auth.client(identity).has_execution(),"authorization":state.auth.client(identity).authorization(),"backend":if service.isolation==super::model::Isolation::None{"native"}else{"bubblewrap"}}),
         ),
         "project_execution" => {
             let project = service.get(identity, text(&args, "projectId")?)?;
@@ -103,6 +111,12 @@ pub async fn call(
         "project_search" => super::search::search(state, identity, args).await,
         _ => Err(Error::unsupported()),
     }
+}
+pub(super) fn valid_channel_endpoint(value: &str) -> bool {
+    value.len() <= 2048 && reqwest::Url::parse(value).is_ok_and(|endpoint|
+        ["http","https"].contains(&endpoint.scheme()) && endpoint.host_str().is_some()
+        && endpoint.username().is_empty() && endpoint.password().is_none()
+        && endpoint.query().is_none() && endpoint.fragment().is_none())
 }
 fn text<'a>(args: &'a Value, key: &str) -> Result<&'a str, Error> {
     args[key]

@@ -9,6 +9,7 @@
 //! This module never sees an HTTP type beyond the status attached to an error.
 
 pub mod export;
+pub(crate) mod directory_identity;
 mod metadata;
 mod metadata_scope;
 pub mod model;

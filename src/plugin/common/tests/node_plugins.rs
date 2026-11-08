@@ -36,7 +36,9 @@ async fn switches_remove_routes_and_discovery_without_opening_disabled_services(
     config.projects = Some(cells::projects::Config {
         root: root.path().join("projects-not-created"),
         network: false,
+        channel_endpoint: None,
         execution_profiles: vec![],
+        isolation: Default::default(),
     });
     config
         .harnesses

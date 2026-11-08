@@ -10,10 +10,11 @@ pub(super) fn capabilities(state: &State, identity: usize, enabled: bool) -> Cap
             .get::<super::Execution>()
             .is_some_and(|s| s.ready())
         && state.auth.client(identity).has_execution();
+    let native=crate::projects::native::enabled(state);
     Capabilities {
         http: object(
-            json!({"process":{"exec":execution},"executionModel":if execution{"sandbox"}else{"none"},
-        "workspaceConsistency":if execution{"isolated"}else{"none"},"readOnlyEnforcement":if execution{"kernel-enforced"}else{"none"},"pathModel":if execution{"virtual-root"}else{"none"}}),
+            json!({"process":{"exec":execution},"executionModel":if !execution{"none"}else if native{"trusted-cooperative-host"}else{"sandbox"},
+        "workspaceConsistency":if !execution{"none"}else if native{"cooperative"}else{"isolated"},"readOnlyEnforcement":if execution&&!native{"kernel-enforced"}else{"none"},"pathModel":if !execution{"none"}else if native{"host-mapped"}else{"virtual-root"}}),
         ),
         node: Default::default(),
     }
