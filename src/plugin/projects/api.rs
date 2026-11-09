@@ -91,6 +91,10 @@ pub async fn call(
         "project_list" => Ok(
             json!({"projects":service.list(identity)?.iter().filter_map(|p| super::descriptor::project(state, identity, p).ok()).collect::<Vec<_>>()}),
         ),
+        "project_binding" => {
+            let project=service.get(identity,text(&args,"projectId")?)?;
+            Ok(json!({"project":super::descriptor::binding(&project)}))
+        }
         "project_read" => Ok(
             json!({"project":super::descriptor::project(state,identity,&service.get(identity,text(&args,"projectId")?)?)?}),
         ),
@@ -142,13 +146,17 @@ async fn remount(
 ) -> Result<Value, Error> {
     let _gate = state.files.exclusive()?;
     let id = text(&args, "projectId")?;
-    let project = service.remount(
+    let started=std::time::Instant::now();
+    let result = service.remount(
         state,
         identity,
         id,
         args["revision"].as_u64().ok_or_else(Error::invalid)?,
         text(&args, "access")?,
-    )?;
+        args.get("directory"),
+    );
+    crate::core::events::emit(crate::core::events::Level::Info,"project.remount",json!({"operation":"project.remount","operationId":format!("{}:{}",id,args["revision"]),"projectId":id,"stage":"validate.persist","result":if result.is_ok(){"success"}else{"failure"},"code":result.as_ref().err().map(|e|e.code),"elapsedMs":started.elapsed().as_millis()}));
+    let project=result?;
     if let Some(harness) = state.services.get::<crate::harness::Harnesses>() {
         harness.close_project(id).await;
     }

@@ -260,7 +260,7 @@
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Change project root access with a revision fence; preserves files and sessions, refuses active execution",
+    "description": "Change access or rebind an existing project to a new export and relative path for the same pinned directory; preserves identity and sessions, refuses active execution",
     "inputSchema": {
       "properties": {
         "access": {
@@ -277,6 +277,22 @@
         "revision": {
           "minimum": 1,
           "type": "integer"
+        },
+        "directory": {
+          "type": "object",
+          "properties": {
+            "alias": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "alias",
+            "path"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [
@@ -406,6 +422,24 @@
         "execution"
       ],
       "additionalProperties": false
+    }
+  },
+  {
+    "name": "project_binding",
+    "description": "Read owner-only project binding metadata for remount recovery; does not grant directory access.",
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "projectId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectId"
+      ]
     }
   }
 ]

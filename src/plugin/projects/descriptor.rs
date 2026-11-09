@@ -24,3 +24,8 @@ pub(crate) fn capabilities(state: &State, identity: usize, project: &Project) ->
     json!({"fileRead":true,"fileWrite":project.access == "rw" && client.may_write(&project.alias),
         "run":run,"sessionRead":client.has_harness(),"sessionControl":run && client.has_harness()})
 }
+
+/// Owner-only recovery metadata remains readable when the old export no longer exists.
+pub(super) fn binding(project:&Project)->Value {
+    json!({"id":project.id,"name":project.name,"alias":project.alias,"path":project.path,"access":project.access,"revision":project.revision,"mounts":project.mounts})
+}

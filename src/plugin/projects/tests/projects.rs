@@ -812,3 +812,67 @@ async fn selected_context_mounts_are_readable_and_rechecked_before_harness_execu
         assert_eq!(runtime.prepare(&profile,vec![]).err().unwrap().code,"PROJECT_CONTEXT_CHANGED");
     }
 }
+
+#[tokio::test]
+async fn remount_recovers_after_export_widening_and_alias_change_without_replacing_project() {
+    let root=tempfile::tempdir().unwrap();let mut config=deployment(root.path());
+    config.exports[0].path=root.path().join("exports/group/existing").to_string_lossy().into_owned();
+    let state=State::from_config(&config).unwrap();let original=register(&state,"",false).await;
+    let file=root.path().join("exports/group/existing/note.txt");std::fs::write(&file,"preserved").unwrap();
+    let service=state.services.require::<cells::projects::ProjectService>().unwrap();
+    service.channels.create(original["id"].as_str().unwrap(),&json!({"scopeId":"keep","cwd":"/work","endpoint":"http://localhost/channel","snapshot":{"task":{"title":"Preserved"}}})).unwrap();
+    drop(state);
+    config.exports[0].alias=Some("broader".into());config.exports[0].path=root.path().join("exports").to_string_lossy().into_owned();
+    let state=State::from_config(&config).unwrap();
+    let query=json!({"projectId":original["id"]});
+    assert!(call(&state,0,"project_read",query.clone()).await.is_err());
+    let binding=call(&state,0,"project_binding",query.clone()).await.unwrap();assert_eq!(binding["project"]["id"],original["id"]);
+    let args=json!({"projectId":original["id"],"revision":original["revision"],"access":"rw","directory":{"alias":"broader","path":"group/existing"}});
+    let updated=call(&state,0,"project_remount",args.clone()).await.unwrap()["project"].clone();
+    assert_eq!(updated["id"],original["id"]);assert_eq!(updated["revision"],2);assert_eq!(updated["alias"],"broader");
+    assert_eq!(std::fs::read_to_string(file).unwrap(),"preserved");
+    assert!(state.services.require::<cells::projects::ProjectService>().unwrap().channels.list(original["id"].as_str().unwrap(),"keep").is_ok());
+    assert_eq!(call(&state,0,"project_remount",args.clone()).await.unwrap_err().code,"PROJECT_REVISION_CHANGED");
+    let mut retry=args;retry["revision"]=updated["revision"].clone();
+    assert_eq!(call(&state,0,"project_remount",retry).await.unwrap()["project"]["revision"],updated["revision"]);
+}
+
+#[tokio::test]
+async fn remount_rejects_another_directory_escape_and_active_execution_without_changing_binding() {
+    let root=tempfile::tempdir().unwrap();let state=State::from_config(&deployment(root.path())).unwrap();
+    let original=register(&state,"group/existing",false).await;
+    std::fs::create_dir_all(root.path().join("exports/other")).unwrap();
+    std::os::unix::fs::symlink(root.path().join("reference"),root.path().join("exports/escape")).unwrap();
+    let request=|path:&str|json!({"projectId":original["id"],"revision":original["revision"],"access":"rw","directory":{"alias":"home","path":path}});
+    assert_eq!(call(&state,0,"project_remount",request("other")).await.unwrap_err().code,"PROJECT_DIRECTORY_CHANGED");
+    assert!(call(&state,0,"project_remount",request("../reference")).await.is_err());
+    assert!(call(&state,0,"project_remount",request("escape")).await.is_err());
+    let guard=state.files.exclusive().unwrap();
+    assert_eq!(call(&state,0,"project_remount",request("group/existing")).await.unwrap_err().code,"EBUSY");drop(guard);
+    let current=call(&state,0,"project_read",json!({"projectId":original["id"]})).await.unwrap();
+    assert_eq!(current["project"]["revision"],original["revision"]);assert_eq!(current["project"]["path"],original["path"]);
+}
+
+#[tokio::test]
+async fn recovery_binding_is_owner_only_and_does_not_restore_revoked_directory_access() {
+    let root=tempfile::tempdir().unwrap();let mut config=deployment(root.path());config.token=None;
+    config.principals=["owner","bob"].into_iter().map(|id|serde_json::from_value(json!({"id":id,"token":format!("{id}-local-fixture-0123456789abcdef")})).unwrap()).collect();
+    config.harnesses[0].principal_id=Some("owner".into());
+    config.exports[0].grants=vec![serde_json::from_value(json!({"principal":"owner","access":"rw","execute":true})).unwrap()];
+    let state=State::from_config(&config).unwrap();let project=register(&state,"group/existing",false).await;drop(state);
+    config.exports[0].grants.clear();let state=State::from_config(&config).unwrap();let args=json!({"projectId":project["id"]});
+    assert!(call(&state,0,"project_binding",args.clone()).await.is_ok());
+    assert!(call(&state,0,"project_read",args.clone()).await.is_err());
+    assert!(call(&state,1,"project_binding",args.clone()).await.is_err());
+    assert!(call(&state,1,"project_remount",json!({"projectId":project["id"],"revision":1,"access":"rw","directory":{"alias":"home","path":"group/existing"}})).await.is_err());
+}
+
+#[tokio::test]
+async fn remount_does_not_create_two_registered_project_identities_for_one_new_binding() {
+    let root=tempfile::tempdir().unwrap();let mut config=deployment(root.path());
+    let state=State::from_config(&config).unwrap();let original=register(&state,"group/existing",false).await;drop(state);
+    config.exports[0].alias=Some("new".into());let state=State::from_config(&config).unwrap();
+    call(&state,0,"project_register",json!({"name":"Another","alias":"new","path":"group/existing","access":"rw"})).await.unwrap();
+    let error=call(&state,0,"project_remount",json!({"projectId":original["id"],"revision":original["revision"],"access":"rw","directory":{"alias":"new","path":"group/existing"}})).await.unwrap_err();
+    assert_eq!(error.code,"PROJECT_DIRECTORY_ALREADY_REGISTERED");
+}

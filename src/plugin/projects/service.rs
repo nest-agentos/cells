@@ -10,6 +10,7 @@ use crate::{
     process::{self, Mount},
 };
 use std::sync::{Arc, Mutex};
+use serde_json::Value;
 
 pub struct ProjectService {
     pub channels: super::channel::Channels,
@@ -219,6 +220,7 @@ impl ProjectService {
         id: &str,
         revision: u64,
         access: &str,
+        directory: Option<&Value>,
     ) -> Result<Project, Error> {
         let _serial = self.admission.lock().map_err(|_| Error::internal())?;
         let mut project = self.get(identity, id)?;
@@ -228,9 +230,14 @@ impl ProjectService {
         if !matches!(access, "ro" | "rw") {
             return Err(Error::invalid());
         }
+        let previous=project.clone();
+        if let Some(directory)=directory {readdress(&mut project,directory)?;}
         project.access = access.into();
+        if directory.is_some()&&self.list(identity)?.iter().any(|other|other.id!=project.id&&other.alias==project.alias&&other.path==project.path) {
+            return Err(Error::conflict("PROJECT_DIRECTORY_ALREADY_REGISTERED"));
+        }
         validate(state, identity, &project, true)?;
-        if self.get(identity, id)?.access == access {
+        if previous.access == access && previous.alias==project.alias && previous.path==project.path {
             maintain_metadata(state, identity, &project)?;
             return Ok(project);
         }
@@ -239,6 +246,18 @@ impl ProjectService {
         self.store.save(project, Some(revision))
     }
 }
+fn readdress(project:&mut Project,directory:&Value)->Result<(),Error> {
+    let alias=directory["alias"].as_str().filter(|s|!s.is_empty()).ok_or_else(Error::invalid)?;
+    let path=normalize(directory["path"].as_str().ok_or_else(Error::invalid)?)?;
+    for mount in &mut project.mounts {
+        if mount.alias!=project.alias {continue;}
+        let suffix=if mount.path==project.path {Some("")} else if project.path.is_empty(){Some(mount.path.as_str())}
+            else {mount.path.strip_prefix(&(project.path.clone()+"/"))};
+        if let Some(suffix)=suffix {mount.alias=alias.into();mount.path=[path.as_str(),suffix].into_iter().filter(|s|!s.is_empty()).collect::<Vec<_>>().join("/");}
+    }
+    project.alias=alias.into();project.path=path;Ok(())
+}
+
 pub fn normalize(value: &str) -> Result<String, Error> {
     if value.starts_with('/') || value.contains(['\\', '\0']) {
         return Err(Error::invalid());

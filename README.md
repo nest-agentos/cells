@@ -43,7 +43,7 @@ access = "rw"                        # 默认 ro；rw 自动加独占锁
 
 启动时逐项显示实际打开的导出别名与 `ro/rw`、`read/write` 状态，`server.ready` 事件的 `exports` 数组提供相同信息，写权限同时核对目录能力和当前认证身份。此状态表示服务端导出权限；已注册项目及 NestOS 保存的客户端绑定还可限制为只读，修改导出配置不会自动提升已有项目权限。
 
-已有项目可通过 `project_remount(projectId, revision, access)` 修改根权限，保留 ID、目录和原生会话。权限变更校验导出授权、原目录身份和版本，拒绝在途执行；提交后关闭旧项目 harness 与 watcher，使旧 revision 失效。读写根仍受额外挂载各自的授权限制，不修改导出配置。响应丢失时先读取项目核对结果。
+已有项目可通过 `project_remount(projectId, revision, access, directory?)` 修改根权限，保留 ID、目录和原生会话。Cells 0.4.6 的 `projectRemountPaths: 1` 支持可选 `directory: {alias, path}`，将原项目绑定到新的 export 和相对目录。例如原来导出 `x1=/home/li/share/prj/x1`、项目 path 为空，改为 `prj=/home/li/share/prj` 后，重新绑定选择 `alias="prj", path="x1"`。新目标必须匹配已登记的实际目录身份；不创建空目录，也不能替换成其他项目目录。旧别名失效时，认证的原项目所有者可通过 `project_binding(projectId)` 读取修复所需的绑定与修订元数据，该查询不授予旧目录文件、执行或会话访问权。权限变更校验导出授权、原目录身份和版本，拒绝在途执行；提交后关闭旧项目 harness 与 watcher，使旧 revision 失效。读写根仍受额外挂载各自的授权限制，不修改导出配置。响应丢失时先读取项目核对结果；旧导出不可读时使用 `project_binding`。同一目标和权限的重复确认不增加 revision。NestOS 的“重新挂载…”弹窗可选择导出、相对目录与权限；成功后更新已有挂载和来源缓存，保留项目 ID 与会话关联。配置变更先在 Cells 重启后生效；正常重新绑定不要求重启 NestOS，其他窗口需刷新绑定。冻结的旧 revision 不再授权新操作。
 
 ### 文件 metadata 与目录挂载
 
