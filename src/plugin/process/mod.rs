@@ -24,7 +24,7 @@ mod subscription;
 
 pub use execution::{enable, Execution};
 pub use model::{Mount, Process, Registry, Request, Status};
-pub use service::{cancel, start, status};
+pub use service::{cancel, start, start_command, status};
 
 pub mod http;
 pub(crate) mod plugin;

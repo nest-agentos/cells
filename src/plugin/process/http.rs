@@ -17,7 +17,7 @@ pub async fn start(
     Json(request): Json<process::Request>,
 ) -> Result<Json<process::Status>, Error> {
     let identity = access::identity(&state, &headers)?;
-    Ok(Json(process::start(&state, identity, request)?))
+    Ok(Json(process::start_command(&state, identity, request).await?))
 }
 
 pub async fn status(

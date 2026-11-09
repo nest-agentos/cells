@@ -88,6 +88,22 @@ impl FileGate {
         })
     }
 
+    /// Queue behind short observational reads without waiting for native execution.
+    pub async fn command(&self, request_id: &str, budget_ms: u64) -> Result<ExclusivePermit, Error> {
+        self.check()?;
+        let mutations = self.inner.clone().try_write_owned().map_err(|_| self.busy("exclusive"))?;
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(std::time::Duration::from_millis(budget_ms.min(1000)),
+            self.readers.clone().write_owned()).await;
+        crate::core::events::emit(crate::core::events::Level::Info, "file.gate.command", serde_json::json!({
+            "operation":"file.gate.acquire", "operationId":request_id, "stage":"exclusive-readers",
+            "result":if result.is_ok(){"success"}else{"failure"}, "code":if result.is_ok(){None}else{Some("EBUSY")},
+            "durationMs":started.elapsed().as_millis()}));
+        let readers = result.map_err(|_| Error::busy())?;
+        self.check()?;
+        Ok(ExclusivePermit {_mutations: mutations, _readers: readers})
+    }
+
     /// Admit a native turn while excluding file mutations and supervised commands.
     pub fn activity(&self) -> Result<ActivityPermit, Error> {
         let mut activity = self.activity.lock().map_err(|_| Error::internal())?;
@@ -146,6 +162,51 @@ impl FileGate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn command_waits_fairly_for_readers_and_keeps_mutation_exclusion() {
+        let gate = FileGate::new();
+        let reader = gate.read_only().unwrap();
+        let mut pending = Box::pin(gate.command("waiting-command", 1000));
+        tokio::select! {biased; _ = &mut pending => panic!("reader still held"), _ = tokio::task::yield_now() => {}}
+        assert!(gate.read_only().is_err());
+        assert!(gate.shared().is_err());
+        assert!(gate.activity().is_err());
+        drop(reader);
+        let command = pending.await.unwrap();
+        assert!(gate.read_only().is_err());
+        drop(command);
+        assert!(gate.read_only().is_ok());
+        assert!(gate.activity().is_ok());
+    }
+
+    #[tokio::test]
+    async fn command_timeout_and_cancel_release_both_gates() {
+        let gate = FileGate::new();
+        let reader = gate.read_only().unwrap();
+        assert_eq!(gate.command("timeout", 10).await.unwrap_err().code, "EBUSY");
+        assert!(gate.shared().is_ok());
+        assert!(gate.read_only().is_ok());
+        let mut pending = Box::pin(gate.command("cancelled-wait", 1000));
+        tokio::select! {biased; _ = &mut pending => panic!("reader still held"), _ = tokio::task::yield_now() => {}}
+        drop(pending);
+        drop(reader);
+        assert!(gate.exclusive().is_ok());
+    }
+
+    #[tokio::test]
+    async fn command_does_not_wait_for_native_turns_or_admit_after_poisoning() {
+        let gate = FileGate::new();
+        let native = gate.activity().unwrap();
+        assert_eq!(gate.command("native-busy", 1000).await.unwrap_err().code, "EBUSY");
+        drop(native);
+        let reader = gate.read_only().unwrap();
+        let mut pending = Box::pin(gate.command("poisoned-wait", 1000));
+        tokio::select! {biased; _ = &mut pending => panic!("reader still held"), _ = tokio::task::yield_now() => {}}
+        gate.poison();
+        drop(reader);
+        assert_eq!(pending.await.unwrap_err().code, "EIO");
+    }
+
     #[test]
     fn execution_permits_exclude_mutations_until_the_last_owner_leaves() {
         let gate = FileGate::new();

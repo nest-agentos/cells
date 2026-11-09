@@ -18,7 +18,7 @@ use std::sync::Arc;
 /// Start a command, or return the record of an identical earlier request.
 pub fn start(state: &Arc<State>, identity: usize, request: Request) -> Result<Status, Error> {
     let id: String = request.request_id.chars().take(128).collect();
-    start_authorized(state, identity, request).inspect_err(|error| {
+    start_authorized(state, identity, request, None).inspect_err(|error| {
         crate::core::events::emit(
             crate::core::events::Level::Warn,
             "process.rejected",
@@ -27,11 +27,22 @@ pub fn start(state: &Arc<State>, identity: usize, request: Request) -> Result<St
     })
 }
 
-fn start_authorized(
-    state: &Arc<State>,
-    identity: usize,
-    request: Request,
-) -> Result<Status, Error> {
+/// Wait fairly for short readers before admitting a new command; duplicates never replay.
+pub async fn start_command(state: &Arc<State>, identity: usize, request: Request) -> Result<Status, Error> {
+    let id = request.request_id.clone();
+    let result = async {
+        authorize_request(state, identity, &request)?;
+        if let Some(process) = state.services.require::<crate::process::Execution>()?.registry().get(identity, &id)? {
+            return Ok(process.status());
+        }
+        let permit = state.files.command(&id, request.timeout_ms).await?;
+        start_authorized(state, identity, request, Some(permit))
+    }.await;
+    result.inspect_err(|error: &Error| crate::core::events::emit(crate::core::events::Level::Warn,
+        "process.rejected", serde_json::json!({"requestId":id,"identity":identity,"code":error.code})))
+}
+
+fn authorize_request(state: &Arc<State>, identity: usize, request: &Request) -> Result<(), Error> {
     if request
         .mounts
         .iter()
@@ -43,12 +54,22 @@ fn start_authorized(
     if state.auth.server_id() != Some(request.server_id.as_str()) {
         return Err(Error::conflict("SERVER_ID_CHANGED"));
     }
+    Ok(())
+}
+
+fn start_authorized(
+    state: &Arc<State>,
+    identity: usize,
+    request: Request,
+    permit: Option<crate::core::gate::ExclusivePermit>,
+) -> Result<Status, Error> {
+    authorize_request(state, identity, &request)?;
     let process =
         state.services.require::<crate::process::Execution>()?
             .registry()
             .get_or_create(identity, &request.request_id, || {
                 // The command owns every export until it has been reaped.
-                let gate = state.files.exclusive()?;
+                let gate = match permit {Some(permit) => permit, None => state.files.exclusive()?};
                 let plan = policy::plan(state, identity, &request)?;
                 let lock = match plan.writer() {
                     Some(export) => export.try_clone_root()?,

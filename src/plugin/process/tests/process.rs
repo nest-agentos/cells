@@ -87,6 +87,25 @@ path = "{}"
         .unwrap()
         .unwrap()
         .revision;
+    // Cancellation while waiting creates a tombstone before any process is admitted.
+    let mut cancelled_request = request.clone();
+    cancelled_request["requestId"] = json!("cancel-before-admission");
+    cancelled_request["args"] = json!(["-c", "echo unexpected > cancelled-command"]);
+    let reader = state.files.read_only().unwrap();
+    let mut cancelled = Box::pin(send(&app, "POST", "/v1/processes", cancelled_request));
+    tokio::select! {biased; _ = &mut cancelled => panic!("reader still held"), _ = tokio::task::yield_now() => {}}
+    let cancel_path = format!("/v1/processes/{epoch}/cancel-before-admission/cancel");
+    assert_eq!(send(&app, "POST", &cancel_path, Value::Null).await.1["state"], "cancelled");
+    drop(reader);
+    assert_eq!(cancelled.await.1["state"], "cancelled");
+    assert!(!project.join("cancelled-command").exists());
+    // Readers may finish before admission; the queued command must not be replayed.
+    let reader = state.files.read_only().unwrap();
+    let mut queued = Box::pin(send(&app, "POST", "/v1/processes", request.clone()));
+    tokio::select! {biased; _ = &mut queued => panic!("reader still held"), _ = tokio::task::yield_now() => {}}
+    assert!(state.files.read_only().is_err());
+    drop(reader);
+    assert_eq!(queued.await.0, StatusCode::OK);
     assert_eq!(
         send(&app, "POST", "/v1/processes", request.clone()).await.0,
         StatusCode::OK

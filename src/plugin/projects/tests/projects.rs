@@ -401,7 +401,11 @@ async fn native_project_bash_and_codex_share_directory_grants() {
     let id = project["id"].as_str().unwrap();
     let configured=call(&state,0,"project_configure",json!({"projectId":id,"revision":1,"name":"Notes","mounts":[{"alias":"reference","path":"","at":"/workspace/ref","access":"ro"}]})).await.unwrap()["project"].clone();
     std::fs::write(root.path().join("reference/guide"), "reference").unwrap();
-    let started=call(&state,0,"project_exec",json!({"projectId":id,"revision":2,"epoch":state.services.require::<cells::process::Execution>().unwrap().epoch(),"requestId":"bash","command":"/bin/bash","args":["-c","set -eu; test $(pwd) = /workspace; cat ref/guide; test ! -e /etc/passwd; if echo x > ref/guide 2>/dev/null; then exit 7; fi; echo project > note"],"timeoutMs":5000})).await.unwrap();
+    let reader = state.files.read_only().unwrap();
+    let mut admission=Box::pin(call(&state,0,"project_exec",json!({"projectId":id,"revision":2,"epoch":state.services.require::<cells::process::Execution>().unwrap().epoch(),"requestId":"bash","command":"/bin/bash","args":["-c","set -eu; test $(pwd) = /workspace; cat ref/guide; test ! -e /etc/passwd; if echo x > ref/guide 2>/dev/null; then exit 7; fi; echo project > note"],"timeoutMs":5000})));
+    tokio::select! {biased; _ = &mut admission => panic!("reader still held"), _ = tokio::task::yield_now() => {}}
+    drop(reader);
+    let started = admission.await.unwrap();
     assert!(started["process"].is_object());
     let result = loop {
         let result = cells::process::status(

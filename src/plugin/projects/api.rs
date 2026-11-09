@@ -116,7 +116,7 @@ pub async fn call(
             }
             Ok(json!({"forgotten":id}))
         }
-        "project_exec" => execute(state, identity, service, args),
+        "project_exec" => execute(state, identity, service, args).await,
         "project_search" => super::search::search(state, identity, args).await,
         _ => Err(Error::unsupported()),
     }
@@ -184,7 +184,7 @@ async fn configure(
     Ok(json!({"project":super::descriptor::project(state,identity,&project)?}))
 }
 
-fn execute(
+async fn execute(
     state: &Arc<State>,
     identity: usize,
     service: &ProjectService,
@@ -217,5 +217,5 @@ fn execute(
     if request.cwd != "/workspace" && !request.cwd.starts_with("/workspace/") {
         return Err(Error::forbidden("EACCES"));
     }
-    Ok(json!({"process":process::start(state,identity,request)?}))
+    Ok(json!({"process":process::start_command(state,identity,request).await?}))
 }
