@@ -3,6 +3,15 @@ use axum::{extract::DefaultBodyLimit, routing::post, Router};
 use std::sync::Arc;
 pub struct Mcp;
 impl NodePlugin for Mcp {
+    fn configure(&self,config:&dyn PluginConfiguration,state:&mut State)->Result<(),String> {
+        state.services.insert(Arc::new(super::listener::Listener::new(super::listener::address(config)?)))
+    }
+    fn start<'a>(&'a self,state:&'a Arc<State>)->crate::plugins::PluginFuture<'a> {
+        Box::pin(async move {state.services.require::<super::listener::Listener>()?.start(state).await})
+    }
+    fn stop<'a>(&'a self,state:&'a Arc<State>)->crate::plugins::PluginFuture<'a> {
+        Box::pin(async move {state.services.require::<super::listener::Listener>()?.stop().await})
+    }
     fn request_headers(&self) -> &'static [&'static str] {
         &["mcp-protocol-version", "mcp-method", "mcp-name"]
     }
@@ -11,11 +20,13 @@ impl NodePlugin for Mcp {
         "mcp"
     }
     fn routes(&self) -> Router<Arc<State>> {
-        Router::new()
-            .route("/v1/channel/mcp", post(crate::http::agent_mcp::endpoint))
-            .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
+        routes()
     }
-    fn validate(&self, _config: &dyn PluginConfiguration) -> Result<(), String> {
-        Ok(())
+    fn validate(&self, config: &dyn PluginConfiguration) -> Result<(), String> {
+        super::listener::address(config).map(|_|())
     }
+}
+pub(crate) fn routes()->Router<Arc<State>> {
+    Router::new().route("/v1/channel/mcp",post(crate::http::agent_mcp::endpoint))
+        .layer(DefaultBodyLimit::max(2*1024*1024))
 }

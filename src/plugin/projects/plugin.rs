@@ -59,7 +59,7 @@ impl NodePlugin for Projects {
         "projects"
     }
     fn optional_dependencies(&self) -> &'static [&'static str] {
-        &["sync"]
+        &["sync","mcp"]
     }
     fn default_enabled(&self, config: &dyn PluginConfiguration) -> bool {
         let Ok(config) = crate::config::plugin_adapter::deployment(config) else {
@@ -99,6 +99,16 @@ impl NodePlugin for Projects {
         state.services.get::<crate::projects::ProjectService>()
             .ok_or("Project service unavailable")?.restore_metadata(state)
             .map_err(|_| "Project metadata initialization failed")?;
+        if projects.network {if let Some(transport)=state.services.get::<crate::plugin::mcp::InternalTransport>(){transport.require();}}
         Ok(())
+    }
+    fn start<'a>(&'a self,state:&'a Arc<State>)->crate::plugins::PluginFuture<'a> {
+        Box::pin(async move {
+            let service=state.services.require::<super::ProjectService>()?;
+            if service.channels_enabled {if let Some(transport)=state.services.get::<crate::plugin::mcp::InternalTransport>() {
+                service.channels.set_endpoint(Some(transport.endpoint()?))?;
+            }}
+            Ok(())
+        })
     }
 }

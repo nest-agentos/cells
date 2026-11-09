@@ -87,6 +87,12 @@ pub fn router(state: Arc<State>, origins: &[String]) -> Result<Router, String> {
         .with_state(state))
 }
 
+/// Internal transport exposes only the scope-authorized MCP route, without management APIs.
+pub(crate) fn internal_mcp(state:Arc<State>,router:Router<Arc<State>>)->Router {
+    router
+        .layer(middleware::from_fn(events::failures)).with_state(state)
+}
+
 /// `["*"]` allows every browser origin; otherwise entries must match exactly.
 fn allow_origin(origins: &[String]) -> Result<AllowOrigin, String> {
     if origins.iter().any(|origin| origin == "*") {

@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 pub struct Harness(pub crate::harness::HarnessPlugins);
 impl NodePlugin for Harness {
+    fn optional_dependencies(&self)-> &'static [&'static str] { &["mcp","projects"] }
     fn subscribe<'a>(
         &'a self,
         state: &'a Arc<State>,

@@ -44,7 +44,7 @@ pub async fn call(
                 "project_channel_open" => {
                     if !service.channels_enabled || !state.plugins.enabled("mcp") {return Err(Error::unsupported());}
                     if let Some(endpoint) = &service.channel_endpoint {args["endpoint"] = json!(endpoint);}
-                    if !valid_channel_endpoint(text(&args,"endpoint")?) {return Err(Error::invalid());}
+                    if args.get("endpoint").is_some()&&!args["endpoint"].as_str().is_some_and(valid_channel_endpoint) {return Err(Error::invalid());}
                     let started=std::time::Instant::now();let resolved=super::context::prepare(state,identity,&project,&mut args);
                     if args.get("contextProjects").is_some() {
                         crate::core::events::emit(crate::core::events::Level::Info,"project.context.resolve",json!({"projectId":project.id,"operationId":args["scopeId"],"stage":"directories","result":if resolved.is_ok(){"success"}else{"failure"},"projectCount":args["contextProjects"].as_array().map(Vec::len),"code":resolved.as_ref().err().map(|error|error.code),"durationMs":started.elapsed().as_millis()}));

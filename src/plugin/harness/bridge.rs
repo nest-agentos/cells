@@ -426,6 +426,9 @@ fn native_result_fields(reply: &Pending, details: Value) -> Value {
 }
 
 fn native_error(error: &Value) -> Error {
+    if error["message"].as_str().is_some_and(|message|message.contains("required MCP servers failed")||message.contains("required mcp servers failed")) {
+        return Error::conflict("HARNESS_MCP_INIT_FAILED");
+    }
     if error["message"]
         .as_str()
         .is_some_and(|message| message.contains("already has an active writer"))
@@ -562,6 +565,7 @@ mod diagnostic_tests {
 
     #[test]
     fn retains_safe_native_error_categories() {
+        assert_eq!(native_error(&json!({"code":-32603,"message":"required MCP servers failed to initialize: cells_session private details"})).code,"HARNESS_MCP_INIT_FAILED");
         assert_eq!(
             native_error(
                 &json!({"code":-32600,"message":"thread private-id already has an active writer"})

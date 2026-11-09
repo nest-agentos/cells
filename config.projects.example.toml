@@ -8,8 +8,8 @@ root = "/var/lib/cells/projects"
 network = false
 # Use "none" only when processes should run directly in this node OS/VM.
 isolation = "bubblewrap"
-# Agent-reachable endpoint in this node OS/VM; enable network for channels.
-# channel_endpoint = "http://127.0.0.1:8787/v1/channel/mcp"
+# With network=true, Cells injects its internal MCP listener (127.0.0.1:8788).
+# No guest URL or host-forwarded port needs to be configured here.
 
 # Each export root owns one .nestos/meta.sqlite, created only by the first metadata write.
 # Read-only access never creates or changes it; rw still requires project + principal grants.

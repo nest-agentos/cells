@@ -10,7 +10,7 @@ pub(crate) use tools::definitions;
 mod client_state;
 mod servers;
 
-pub struct Channels(Mutex<Connection>, tokio::sync::watch::Sender<u64>,pub(super) Mutex<Connection>,pub(super) tokio::sync::Mutex<()>,pub(super) Mutex<std::collections::HashSet<String>>);
+pub struct Channels(Mutex<Connection>, tokio::sync::watch::Sender<u64>,pub(super) Mutex<Connection>,pub(super) tokio::sync::Mutex<()>,pub(super) Mutex<std::collections::HashSet<String>>, std::sync::RwLock<Option<String>>);
 impl Channels {
     pub fn open(root: &Path) -> Result<Self, Error> {
         let path = root.join("session-channels.sqlite");
@@ -27,7 +27,10 @@ impl Channels {
             CREATE TABLE IF NOT EXISTS publications(project TEXT,scope TEXT,id TEXT,origin TEXT NOT NULL,PRIMARY KEY(project,scope,id));
             CREATE UNIQUE INDEX IF NOT EXISTS active_scope ON scopes(project,cwd) WHERE closed=0;").map_err(storage)?;
         db.execute("UPDATE scopes SET execution=json_set(execution,'$.status','unknown','$.recoveryReason','CELLS_RESTARTED') WHERE json_extract(execution,'$.status') IN ('running','submitting')",[]).map_err(storage)?;
-        Ok(Self(Mutex::new(db),tokio::sync::watch::channel(0).0,Mutex::new(client_state::open(root)?),tokio::sync::Mutex::new(()),Mutex::new(std::collections::HashSet::new())))
+        Ok(Self(Mutex::new(db),tokio::sync::watch::channel(0).0,Mutex::new(client_state::open(root)?),tokio::sync::Mutex::new(()),Mutex::new(std::collections::HashSet::new()),std::sync::RwLock::new(None)))
+    }
+    pub fn set_endpoint(&self,endpoint:Option<String>)->Result<(),Error> {
+        *self.5.write().map_err(storage)?=endpoint;Ok(())
     }
     fn touch(&self) {self.1.send_modify(|revision|*revision=revision.wrapping_add(1));}
     pub fn watch(&self) -> tokio::sync::watch::Receiver<u64> {self.1.subscribe()}
@@ -42,14 +45,14 @@ impl Channels {
         if snapshot.len() > 2 * 1024 * 1024 || !args["snapshot"].is_object() { return Err(Error::too_large("CHANNEL_CONTEXT_LIMIT")); }
         if args["snapshot"].as_object().unwrap().values().any(|v|v.to_string().len()>65536) {return Err(Error::too_large("CHANNEL_SECTION_LIMIT"));}
         let cwd = args["cwd"].as_str().ok_or_else(Error::invalid)?;
-        let endpoint = args["endpoint"].as_str().ok_or_else(Error::invalid)?;
+        let endpoint = args.get("endpoint").and_then(Value::as_str).unwrap_or("");
         if cwd.len() > 4096 || endpoint.len() > 2048 {return Err(Error::invalid());}
         let mut connection = self.0.lock().map_err(storage)?;
         let db = connection.transaction().map_err(storage)?;
         let existing: Option<(String, String, String, bool)> = db.query_row("SELECT snapshot,cwd,endpoint,closed FROM scopes WHERE project=?1 AND id=?2", params![project,id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(storage)?;
         if let Some(previous) = existing {
             if previous.3 {return Err(Error::conflict("CHANNEL_SCOPE_CLOSED"));}
-            if (previous.0,previous.1,previous.2) != (snapshot, cwd.into(), endpoint.into()) { return Err(Error::conflict("CHANNEL_SCOPE_CHANGED")); }
+            if (previous.0,previous.1) != (snapshot, cwd.into()) { return Err(Error::conflict("CHANNEL_SCOPE_CHANGED")); }
         } else {
             let execution = replace_scope(&db,project,cwd,args)?;
             let mut bytes = [0u8; 32]; getrandom::getrandom(&mut bytes).map_err(storage)?;
@@ -64,7 +67,8 @@ impl Channels {
         let rows: Vec<(String,String)> = db.prepare("SELECT token,endpoint FROM scopes WHERE project=?1 AND cwd=?2 AND closed=0 AND expires_at>unixepoch()*1000 ORDER BY rowid DESC LIMIT 2").map_err(storage)?
             .query_map(params![project,cwd], |r| Ok((r.get(0)?,r.get(1)?))).map_err(storage)?.collect::<Result<_,_>>().map_err(storage)?;
         if rows.len() > 1 {return Err(Error::conflict("CHANNEL_BINDING_AMBIGUOUS"));}
-        let scoped=rows.first().map(|(token,endpoint)| json!({"features.mcp_2026_07_28":true,"mcp_servers.cells_session":{"url":endpoint,"required":true,"default_tools_approval_mode":"approve","enabled_tools":["session_context","session_report","session_receipt","session_request","session_response"],"http_headers":{"Authorization":format!("Bearer {token}")}}}));
+        let endpoint=self.5.read().map_err(storage)?.clone();
+        let scoped=rows.first().map(|(token,endpoint_saved)| json!({"features.mcp_2026_07_28":true,"mcp_servers.cells_session":{"url":endpoint.as_ref().unwrap_or(endpoint_saved),"required":true,"default_tools_approval_mode":"approve","enabled_tools":["session_context","session_report","session_receipt","session_request","session_response"],"http_headers":{"Authorization":format!("Bearer {token}")}}}));
         drop(db);self.agent_config(owner,scoped)
     }
     pub fn agent(&self, token: &str, method: &str, args: &Value) -> Result<Value, Error> {
