@@ -354,9 +354,6 @@ const ENVIRONMENT: &[&str] = &[
     "PATH",
     "LANG",
     "USER",
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_AUTH_TOKEN",
-    "ANTHROPIC_BASE_URL",
 ];
 fn environment(command: &mut tokio::process::Command, config: &ProfileConfig, scoped: bool) {
     command.env_clear();
@@ -367,6 +364,7 @@ fn environment(command: &mut tokio::process::Command, config: &ProfileConfig, sc
         }
     }
     crate::harness::environment::inherit(command);
+    crate::harness::environment::inherit_prefixed(command,&["ANTHROPIC_","CLAUDE_CODE_"]);
     command
         .env("CLAUDE_CONFIG_DIR", &config.home)
         .env("CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS", "1")

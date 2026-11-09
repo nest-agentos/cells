@@ -144,14 +144,13 @@ fn environment(
         "HOME",
         "USER",
         "LANG",
-        "DEEPSEEK_API_KEY",
-        "DEEPSEEK_BASE_URL",
     ] {
         if let Some(value) = std::env::var_os(key) {
             command.env(key, value);
         }
     }
     super::super::environment::inherit(command);
+    super::super::environment::inherit_prefixed(command,&["DEEPSEEK_","DSH_"]);
     command.env("DSH_HOME", &profile.home);
     if let Some(runtime) = runtime {
         if runtime.isolated(){command.env("HOME", "/tmp");}
