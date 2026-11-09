@@ -18,7 +18,7 @@ enum TopologyGuard {
     Read(#[allow(dead_code)] OwnedRwLockReadGuard<()>),
     Write(#[allow(dead_code)] OwnedRwLockWriteGuard<()>),
 }
-pub(super) struct MutationGuard {
+pub(crate) struct MutationGuard {
     _topology: TopologyGuard,
     _session: OwnedMutexGuard<()>,
 }
@@ -36,6 +36,11 @@ impl MutationQueues {
         let queue = Arc::new(AsyncMutex::new(()));
         sessions.insert(key, Arc::downgrade(&queue));
         queue
+    }
+    pub(crate) fn try_recovery(&self, args: &Value) -> Result<MutationGuard,Error> {
+        let session=self.session(args).try_lock_owned().map_err(|_|Error::busy())?;
+        let topology=TopologyGuard::Read(self.topology.clone().try_read_owned().map_err(|_|Error::busy())?);
+        Ok(MutationGuard{_topology:topology,_session:session})
     }
     pub async fn acquire(&self, name: &str, args: &Value) -> Result<MutationGuard, Error> {
         let session = self.session(args).lock_owned().await;

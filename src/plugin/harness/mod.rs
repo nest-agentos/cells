@@ -1,5 +1,6 @@
 //! Host harness profiles, separate from short-lived sandboxed shell commands.
 mod context_identity;
+mod execution_state;
 mod attachments;
 mod bridge;
 #[path = "drivers/claude/mod.rs"]
@@ -41,3 +42,5 @@ pub(crate) mod plugin;
 mod contribution;
 
 pub use plugin::Harness as Plugin;
+
+pub(crate) fn validate_queue_attachments(prompt:&str,files:&serde_json::Value)->Result<(),crate::core::error::Error>{attachments::input(prompt,files).map(|_|())}

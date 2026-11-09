@@ -77,6 +77,7 @@ impl NodePlugin for Harness {
     }
     fn start<'a>(&'a self, state: &'a Arc<State>) -> PluginFuture<'a> {
         Box::pin(async move {
+            if state.services.get::<crate::projects::ProjectService>().is_some() {crate::plugin::projects::harness_recovery::maintain(Arc::downgrade(state));}
             super::Harnesses::maintain(Arc::downgrade(state));
             Ok(())
         })

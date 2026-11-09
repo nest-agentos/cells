@@ -8,6 +8,8 @@ pub(super) fn open(root:&std::path::Path)->Result<Connection,Error>{
     std::fs::OpenOptions::new().create(true).append(true).mode(0o600).custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32).open(&path)?;
     let db=Connection::open(path).map_err(storage)?;
     db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS client_state(project TEXT,owner TEXT,key TEXT,body TEXT NOT NULL,PRIMARY KEY(project,owner,key));").map_err(storage)?;
+    super::super::harness_recovery::schema(&db)?;
+    super::super::harness_queue::schema(&db)?;
     Ok(db)
 }
 impl Channels {
@@ -21,6 +23,7 @@ impl Channels {
         let text=|field:&str|->Result<Option<String>,Error>{match &args[field]{Value::Null=>Ok(None),Value::String(value) if value.len()<=1024*1024=>Ok(Some(value.clone())),_=>Err(Error::too_large("CLIENT_STATE_LIMIT"))}};
         let expected=text("expected")?;let value=text("value")?;
         if current!=expected{return Ok(json!({"applied":false}));}
+        super::super::harness_queue::protect(&tx,project,owner,key,current.as_deref(),value.as_deref())?;
         if let Some(value)=value{tx.execute("INSERT INTO client_state(project,owner,key,body) VALUES(?1,?2,?3,?4) ON CONFLICT(project,owner,key) DO UPDATE SET body=excluded.body",params![project,owner,key,value]).map_err(storage)?;}
         else{tx.execute("DELETE FROM client_state WHERE project=?1 AND owner=?2 AND key=?3",params![project,owner,key]).map_err(storage)?;}
         tx.commit().map_err(storage)?;Ok(json!({"applied":true}))

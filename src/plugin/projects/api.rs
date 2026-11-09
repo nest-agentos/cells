@@ -8,6 +8,8 @@ pub async fn call(
     name: &str,
     mut args: Value,
 ) -> Result<Value, Error> {
+    if name == "project_harness_queue" {return super::harness_queue::call(state,identity,args).await;}
+    if name == "project_harness_recovery" {return super::harness_recovery::call(state,identity,args).await;}
     if name.starts_with("project_sync_") {
         return super::directory_sync::call(state, identity, name, args).await;
     }
@@ -43,7 +45,14 @@ pub async fn call(
                     if !service.channels_enabled || !state.plugins.enabled("mcp") {return Err(Error::unsupported());}
                     if let Some(endpoint) = &service.channel_endpoint {args["endpoint"] = json!(endpoint);}
                     if !valid_channel_endpoint(text(&args,"endpoint")?) {return Err(Error::invalid());}
-                    service.channels.create(&project.id, &args)
+                    let started=std::time::Instant::now();let resolved=super::context::prepare(state,identity,&project,&mut args);
+                    if args.get("contextProjects").is_some() {
+                        crate::core::events::emit(crate::core::events::Level::Info,"project.context.resolve",json!({"projectId":project.id,"operationId":args["scopeId"],"stage":"directories","result":if resolved.is_ok(){"success"}else{"failure"},"projectCount":args["contextProjects"].as_array().map(Vec::len),"code":resolved.as_ref().err().map(|error|error.code),"durationMs":started.elapsed().as_millis()}));
+                    }
+                    resolved?;
+                    let mut receipt=service.channels.create(&project.id, &args)?;
+                    if let Some(context)=args["snapshot"].get("project-context") {receipt["projectContext"]=context.clone();}
+                    Ok(receipt)
                 },
                 "project_channel_current" => service.channels.current(&project.id,text(&args,"cwd")?),
                 "project_channel_acknowledge" => service.channels.acknowledge(&project.id,text(&args,"scopeId")?,&args),

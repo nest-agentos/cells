@@ -8,7 +8,7 @@ mod exchange;
 mod client_state;
 mod servers;
 
-pub struct Channels(Mutex<Connection>, tokio::sync::watch::Sender<u64>,Mutex<Connection>);
+pub struct Channels(Mutex<Connection>, tokio::sync::watch::Sender<u64>,pub(super) Mutex<Connection>,pub(super) tokio::sync::Mutex<()>,pub(super) Mutex<std::collections::HashSet<String>>);
 impl Channels {
     pub fn open(root: &Path) -> Result<Self, Error> {
         let path = root.join("session-channels.sqlite");
@@ -25,7 +25,7 @@ impl Channels {
             CREATE TABLE IF NOT EXISTS publications(project TEXT,scope TEXT,id TEXT,origin TEXT NOT NULL,PRIMARY KEY(project,scope,id));
             CREATE UNIQUE INDEX IF NOT EXISTS active_scope ON scopes(project,cwd) WHERE closed=0;").map_err(storage)?;
         db.execute("UPDATE scopes SET execution=json_set(execution,'$.status','unknown','$.recoveryReason','CELLS_RESTARTED') WHERE json_extract(execution,'$.status') IN ('running','submitting')",[]).map_err(storage)?;
-        Ok(Self(Mutex::new(db),tokio::sync::watch::channel(0).0,Mutex::new(client_state::open(root)?)))
+        Ok(Self(Mutex::new(db),tokio::sync::watch::channel(0).0,Mutex::new(client_state::open(root)?),tokio::sync::Mutex::new(()),Mutex::new(std::collections::HashSet::new())))
     }
     fn touch(&self) {self.1.send_modify(|revision|*revision=revision.wrapping_add(1));}
     pub fn watch(&self) -> tokio::sync::watch::Receiver<u64> {self.1.subscribe()}
@@ -134,6 +134,12 @@ impl Channels {
         let existing:Option<Option<String>>=db.query_row("SELECT json_extract(execution,'$.sessionId') FROM scopes WHERE project=?1 AND cwd=?2 AND closed=0",params![project,cwd],|r|r.get(0)).optional().map_err(storage)?;
         if existing.flatten().is_some_and(|id|id!=session) {return Err(Error::conflict("CHANNEL_SESSION_CHANGED"));}
         db.execute("UPDATE scopes SET execution=?3 WHERE project=?1 AND cwd=?2 AND closed=0 AND json_extract(execution,'$.sessionId') IS NULL",params![project,cwd,value.to_string()]).map_err(storage)?; self.touch(); Ok(())
+    }
+    pub fn project_context(&self,project:&str,cwd:Option<&str>,session:Option<&str>)->Result<Option<Value>,Error> {
+        let raw:Option<String>=self.0.lock().map_err(storage)?.query_row(
+            "SELECT json_extract(snapshot,'$.\"project-context\"') FROM scopes WHERE project=?1 AND json_type(snapshot,'$.\"project-context\"')='object' AND ((?3 IS NOT NULL AND json_extract(execution,'$.sessionId')=?3) OR (?3 IS NULL AND cwd=?2)) ORDER BY closed ASC,rowid DESC LIMIT 1",
+            params![project,cwd,session],|row|row.get(0)).optional().map_err(storage)?;
+        raw.map(|text|serde_json::from_str(&text).map_err(storage)).transpose()
     }
     pub fn prepare_turn(&self,project:&str,session:&str,operation:&str)->Result<(),Error> {
         let Some(mut value)=self.session_execution(project,session)? else {return Ok(());};

@@ -559,6 +559,12 @@ impl Codex {
         }
         let mut result =
             json!({"session":session,"turns":page["turns"],"nextCursor":page["nextCursor"]});
+        if page["recovery"].is_object() {
+            result["recovery"] = page["recovery"].clone();
+            eprintln!("{}", json!({"operation":"harness.history.read", "operationId":id,
+                "stage":"rollout_parse", "result":"partial", "code":"HARNESS_HISTORY_CORRUPT_RECORDS",
+                "durationMs":started.elapsed().as_millis(), "recovery":page["recovery"]}));
+        }
         if page["eventCursor"].is_object() {
             result["eventCursor"] = page["eventCursor"].clone();
         }

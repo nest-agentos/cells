@@ -1,3 +1,5 @@
+#[path = "execution_restart.rs"]
+mod execution_restart;
 #[path = "support/events.rs"]
 mod event_support;
 use axum::{
@@ -345,7 +347,8 @@ for line in sys.stdin:
     assert_eq!(history["turns"][1], json!({"id":"original-turn","status":"completed","items":[]}));
     assert_eq!(history["session"]["owned"], false);
     assert_eq!(history["session"]["status"], "notLoaded");
-    assert!(history["session"]["lastTurnResult"].is_null());
+    assert_eq!(history["session"]["lastTurnId"], "original-turn");
+    assert_eq!(history["session"]["lastTurnResult"], "completed");
     let revision = history["session"]["historyRevision"].as_str().unwrap().to_owned();
     assert_eq!(revision.len(), 64);
     let info = service.call("harness_session_info", json!({"profileId":"codex","sessionId":"native"})).await.unwrap();

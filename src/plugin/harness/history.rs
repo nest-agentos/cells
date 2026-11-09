@@ -107,22 +107,25 @@ fn prior_turn(file: &mut std::fs::File, mut end: u64) -> Result<Option<String>, 
         file.seek(SeekFrom::Start(start))?;
         let mut bytes = Vec::new();
         (&mut *file).take(end - start).read_to_end(&mut bytes)?;
-        for line in bytes.split(|b| *b == b'\n').rev() {
-            if !(line.windows(12).any(|word| word == b"turn_context")
-                || line.windows(12).any(|word| word == b"task_started"))
-            {
-                continue;
+        let Ok(lines) = complete_lines(&bytes, start) else {
+            return Ok(None);
+        };
+        let first = lines.first().map(|(at, _)| *at).unwrap_or(start);
+        for (_, line) in lines.into_iter().rev() {
+            let Ok(record) = serde_json::from_slice::<Value>(line) else {
+                return Ok(None);
+            };
+            if !record.is_object() {
+                return Ok(None);
             }
-            if let Ok(record) = serde_json::from_slice::<Value>(line) {
-                if let Some(id) = context(&record) {
-                    return Ok(Some(id));
-                }
+            if let Some(id) = context(&record) {
+                return Ok(Some(id));
             }
         }
         if start == 0 {
             break;
         }
-        end = start.saturating_add(4096).min(end - 1);
+        end = first.min(end - 1);
     }
     Ok(None)
 }
@@ -152,58 +155,125 @@ struct Page {
     terminals: Vec<Value>,
     budget: usize,
     next: u64,
+    recovery: Recovery,
+}
+#[derive(Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Recovery {
+    skipped_records: u64,
+    skipped_bytes: u64,
+    nul_records: u64,
+    invalid_json_records: u64,
+    invalid_record_records: u64,
+    first_offset: Option<u64>,
+    last_offset: Option<u64>,
+}
+impl Recovery {
+    fn push(&mut self, at: u64, bytes: u64, kind: &str) {
+        self.skipped_records += 1;
+        self.skipped_bytes += bytes;
+        match kind {
+            "nul" => self.nul_records += 1,
+            "json" => self.invalid_json_records += 1,
+            _ => self.invalid_record_records += 1,
+        }
+        self.first_offset = Some(at);
+        self.last_offset.get_or_insert(at);
+    }
 }
 enum Entry {
     Item(Value),
     Terminal(Value),
+    Corrupt { bytes: u64, kind: &'static str },
 }
 impl Page {
     fn push(&mut self, at: u64, entry: Option<Entry>) -> Result<bool, Error> {
-        if let Some(entry) = entry {
-            let value = match &entry {
-                Entry::Item(value) | Entry::Terminal(value) => value,
-            };
-            let size = value.to_string().len();
-            if size > 2 * 1024 * 1024 {
-                return Err(Error::too_large("HARNESS_HISTORY_ITEM_TOO_LARGE"));
+        match entry {
+            Some(Entry::Corrupt { bytes, kind }) => self.recovery.push(at, bytes, kind),
+            Some(Entry::Item(value)) => {
+                if !self.push_value(value, false)? {
+                    return Ok(false);
+                }
             }
-            if size > self.budget || self.items.len() + self.terminals.len() >= 100 {
-                return Ok(false);
+            Some(Entry::Terminal(value)) => {
+                if !self.push_value(value, true)? {
+                    return Ok(false);
+                }
             }
-            self.budget -= size;
-            match entry {
-                Entry::Item(value) => self.items.push(value),
-                Entry::Terminal(value) => self.terminals.push(value),
-            }
+            None => (),
         }
         self.next = at;
         Ok(true)
+    }
+    fn push_value(&mut self, value: Value, terminal: bool) -> Result<bool, Error> {
+        let size = value.to_string().len();
+        if size > 2 * 1024 * 1024 {
+            return Err(Error::too_large("HARNESS_HISTORY_ITEM_TOO_LARGE"));
+        }
+        if size > self.budget || self.items.len() + self.terminals.len() >= 100 {
+            return Ok(false);
+        }
+        self.budget -= size;
+        if terminal {
+            self.terminals.push(value);
+        } else {
+            self.items.push(value);
+        }
+        Ok(true)
+    }
+}
+fn parse_record(line: &[u8]) -> Result<Value, Entry> {
+    match serde_json::from_slice::<Value>(line) {
+        Ok(record) if record.is_object() => Ok(record),
+        result => {
+            let kind = if line.contains(&0) {
+                "nul"
+            } else if result.is_err() {
+                "json"
+            } else {
+                "record"
+            };
+            Err(Entry::Corrupt {
+                bytes: line.len() as u64,
+                kind,
+            })
+        }
     }
 }
 fn entries(
     lines: Vec<(u64, &[u8])>,
     mut turn: Option<String>,
     summary: bool,
-) -> Result<Vec<(u64, Option<Entry>)>, Error> {
+) -> Vec<(u64, Option<Entry>)> {
     let mut entries = Vec::with_capacity(lines.len());
     for (at, line) in lines {
-        let record: Value = serde_json::from_slice(line).map_err(|_| Error::internal())?;
+        let record = match parse_record(line) {
+            Ok(record) => record,
+            Err(corrupt) => {
+                entries.push((at, Some(corrupt)));
+                // Lost context must not associate later messages with an earlier turn.
+                turn = None;
+                continue;
+            }
+        };
         if let Some(id) = context(&record) {
             turn = Some(id);
         }
-        let item = record_item(&record, at, turn.as_deref()).and_then(|entry| {
-            if summary {
-                super::presentation::item(&entry)
-            } else {
-                Some(entry)
-            }
-        });
-        let entry = terminal(&record)
-            .map(Entry::Terminal)
-            .or_else(|| item.map(Entry::Item));
-        entries.push((at, entry));
+        entries.push((at, project_entry(&record, at, turn.as_deref(), summary)));
     }
-    Ok(entries)
+    entries
+}
+fn project_entry(record: &Value, at: u64, turn: Option<&str>, summary: bool) -> Option<Entry> {
+    let item = record_item(record, at, turn).and_then(|entry| {
+        if summary {
+            super::presentation::item(&entry)
+        } else {
+            Some(entry)
+        }
+    });
+    terminal(record)
+        .map(Entry::Terminal)
+        .or_else(|| item.map(Entry::Item))
 }
 /** Only an explicit native lifecycle record with its own turn identity proves termination. */
 fn terminal(record: &Value) -> Option<Value> {
@@ -242,12 +312,13 @@ fn record_item(record: &Value, at: u64, turn: Option<&str>) -> Option<Value> {
     Some(entry)
 }
 fn page(bytes: &[u8], start: u64, turn: Option<String>, summary: bool) -> Result<Value, Error> {
-    let entries = entries(complete_lines(bytes, start)?, turn, summary)?;
+    let entries = entries(complete_lines(bytes, start)?, turn, summary);
     let mut page = Page {
         items: Vec::new(),
         terminals: Vec::new(),
         budget: 2 * 1024 * 1024,
         next: entries.first().map(|(at, _)| *at).unwrap_or(start),
+        recovery: Recovery::default(),
     };
     for (at, entry) in entries.into_iter().rev() {
         if !page.push(at, entry)? {
@@ -258,9 +329,11 @@ fn page(bytes: &[u8], start: u64, turn: Option<String>, summary: bool) -> Result
     page.terminals.reverse();
     let mut turns = vec![json!({"items":page.items})];
     turns.extend(page.terminals);
-    Ok(
-        json!({"turns":turns,"nextCursor":if page.next > 0 {Some(page.next.to_string())} else {None}}),
-    )
+    let mut result = json!({"turns":turns,"nextCursor":if page.next > 0 {Some(page.next.to_string())} else {None}});
+    if page.recovery.skipped_records > 0 {
+        result["recovery"] = serde_json::to_value(&page.recovery).map_err(|_| Error::internal())?;
+    }
+    Ok(result)
 }
 
 fn item(record: &Value) -> Option<Value> {
@@ -307,6 +380,109 @@ mod tests {
     use super::*;
     fn records(records: &[Value]) -> String {
         records.iter().map(|record| format!("{record}\n")).collect()
+    }
+    #[test]
+    fn damaged_records_preserve_valid_history_and_reset_turn_context() {
+        let head = records(&[
+            json!({"type":"turn_context","payload":{"turn_id":"old"}}),
+            json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"before"}]}}),
+        ]);
+        let tail = records(&[
+            json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"after"}]}}),
+            json!({"type":"turn_context","payload":{"turn_id":"new"}}),
+            json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"next"}]}}),
+            json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"explicit"}}),
+        ]);
+        let bytes = format!("{head}{}\n{{broken\n[]\n{tail}", "\0".repeat(286));
+        let result = page(bytes.as_bytes(), 0, None, true).unwrap();
+        let items = result["turns"][0]["items"].as_array().unwrap();
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0]["turnId"], "old");
+        assert!(items[1]["turnId"].is_null());
+        assert_eq!(items[2]["turnId"], "new");
+        assert_eq!(result["turns"][1]["id"], "explicit");
+        assert_eq!(result["recovery"]["skippedRecords"], 3);
+        assert_eq!(result["recovery"]["nulRecords"], 1);
+        assert_eq!(result["recovery"]["invalidJsonRecords"], 1);
+        assert_eq!(result["recovery"]["invalidRecordRecords"], 1);
+        assert_eq!(result["recovery"]["firstOffset"], head.len());
+        assert_eq!(result["recovery"]["skippedBytes"], 298);
+        assert!(result["nextCursor"].is_null());
+    }
+    #[test]
+    fn recovery_pages_advance_without_modifying_the_log() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join("sessions")).unwrap();
+        let path = home.path().join("sessions/recovery.jsonl");
+        let mut original = String::new();
+        for i in 0..205 {
+            if i == 50 || i == 150 {
+                original.push_str("\0\0\n");
+            }
+            original.push_str(&records(&[json!({"type":"response_item","payload":{
+                "type":"message","id":format!("item-{i}"),"role":"assistant","content":[{"text":"valid"}]}})]));
+        }
+        original.push_str("{unfinished");
+        std::fs::write(&path, &original).unwrap();
+        let mut before = None;
+        let mut ids = std::collections::HashSet::new();
+        let mut skipped = 0;
+        loop {
+            let result = read_log(home.path(), path.to_str().unwrap(), before, true).unwrap();
+            for item in result["turns"][0]["items"].as_array().unwrap() {
+                assert!(ids.insert(item["id"].as_str().unwrap().to_owned()));
+            }
+            skipped += result["recovery"]["skippedRecords"].as_u64().unwrap_or(0);
+            let Some(cursor) = result["nextCursor"].as_str() else {
+                break;
+            };
+            let next = cursor.parse::<u64>().unwrap();
+            assert!(before.is_none_or(|previous| next < previous));
+            before = Some(next);
+        }
+        assert_eq!(ids.len(), 205);
+        assert_eq!(skipped, 2);
+        assert_eq!(std::fs::read(&path).unwrap(), original.as_bytes());
+    }
+    /// Opt-in read-only verification against a real authorized rollout, without logging content.
+    #[test]
+    #[ignore = "requires CELLS_HISTORY_RECOVERY_HOME and CELLS_HISTORY_RECOVERY_LOG"]
+    fn recovery_reads_real_rollout_without_writing() {
+        let home = std::env::var("CELLS_HISTORY_RECOVERY_HOME").unwrap();
+        let path = std::env::var("CELLS_HISTORY_RECOVERY_LOG").unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let mut before = None;
+        let mut items = 0;
+        let mut skipped = 0;
+        let mut skipped_bytes = 0;
+        loop {
+            let result = read_log(Path::new(&home), &path, before, true).unwrap();
+            items += result["turns"][0]["items"].as_array().unwrap().len();
+            skipped += result["recovery"]["skippedRecords"].as_u64().unwrap_or(0);
+            skipped_bytes += result["recovery"]["skippedBytes"].as_u64().unwrap_or(0);
+            let Some(cursor) = result["nextCursor"].as_str() else {
+                break;
+            };
+            let next = cursor.parse::<u64>().unwrap();
+            assert!(before.is_none_or(|previous| next < previous));
+            before = Some(next);
+        }
+        assert!(items > 0);
+        assert!(skipped > 0);
+        assert!(
+            std::fs::read(&path).unwrap() == original,
+            "source changed during read-only verification"
+        );
+        println!("history_recovery items={items} skipped_records={skipped} skipped_bytes={skipped_bytes} source_unchanged=true");
+    }
+    #[test]
+    fn prior_context_does_not_cross_damage() {
+        let mut file = tempfile::tempfile().unwrap();
+        let bytes = records(&[json!({"type":"turn_context","payload":{"turn_id":"old"}})]);
+        use std::io::Write;
+        file.write_all(format!("{bytes}\0\n").as_bytes()).unwrap();
+        let end = file.metadata().unwrap().len();
+        assert_eq!(prior_turn(&mut file, end).unwrap(), None);
     }
     #[test]
     fn lifecycle_terminals_keep_exact_identity_without_inventing_completion() {

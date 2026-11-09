@@ -11,6 +11,7 @@ pub(crate) mod native;
 mod search;
 pub mod service;
 mod source_paths;
+pub(crate) mod context;
 mod store;
 mod watch;
 pub use api::call;
@@ -31,3 +32,7 @@ mod access;
 pub mod execution;
 
 mod identity;
+
+pub(crate) mod harness_recovery;
+
+pub(crate) mod harness_queue;

@@ -757,3 +757,54 @@ async fn native_process_api_advertises_cooperative_mode_and_cancels_owned_childr
     }}).await.unwrap();
     if let Ok(stat)=std::fs::read_to_string(format!("/proc/{pid}/stat")){assert!(stat.split_whitespace().nth(2).is_some_and(|state|state=="Z"||state=="X"));}
 }
+
+#[tokio::test]
+async fn channel_project_context_maps_selected_projects_and_rejects_changed_scopes() {
+    for isolation in [cells::projects::model::Isolation::Bubblewrap,cells::projects::model::Isolation::None] {
+        let root=tempfile::tempdir().unwrap();let mut config=deployment(root.path());
+        config.projects.as_mut().unwrap().isolation=isolation;
+        config.projects.as_mut().unwrap().network=true;
+        config.projects.as_mut().unwrap().channel_endpoint=Some("http://localhost/v1/channel/mcp".into());config.plugins.insert("mcp".into(),true);
+        std::fs::create_dir_all(root.path().join("exports/group/existing/discussion")).unwrap();
+        let state=State::from_config(&config).unwrap();
+        let primary=register(&state,"group/existing",false).await;let secondary=register(&state,"group/secondary",true).await;
+        let args=json!({"projectId":primary["id"],"revision":primary["revision"],"scopeId":"decision","cwd":"discussion","snapshot":{"context":{"scope":"selected"}},
+            "contextProjects":[{"projectId":primary["id"],"revision":primary["revision"]},{"projectId":secondary["id"],"revision":secondary["revision"]}]});
+        let result=call(&state,0,"project_channel_open",args.clone()).await.unwrap();
+        let context=&result["projectContext"];assert_eq!(context["primaryProjectId"],primary["id"]);
+        let expected=if isolation==cells::projects::model::Isolation::None {root.path().join("exports/group/secondary").to_str().unwrap().to_string()}else{format!("/projects/{}",secondary["id"].as_str().unwrap())};
+        assert_eq!(context["projects"][1]["directory"],expected);
+        let service=state.services.require::<cells::projects::ProjectService>().unwrap();
+        let stored=service.get(0,primary["id"].as_str().unwrap()).unwrap();let runtime=ProjectRuntime::new(&state,0,stored).unwrap();
+        service.channels.bind(primary["id"].as_str().unwrap(),&runtime.working_directory("discussion").unwrap(),"native").unwrap();
+        assert_eq!(service.channels.project_context(primary["id"].as_str().unwrap(),None,Some("native")).unwrap(),Some(context.clone()));
+        assert_eq!(call(&state,0,"project_channel_open",args.clone()).await.unwrap(),result);
+        let mut changed=args.clone();changed["contextProjects"][1]["revision"]=json!(999);
+        assert_eq!(call(&state,0,"project_channel_open",changed).await.unwrap_err().code,"PROJECT_CONTEXT_CHANGED");
+        let mut injected=args;injected["snapshot"]["project-context"]=json!({"projects":[]});
+        assert!(call(&state,0,"project_channel_open",injected).await.is_err());
+    }
+}
+
+#[tokio::test]
+async fn selected_context_mounts_are_readable_and_rechecked_before_harness_execution() {
+    for isolation in [cells::projects::model::Isolation::Bubblewrap,cells::projects::model::Isolation::None] {
+        let root=tempfile::tempdir().unwrap();let mut config=deployment(root.path());config.projects.as_mut().unwrap().isolation=isolation;
+        let state=State::from_config(&config).unwrap();let primary=register(&state,"group/existing",false).await;let secondary=register(&state,"group/secondary",true).await;
+        std::fs::write(root.path().join("exports/group/secondary/selected.txt"),"selected-project").unwrap();
+        state.services.require::<cells::process::Execution>().unwrap().accept();
+        let service=state.services.require::<cells::projects::ProjectService>().unwrap();
+        let peer=service.get(0,secondary["id"].as_str().unwrap()).unwrap();
+        let directory=ProjectRuntime::new(&state,0,peer.clone()).unwrap().cwd();
+        let runtime=ProjectRuntime::new(&state,0,service.get(0,primary["id"].as_str().unwrap()).unwrap()).unwrap().with_context(vec![peer]);
+        let mut profile=cells::harness::config::validate(&config).unwrap().remove(0);profile.command="/bin/sh".into();
+        let mut prepared=runtime.prepare(&profile,vec!["-c".into(),format!("cat '{directory}/selected.txt'")]).unwrap();
+        let output=prepared.command.output().await.unwrap();assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));assert_eq!(output.stdout,b"selected-project");
+        if isolation==cells::projects::model::Isolation::Bubblewrap {
+            let mut write=runtime.prepare(&profile,vec!["-c".into(),format!("echo forbidden > '{directory}/selected.txt'")]).unwrap();
+            assert!(!write.command.output().await.unwrap().status.success());
+        }
+        call(&state,0,"project_configure",json!({"projectId":secondary["id"],"revision":secondary["revision"],"name":"Updated","mounts":[]})).await.unwrap();
+        assert_eq!(runtime.prepare(&profile,vec![]).err().unwrap().code,"PROJECT_CONTEXT_CHANGED");
+    }
+}

@@ -116,6 +116,7 @@ pub struct ProjectRuntime {
     active: Activities,
     isolation: super::model::Isolation,
     cwd: String,
+    context: Vec<Project>,
 }
 impl ProjectRuntime {
     pub fn new(state: &Arc<State>, identity: usize, project: Project) -> Result<Self,Error> {
@@ -125,9 +126,10 @@ impl ProjectRuntime {
             state: Arc::downgrade(state),
             identity,
             project,
-            active: Activities::default(),isolation,cwd,
+            active: Activities::default(),isolation,cwd,context:Vec::new(),
         })
     }
+    pub fn with_context(mut self,projects:Vec<Project>)->Self {self.context=projects;self}
     pub fn isolated(&self)->bool {self.isolation==super::model::Isolation::Bubblewrap}
     pub fn cwd(&self) -> String {
         self.cwd.clone()
@@ -197,6 +199,12 @@ impl ProjectRuntime {
             return Err(Error::conflict("PROJECT_REVISION_CHANGED"));
         }
         service::authorize(&state, self.identity, &current)?;
+        for project in &self.context {
+            let current=state.services.require::<super::ProjectService>()?.get(self.identity,&project.id)?;
+            service::authorize(&state,self.identity,&current)?;
+            if current.revision!=project.revision {return Err(Error::conflict("PROJECT_CONTEXT_CHANGED"));}
+            super::native::root(&state,&current)?;
+        }
         Ok(state)
     }
     pub fn prepare(&self, profile: &ProfileConfig, args: Vec<String>) -> Result<Prepared, Error> {
@@ -220,6 +228,7 @@ impl ProjectRuntime {
             super::source_paths::expose(&state, self.identity, &mut plan)?;
         }
         project_paths(&mut plan, self.cwd());
+        if self.isolated() {self.mount_context(&state,&mut plan,profile)?;}
         let lock = match plan.writer() {
             Some(export) => export.try_clone_root()?,
             None => state
@@ -239,6 +248,18 @@ impl ProjectRuntime {
                 "isolation":if self.isolated(){"bubblewrap"}else{"none"},"stage":"harness-launch-plan","result":if result.is_ok(){"success"}else{"failure"},
                 "code":result.as_ref().err().map(|e| e.code),"elapsedMs":started.elapsed().as_millis()}));
         result
+    }
+    fn mount_context(&self,state:&State,plan:&mut Plan,profile:&ProfileConfig)->Result<(),Error> {
+        for project in self.context.iter().filter(|project|project.id!=self.project.id) {
+            let mut project=project.clone();project.access="ro".into();
+            for mount in &mut project.mounts {mount.access="ro".into();}
+            let request=service::request(state,&project,profile.command.clone(),Vec::new(),300_000);
+            let mut peer=crate::process::policy::plan(state,self.identity,&request)?;
+            service::pin(&mut peer,&project)?;
+            project_paths(&mut peer,format!("/projects/{}",project.id));
+            plan.mounts.extend(peer.mounts);
+        }
+        Ok(())
     }
     fn harness_plan(
         &self,
