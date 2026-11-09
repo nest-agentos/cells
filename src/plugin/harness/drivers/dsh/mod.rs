@@ -1,6 +1,7 @@
 //! DSH Remote adapter; native policies and persistence remain owned by DSH.
 mod admission;
 mod catalog;
+mod channel;
 mod command_admission;
 mod commands;
 pub mod config;
@@ -69,6 +70,17 @@ impl Dsh {
             events: Arc::new(Mutex::new(events)),
             stop: CancellationToken::new(),
         }
+    }
+    async fn refresh_channel(&self,id:&str,cwd:&str)->Result<(),Error> {
+        let Some(runtime)=&self.runtime else {return Ok(());};
+        let started=std::time::Instant::now();
+        let config=crate::harness::session_channel::configuration(runtime,cwd,id)?;
+        let connection=self.connection.lock().await;
+        let bindings=connection.as_ref().and_then(|connection|connection.channels.as_ref()).ok_or_else(Error::unsupported)?;
+        bindings.bind(id,config.as_ref())?;
+        crate::core::events::emit(crate::core::events::Level::Info,"channel.native.configure",json!({"operation":"channel.configure","operationId":id,
+            "harness":"dsh","stage":"mcp.configure","result":"success","bound":config.is_some(),"elapsedMs":started.elapsed().as_millis()}));
+        Ok(())
     }
     async fn client(&self) -> Result<Arc<transport::Client>, Error> {
         if self.stop.is_cancelled() {
@@ -148,7 +160,7 @@ impl HarnessDriver for Dsh {
     fn descriptor(&self) -> Value {
         json!({"id":self.config.id,"kind":"dsh","projectRuntime":self.config.projects,
             "workspaces":self.config.workspaces.iter().map(|w|json!({"id":w.id})).collect::<Vec<_>>(),
-            "capabilities":{"models":true,"slashCommands":true,"commandQueries":true,"history":true,"create":true,"resume":true,"interrupt":true,"interactions":true,
+            "capabilities":{"sessionChannels":self.config.projects,"workingDirectory":self.config.projects,"models":true,"slashCommands":true,"commandQueries":true,"history":true,"create":true,"resume":true,"interrupt":true,"interactions":true,
                 "usage":false,"fork":false,"search":true,"searchPrompts":true,"searchKeywords":true,"rename":true,"archive":true,"unarchive":false,"delete":false,"attachments":[]}})
     }
     fn read<'a>(&'a self, name: &'a str, args: Value) -> BoxFuture<'a, Result<Value, Error>> {

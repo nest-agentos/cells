@@ -9,6 +9,7 @@ impl Dsh {
         operation: &str,
     ) -> Result<Value, Error> {
         let id = string(&session, "id")?.to_owned();
+        self.refresh_channel(&id,string(&session,"cwd")?).await?;
         if session["archived"] == true {
             return Err(Error::forbidden("HARNESS_SESSION_ARCHIVED"));
         }
@@ -84,13 +85,14 @@ impl Dsh {
             .iter()
             .find(|w| Some(w.id.as_str()) == args["workspaceId"].as_str())
             .ok_or_else(Error::invalid)?;
+        let directory=crate::harness::session_channel::directory(self.runtime.as_deref(),&workspace.path,args)?;
+        let workspace=WorkspaceConfig{id:workspace.id.clone(),path:directory.clone().into()};
         let id = self
-            .native_create(client, workspace, string(args, "requestId")?)
+            .native_create(client, &workspace, string(args, "requestId")?)
             .await?;
-        let session = json!({"id":id,"cwd":workspace.path,"title":"","status":"idle","updatedAt":null,"owned":false,"resumable":true,"archived":false});
+        let session = json!({"id":id,"cwd":directory,"title":"","status":"idle","updatedAt":null,"owned":false,"resumable":true,"archived":false});
         self.attach(client, session, Some(slot), operation)
             .await
-            .map_err(|_| Error::unavailable())
     }
     async fn native_create(
         &self,

@@ -9,6 +9,8 @@ impl Dsh {
     ) -> Result<Value, Error> {
         let id = string(args, "sessionId")?;
         let live = self.owned(id)?;
+        let cwd=live.session.lock().unwrap()["cwd"].as_str().ok_or_else(Error::invalid)?.to_owned();
+        self.refresh_channel(id,&cwd).await?;
         let prompt = validate_prompt(args)?;
         let operation = string(args, "requestId")?;
         let selection = self.prepare_model_selection(client, args).await?;

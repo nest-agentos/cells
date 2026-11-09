@@ -79,3 +79,28 @@ async fn scoped_mcp_reports_are_readable_only_through_the_authorized_fixed_api()
     let mut discover=request(Some(token),"server/discover",json!({}));*discover.uri_mut()="/v1/channel/mcp".parse().unwrap();
     assert_eq!(response(&state,discover).await.0,StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn native_mcp_transport_uses_the_same_scope_reports_and_revocation() {
+    let (_root,state)=support::fixture();
+    let project=projects::call(&state,state.auth.index("alice").unwrap(),"project_register",json!({"name":"native-scope","alias":"docs","path":"","access":"rw","mounts":[]})).await.unwrap()["project"].clone();
+    let service=state.services.require::<projects::ProjectService>().unwrap();let id=project["id"].as_str().unwrap();let cwd=format!("/projects/{id}/work");
+    service.channels.create(id,&json!({"scopeId":"native","cwd":cwd,"endpoint":"http://localhost/v1/channel/mcp","snapshot":{"task":{"title":"Shared"}}})).unwrap();
+    let config=service.channels.config(id,&cwd,"alice").unwrap().unwrap();let authorization=config["mcp_servers.cells_session"]["http_headers"]["Authorization"].as_str().unwrap();
+    let native=|method:&str,params:Value|Request::post("/v1/channel/mcp").header("authorization",authorization).header("content-type","application/json").body(Body::from(json!({"jsonrpc":"2.0","id":1,"method":method,"params":params}).to_string())).unwrap();
+    let (status,value)=response(&state,native("initialize",json!({"protocolVersion":"2025-11-25"}))).await;assert_eq!(status,StatusCode::OK);assert_eq!(value["result"]["protocolVersion"],"2025-11-25");
+    let (_,value)=response(&state,native("tools/list",json!({}))).await;assert_eq!(value["result"]["tools"].as_array().unwrap().len(),5);
+    let (_,value)=response(&state,native("tools/call",json!({"name":"session_report","arguments":{"id":"proof","message":{"type":"progress","content":"Native proof"}}}))).await;
+    assert_eq!(value["result"]["structuredContent"]["accepted"],true);assert!(value["result"].get("resultType").is_none());
+    assert_eq!(service.channels.list(id,"native").unwrap()["messages"][0]["id"],"proof");
+    assert_eq!(response(&state,native("tools/call",json!({"name":"project_exec","arguments":{}}))).await.0,StatusCode::UNPROCESSABLE_ENTITY);
+    let (_,value)=response(&state,native("tools/call",json!({"name":"session_request","arguments":{"id":"live","method":"context","params":{}}}))).await;
+    assert_eq!(value["result"]["structuredContent"]["mustYield"],true);
+    let pending=service.channels.requests(id,"native").unwrap();
+    service.channels.respond(id,"native",&json!({"id":"live","requestDigest":pending["requests"][0]["requestDigest"],"status":"ok","payload":{"ready":true}})).unwrap();
+    let (_,value)=response(&state,native("tools/call",json!({"name":"session_response","arguments":{"id":"live"}}))).await;
+    assert_eq!(value["result"]["structuredContent"]["payload"]["ready"],true);
+    let (_,value)=response(&state,native("tools/call",json!({"name":"session_receipt","arguments":{"id":"proof"}}))).await;
+    assert_eq!(value["result"]["structuredContent"]["accepted"],true);
+    service.channels.close(id,"native").unwrap();assert_eq!(response(&state,native("tools/list",json!({}))).await.0,StatusCode::UNAUTHORIZED);
+}

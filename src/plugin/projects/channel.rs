@@ -5,6 +5,8 @@ use serde_json::{json, Value};
 use std::{path::Path, sync::Mutex};
 
 mod exchange;
+mod tools;
+pub(crate) use tools::definitions;
 mod client_state;
 mod servers;
 

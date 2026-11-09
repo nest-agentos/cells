@@ -30,6 +30,7 @@ use std::{
 static READS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 pub struct Claude {
     discovery: tokio::sync::Mutex<BTreeMap<String, Value>>,
+    channel_configs:tokio::sync::Mutex<BTreeMap<String,String>>,
     config: ProfileConfig,
     runtime: Option<Arc<ProjectRuntime>>,
     sessions: sessions::Sessions,
@@ -49,6 +50,7 @@ impl Claude {
         events.runtime = runtime.clone();
         Self {
             discovery: tokio::sync::Mutex::new(BTreeMap::new()),
+            channel_configs:tokio::sync::Mutex::new(BTreeMap::new()),
             config,
             runtime,
             sessions: sessions::Sessions::default(),
@@ -240,6 +242,7 @@ impl Claude {
         }
         if let Some(process) = attached.as_ref() {
             if process.alive() {
+                if process.session.lock().unwrap()["status"]=="idle" {self.refresh_channel(process).await?;}
                 return Ok(json!({"session":process.session.lock().unwrap().clone()}));
             }
         }
@@ -248,7 +251,9 @@ impl Claude {
         } else {
             None
         };
+        self.channel_configs.lock().await.remove(&id);
         let process = self.start(session, resume).await?;
+        if let Err(error)=self.refresh_channel(&process).await {process.close();process.drain().await;return Err(error);}
         let session = process.session.lock().unwrap().clone();
         *attached = Some(process);
         Ok(json!({"session":session}))
@@ -304,7 +309,8 @@ impl Claude {
             .iter()
             .find(|w| Some(w.id.as_str()) == args["workspaceId"].as_str())
             .ok_or_else(Error::invalid)?;
-        self.attach(json!({"id":uuid()?,"title":"","cwd":workspace.path,"status":"idle","createdAt":chrono::Utc::now().timestamp_millis(),"updatedAt":chrono::Utc::now().timestamp_millis(),"resumable":true,"owned":true,"archived":false}),false).await
+        let directory=crate::harness::session_channel::directory(self.runtime.as_deref(),&workspace.path,args)?;
+        self.attach(json!({"id":uuid()?,"title":"","cwd":directory,"status":"idle","createdAt":chrono::Utc::now().timestamp_millis(),"updatedAt":chrono::Utc::now().timestamp_millis(),"resumable":true,"owned":true,"archived":false}),false).await
     }
     async fn owned(&self, id: &str) -> Result<Arc<process::Process>, Error> {
         self.sessions
@@ -318,6 +324,7 @@ impl Claude {
         if process.session.lock().unwrap()["activeTurnId"] != target {
             return Err(Error::busy());
         }
+        self.refresh_channel(&process).await?;
         let prompt = string(args, "prompt")?;
         let input = crate::harness::attachments::input(prompt, &args["attachments"])?;
         process
@@ -328,6 +335,21 @@ impl Claude {
                 args["requestId"].as_str(),
             )
             .await
+    }
+    async fn refresh_channel(&self,process:&process::Process)->Result<(),Error> {
+        let Some(runtime)=&self.runtime else {return Ok(());};
+        let (id,cwd)={let session=process.session.lock().unwrap();(string(&session,"id")?.to_owned(),string(&session,"cwd")?.to_owned())};
+        let config=crate::harness::session_channel::configuration(runtime,&cwd,&id)?;
+        let servers=crate::harness::session_channel::http_servers(config.as_ref());
+        let fingerprint=servers.to_string();
+        {let previous=self.channel_configs.lock().await;
+            if previous.get(&id)==Some(&fingerprint)||(config.is_none()&&!previous.contains_key(&id)){return Ok(());}}
+        let started=std::time::Instant::now();
+        let result=process.control(json!({"subtype":"mcp_set_servers","servers":servers})).await?;
+        if result.get("errors").and_then(Value::as_object).is_some_and(|errors|!errors.is_empty()) {return Err(Error::conflict("CHANNEL_NATIVE_CONFIG_FAILED"));}
+        self.channel_configs.lock().await.insert(id.clone(),fingerprint);
+        crate::core::events::emit(crate::core::events::Level::Info,"channel.native.configure",json!({"operation":"channel.configure","operationId":id,"harness":"claude","stage":"mcp.configure","result":"success","elapsedMs":started.elapsed().as_millis()}));
+        Ok(())
     }
     async fn turn(&self, args: &Value) -> Result<Value, Error> {
         let id = string(args, "sessionId")?;
@@ -341,6 +363,7 @@ impl Claude {
         }
         let input = crate::harness::attachments::input(prompt, &args["attachments"])?;
         let content = inputs(&input)?;
+        self.refresh_channel(&process).await?;
         let turn = uuid()?;
         if let Some(runtime) = &self.runtime {
             runtime.begin(id, &turn)?;
@@ -483,7 +506,7 @@ impl HarnessDriver for Claude {
     }
     fn descriptor(&self) -> Value {
         json!({"id":self.config.id,"kind":"claude","workspaces":self.config.workspaces.iter().map(|w|json!({"id":w.id})).collect::<Vec<_>>(),"projectRuntime":self.config.projects,
-        "capabilities":{"metrics":true,"models":true,"slashCommands":true,"commandQueries":true,"usage":true,"history":true,"create":true,"resume":true,"interrupt":true,"steer":true,"interactions":true,"search":true,"searchPrompts":true,"searchKeywords":true,"fork":false,"rename":false,"archive":false,"unarchive":false,"attachments":["text","image"]}})
+        "capabilities":{"sessionChannels":self.config.projects,"workingDirectory":self.config.projects,"metrics":true,"models":true,"slashCommands":true,"commandQueries":true,"usage":true,"history":true,"create":true,"resume":true,"interrupt":true,"steer":true,"interactions":true,"search":true,"searchPrompts":true,"searchKeywords":true,"fork":false,"rename":false,"archive":false,"unarchive":false,"attachments":["text","image"]}})
     }
     fn read<'a>(&'a self, name: &'a str, args: Value) -> BoxFuture<'a, Result<Value, Error>> {
         Box::pin(async move {

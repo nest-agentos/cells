@@ -544,9 +544,30 @@ Executable directory projects use immutable readable IDs (1–64 ASCII letters/d
 
 ## NestOS 固定接口与 Agent MCP 2.0
 
-NestOS 使用 `GET /v1/capabilities` 的 `node` 描述和 `POST /v1/api/harness/<operation>`、`POST /v1/api/projects/<operation>`，请求正文为操作参数，响应为 `{ok:true,value}` 或 `{ok:false,error:{code,outcome}}`。固定 API 不依赖 MCP 插件开关。Agent 的 scope 通道使用 `/v1/channel/mcp` 与 MCP 2.0 `2026-07-28`；scope capability 不能调用固定 API。通道冻结上下文与消息回执保存在项目私有目录的 `session-channels.sqlite`，不写入工作区。
+NestOS 使用 `GET /v1/capabilities` 的 `node` 描述和 `POST /v1/api/harness/<operation>`、`POST /v1/api/projects/<operation>`，请求正文为操作参数，响应为 `{ok:true,value}` 或 `{ok:false,error:{code,outcome}}`。固定 API 不依赖 MCP 插件开关。Agent 的 scope 通道统一使用 `/v1/channel/mcp`，支持 MCP 2.0 `2026-07-28` 与原生客户端的 MCP 2025 HTTP 传输；scope capability 不能调用固定 API。通道冻结上下文与消息回执保存在项目私有目录的 `session-channels.sqlite`，不写入工作区。
 
 Agent 通道提供 session_context/report/receipt/request/response 五个工具。请求 pending 必须让出本轮，由宿主固定 API 冻结响应并续办同一个 Session；业务 acknowledge 与运输接受分开。Cells 记录精确 session/turn 状态，重启运行中变 unknown，禁止按缺回执重发。scope 轮换先核对已终结和同一 Session，再原子撤销旧 token。Codex thread 配置使用 `features.mcp_2026_07_28=true` 与扁平 `mcp_servers.cells_session`，已加载 thread 必须 unsubscribe、等待 closed、再 resume 才刷新 MCP 配置；app-server 使用 `thread_unload_delay_secs=0`。
+
+Codex、Claude Code 和受管 DSH 的项目 profile 共同提供 `sessionChannels` 与 `workingDirectory`。三者使用相同的五个工具、scope 授权、冻结上下文、持久消息、请求响应与回执；适配器不解释看板状态。`harness_create.directory` 为项目相对目录，目录必须存在并通过项目路径授权，拒绝越界与符号链接逃逸。legacy 非项目 profile 不声明这两项能力，外部 DSH 服务也不能作为项目看板执行端。
+
+Claude Code 通过原生 `mcp_set_servers` 接入共享 HTTP 通道，在恢复或开始下一轮前刷新绑定；配置失败拒绝启动该轮，不会显示为已成功配置。DSH 使用受管运行时加载的工具扩展，按执行中的原生 `Agent.id` 读取私有绑定，再转发到同一端点。模型参数不能选择其他 Session，绑定文件以 0600 权限原子替换，进程结束后清理；恢复与每轮提交会刷新绑定。旧 scope 关闭后旧令牌立即失效，更新绑定不会复制或重置业务状态。
+
+### 服务环境与原生配置
+
+Firecracker 服务的启动脚本负责创建 Codex、Claude、DSH 的原生配置目录。缺少 `sessionChannels` 或 `workingDirectory` 能力表示节点/适配器协议不支持，并不表示这些目录不存在。注册项目源码目录必须由用户准备，不能为消除错误而创建空仓库。
+
+模型凭据写入私有服务源 manifest 现有的 `[environment]` 表（例如 `/etc/mindos-firecracker/service-sources/cells-x1/service.toml`），不要提交到仓库。DSH 读取 `DEEPSEEK_API_KEY` 和可选的 `DEEPSEEK_BASE_URL`；Claude Code 读取 `ANTHROPIC_API_KEY` 或 `ANTHROPIC_AUTH_TOKEN`，以及可选的 `ANTHROPIC_BASE_URL`。不要为同一凭据同时设置两个冲突的认证变量。原生配置文件分别由各 harness 的 `home` 指定。Cells 配置的 `[[harnesses]]` 没有任意 `env` 字段；受管 DSH Web 的传输令牌由 Cells 自动生成，与模型 API key 独立。
+
+更新服务源 manifest 后，停止服务、重新 install 同一服务源并启动服务，使新环境进入 guest；只重启 VM 不会重新导入 manifest。仅替换共享的 Cells 可执行文件时，重启 guest 加载新程序即可，无需重新安装服务源。
+
+可以用本地模型 fixture 验证已安装的 Claude Code；DSH 验证真实运行时创建与扩展转接。两者都覆盖工作目录、共享消息回执及同一 Session 的 scope 轮换，不访问外部模型：
+
+```bash
+cargo build
+node ../../tools/temporary-process/node/cli.mjs run --scope claude-channel-proof --timeout-ms 120000 -- python3 src/plugin/harness/tests/real_native_channels.py claude
+node ../../tools/temporary-process/node/cli.mjs run --scope dsh-channel-proof --timeout-ms 120000 -- python3 src/plugin/harness/tests/real_native_channels.py dsh
+node --test scripts/tests/dsh-channel.test.mjs
+```
 
 真实原生验收脚本 `src/plugin/harness/tests/real_channel.py` 需要已安装 Codex CLI。通过 temporary-process CLI 在同一有界作用域运行，验证发现、上下文、不可变请求响应、卸载续办及原 turn 历史；模型请求只到本地拒绝 fixture，不调用外部模型。
 

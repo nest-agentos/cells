@@ -1210,14 +1210,19 @@ async fn session_digest_metadata_is_negotiated_and_does_not_resume_the_session()
 #[tokio::test]
 async fn work_directory_capability_is_available_before_project_driver_creation() {
     let root = tempfile::tempdir().unwrap();
-    for enabled in [false, true] {
-        let mut configuration = config(root.path(), "codex");
-        configuration.harnesses[0].projects = enabled;
-        let service = Harnesses::new(
-            cells::harness::config::validate(&configuration).unwrap(),
-            "epoch".into(),
-        ).unwrap();
-        assert_eq!(service.profiles()["profiles"][0]["capabilities"]["workingDirectory"], enabled);
-        service.close().await;
+    for kind in ["codex","claude","dsh"] {
+        for enabled in [false, true] {
+            let mut configuration = config(root.path(), kind);
+            configuration.harnesses[0].kind=kind.into();
+            configuration.harnesses[0].projects = enabled;
+            let service = Harnesses::new(
+                cells::harness::config::validate(&configuration).unwrap(),
+                "epoch".into(),
+            ).unwrap();
+            let profiles=service.profiles();let capabilities=&profiles["profiles"][0]["capabilities"];
+            assert_eq!(capabilities["workingDirectory"], enabled,"{kind}");
+            assert_eq!(capabilities["sessionChannels"], enabled,"{kind}");
+            service.close().await;
+        }
     }
 }

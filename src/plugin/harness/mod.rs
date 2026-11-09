@@ -20,6 +20,7 @@ mod driver_slot;
 #[path = "drivers/dsh/mod.rs"]
 mod dsh;
 mod environment;
+mod session_channel;
 mod events;
 mod history;
 mod models;

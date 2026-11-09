@@ -14,11 +14,13 @@ use tokio_util::sync::CancellationToken;
 
 pub struct Connection {
     pub client: Arc<Client>,
+    pub channels:Option<Arc<super::channel::Bindings>>,
     exited: Option<watch::Receiver<bool>>,
 }
 struct Resources {
     _sandbox: Option<crate::process::sandbox::Prepared>,
     _overlay: tempfile::NamedTempFile,
+    channels:Option<Arc<super::channel::Bindings>>,
 }
 impl Drop for Connection {
     fn drop(&mut self) {
@@ -32,7 +34,7 @@ impl Connection {
         stop: CancellationToken,
     ) -> Result<Self, Error> {
         let options = profile.dsh.clone().unwrap_or_default();
-        let (url, token, exited) = if let Some(url) = &options.url {
+        let (url, token, exited, channels) = if let Some(url) = &options.url {
             let token = options
                 .token_env
                 .as_ref()
@@ -42,13 +44,14 @@ impl Connection {
                 super::config::origin(url).map_err(|_| Error::invalid())?,
                 token,
                 None,
+                None,
             )
         } else {
-            let (url, token, exited) = launch(profile, runtime, &options, stop.clone()).await?;
-            (url, Some(token), Some(exited))
+            let (url, token, exited, channels) = launch(profile, runtime, &options, stop.clone()).await?;
+            (url, Some(token), Some(exited), channels)
         };
         match Client::connect(url, token, &options, stop.clone()).await {
-            Ok(client) => Ok(Self { client, exited }),
+            Ok(client) => Ok(Self { client, exited,channels }),
             Err(error) => {
                 stop.cancel();
                 Err(error)
@@ -71,8 +74,9 @@ async fn launch(
     runtime: Option<Arc<ProjectRuntime>>,
     options: &DshConfig,
     stop: CancellationToken,
-) -> Result<(Url, String, watch::Receiver<bool>), Error> {
+) -> Result<(Url, String, watch::Receiver<bool>,Option<Arc<super::channel::Bindings>>), Error> {
     let (mut command, prepared) = prepare(profile, runtime.as_deref())?;
+    let channels=prepared.channels.clone();
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -84,7 +88,7 @@ async fn launch(
     let (ready, receive) = oneshot::channel();
     let exited = spawn_supervisor(child, output, ready, runtime, prepared, stop.clone());
     match tokio::time::timeout(Duration::from_millis(options.startup_timeout_ms), receive).await {
-        Ok(Ok((url, token))) => Ok((url, token, exited)),
+        Ok(Ok((url, token))) => Ok((url, token, exited, channels)),
         _ => {
             stop.cancel();
             Err(Error::new(
@@ -98,7 +102,8 @@ fn prepare(
     profile: &ProfileConfig,
     runtime: Option<&ProjectRuntime>,
 ) -> Result<(tokio::process::Command, Resources), Error> {
-    let overlay = overlay(profile)?;
+    let channels=runtime.map(|_|super::channel::Bindings::new(&profile.home).map(Arc::new)).transpose()?;
+    let overlay = overlay(profile,channels.as_deref())?;
     let mut args = vec![
         "--patch".into(),
         overlay.path().to_str().ok_or_else(Error::invalid)?.into(),
@@ -123,6 +128,7 @@ fn prepare(
         Resources {
             _sandbox: prepared,
             _overlay: overlay,
+            channels,
         },
     ))
 }
@@ -263,13 +269,15 @@ fn arguments() -> Vec<String> {
     .map(str::to_owned)
     .collect()
 }
-fn overlay(profile: &ProfileConfig) -> Result<tempfile::NamedTempFile, Error> {
+fn overlay(profile: &ProfileConfig,channels:Option<&super::channel::Bindings>) -> Result<tempfile::NamedTempFile, Error> {
     use std::io::Write;
     let mut file = tempfile::Builder::new()
         .prefix(".cells-transport-")
         .suffix(".yml")
         .tempfile_in(&profile.home)?;
-    file.write_all(b"- id: webserver\n  config:\n    host: 127.0.0.1\n    port: 0\n- id: web-runtime\n  config:\n    openBrowser: false\n    printUrl: true\n")?;
+    let mut patches=vec![serde_json::json!({"id":"webserver","config":{"host":"127.0.0.1","port":0}}),serde_json::json!({"id":"web-runtime","config":{"openBrowser":false,"printUrl":true}})];
+    if let Some(channels)=channels {patches.push(channels.patch());}
+    file.write_all(serde_json::to_string(&patches).map_err(|_|Error::internal())?.as_bytes())?;
     file.flush()?;
     Ok(file)
 }
@@ -286,10 +294,11 @@ mod tests {
             home.path()
         ))
         .unwrap();
-        let file = overlay(&profile).unwrap();
+        let file = overlay(&profile,None).unwrap();
         let path = file.path().to_owned();
         let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("host: 127.0.0.1\n    port: 0"));
+        let patches:serde_json::Value=serde_json::from_str(&content).unwrap();
+        assert_eq!(patches[0]["config"],serde_json::json!({"host":"127.0.0.1","port":0}));
         assert_eq!(
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600

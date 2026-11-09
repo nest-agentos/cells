@@ -1,8 +1,9 @@
-//! Narrow MCP 2.0 surface authenticated by one immutable execution scope.
+//! Shared session channel transports authenticated by one immutable execution scope.
 use crate::{app::State, core::error::Error, http::access};
-use axum::{extract::State as AxumState, http::HeaderMap, Json};
+use axum::{extract::State as AxumState, http::{HeaderMap,StatusCode}, response::{Response,IntoResponse}, Json};
 use serde_json::{json, Value};
 use std::sync::Arc;
+use crate::projects::channel::definitions as tools;
 
 pub fn token(headers: &HeaderMap) -> Option<&str> {
     headers.get("authorization")?.to_str().ok()?.strip_prefix("Bearer ")
@@ -10,9 +11,11 @@ pub fn token(headers: &HeaderMap) -> Option<&str> {
 pub fn authorized(state: &State, headers: &HeaderMap) -> bool {
     token(headers).is_some_and(|token| state.services.get::<crate::projects::ProjectService>().is_some_and(|s| s.authorize_channel(state,token)))
 }
-pub async fn endpoint(AxumState(state): AxumState<Arc<State>>, headers: HeaderMap, Json(body): Json<Value>) -> Result<Json<Value>, Error> {
+pub async fn endpoint(AxumState(state): AxumState<Arc<State>>, headers: HeaderMap, Json(body): Json<Value>) -> Result<Response, Error> {
     access::origin(&state, &headers)?;
     if !authorized(&state,&headers) {return Err(Error::unauthenticated());}
+    let modern=body["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"].as_str()==Some("2026-07-28");
+    if !modern {return native(&state,&headers,&body);}
     let id = &body["id"];
     if body["jsonrpc"] != "2.0" || !(id.is_string() || id.is_u64() || id.is_i64()) {return Err(Error::invalid());}
     let method = body["method"].as_str().ok_or_else(Error::invalid)?;
@@ -24,16 +27,35 @@ pub async fn endpoint(AxumState(state): AxumState<Arc<State>>, headers: HeaderMa
         "tools/list" => json!({"resultType":"complete","ttlMs":0,"cacheScope":"private","tools":tools()}),
         "ping" => json!({"resultType":"complete"}),
         "tools/call" => {
-            execute(&state,&headers,&body["params"])?
+            execute(&state,&headers,&body["params"],true)?
         }
         _ => return Err(Error::unsupported()),
     };
-    Ok(Json(json!({"jsonrpc":"2.0","id":id,"result":result})))
+    Ok(Json(json!({"jsonrpc":"2.0","id":id,"result":result})).into_response())
 }
-fn execute(state:&State,headers:&HeaderMap,params:&Value)->Result<Value,Error> {
+/// Legacy native-client transport shares the exact scope authorization and tool implementation.
+fn native(state:&State,headers:&HeaderMap,body:&Value)->Result<Response,Error> {
+    const VERSIONS:&[&str]=&["2024-11-05","2025-03-26","2025-06-18","2025-11-25"];
+    let method=body["method"].as_str().ok_or_else(Error::invalid)?;
+    if body["jsonrpc"]!="2.0" {return Err(Error::invalid());}
+    if let Some(version)=headers.get("mcp-protocol-version") {if !VERSIONS.contains(&version.to_str().map_err(|_|Error::invalid())?){return Err(Error::invalid());}}
+    if method=="notifications/initialized"&&body.get("id").is_none(){return Ok(StatusCode::ACCEPTED.into_response());}
+    let id=&body["id"];if !(id.is_string()||id.is_u64()||id.is_i64()){return Err(Error::invalid());}
+    let result=match method {
+        "initialize"=>{let requested=body["params"]["protocolVersion"].as_str().unwrap_or("");
+            json!({"protocolVersion":if VERSIONS.contains(&requested){requested}else{"2025-11-25"},"capabilities":{"tools":{}},"serverInfo":{"name":"cells-session","version":env!("CARGO_PKG_VERSION")}})},
+        "tools/list"=>json!({"tools":tools()}),
+        "tools/call"=>{let mut value=execute(state,headers,&body["params"],false)?;value.as_object_mut().unwrap().remove("resultType");value},
+        "ping"=>json!({}),
+        _=>return Err(Error::unsupported()),
+    };
+    Ok(Json(json!({"jsonrpc":"2.0","id":id,"result":result})).into_response())
+}
+
+fn execute(state:&State,headers:&HeaderMap,params:&Value,modern:bool)->Result<Value,Error> {
             let name = params["name"].as_str().ok_or_else(Error::invalid)?;
             if !["session_context","session_report","session_receipt","session_request","session_response"].contains(&name) {return Err(Error::unsupported());}
-            if headers.get("mcp-name").and_then(|h|h.to_str().ok()) != Some(name) {return Err(Error::invalid());}
+            if modern && headers.get("mcp-name").and_then(|h|h.to_str().ok()) != Some(name) {return Err(Error::invalid());}
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
             if !args.is_object() {return Err(Error::invalid());}
             let service = state.services.require::<crate::projects::ProjectService>()?;
@@ -45,28 +67,4 @@ fn execute(state:&State,headers:&HeaderMap,params:&Value)->Result<Value,Error> {
                 "result":if response.is_ok(){"success"}else{"failure"},"code":response.as_ref().err().map(|e|e.code),"elapsedMs":started.elapsed().as_millis()}));
             let (value,is_error) = match response {Ok(value)=>(value,false),Err(error)=>(json!({"code":error.code}),true)};
             Ok(json!({"resultType":"complete","isError":is_error,"structuredContent":value,"content":[{"type":"text","text":value.to_string()}]}))
-}
-
-fn tools() -> Vec<Value> {
-    vec![
-        json!({"name":"session_context","description":"Read a frozen context section. Omit section to list available sections. Load only what the current step needs.","inputSchema":{"type":"object","properties":{"section":{"type":"string"}},"additionalProperties":false},"annotations":{"readOnlyHint":true}}),
-        json!({"name":"session_report","description":"Durably publish progress, a question, an error or a delivery application. Reuse id unchanged to recover a lost receipt. Acceptance is not task completion. Resolve clarification reports with type resolved and replyTo before a final result. Read session_context channel-status for report IDs and host acknowledgments.","inputSchema":{"type":"object","properties":{"id":{"type":"string"},"message":{"type":"object","properties":{"type":{"type":"string","enum":["progress","clarification","error","result","proposal","resolved"]},"content":{"type":"string","minLength":1,"maxLength":8000},"payload":{},"replyTo":{"type":"string","minLength":1,"maxLength":128}},"required":["type","content"],"additionalProperties":false}},"required":["id","message"],"additionalProperties":false}}),
-        json!({"name":"session_request","description":"Request host-resolved live context. If pending, end the turn without a final result; never poll. Reuse the same id and arguments after a lost response.","inputSchema":{"type":"object","properties":{"id":{"type":"string"},"method":{"type":"string"},"params":{"type":"object"}},"required":["id","method","params"],"additionalProperties":false}}),
-        json!({"name":"session_response","description":"Read an immutable host response after the host resumes this Session.","inputSchema":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":false},"annotations":{"readOnlyHint":true}}),
-        json!({"name":"session_receipt","description":"Check whether a report was durably accepted without repeating its effect.","inputSchema":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":false},"annotations":{"readOnlyHint":true}}),
-    ]
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn report_schema_declares_the_runtime_message_contract() {
-        let tools=tools();
-        let tool=tools.iter().find(|tool|tool["name"]=="session_report").unwrap();
-        let message=&tool["inputSchema"]["properties"]["message"];
-        assert_eq!(message["required"],json!(["type","content"]));
-        assert_eq!(message["additionalProperties"],false);
-        assert_eq!(message["properties"]["type"]["enum"],json!(["progress","clarification","error","result","proposal","resolved"]));
-    }
 }

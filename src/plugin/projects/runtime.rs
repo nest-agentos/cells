@@ -208,26 +208,32 @@ impl ProjectRuntime {
         Ok(state)
     }
     pub fn prepare(&self, profile: &ProfileConfig, args: Vec<String>) -> Result<Prepared, Error> {
-        self.prepare_harness(profile, args, false)
+        self.prepare_harness(profile, args, false, None)
+    }
+    pub fn prepare_at(&self,profile:&ProfileConfig,args:Vec<String>,cwd:&str)->Result<Prepared,Error> {
+        let cwd=self.resolve_cwd(cwd)?;
+        self.prepare_harness(profile,args,false,Some(cwd))
     }
     pub fn prepare_with_source_paths(
         &self,
         profile: &ProfileConfig,
         args: Vec<String>,
     ) -> Result<Prepared, Error> {
-        self.prepare_harness(profile, args, true)
+        self.prepare_harness(profile, args, true, None)
     }
     fn prepare_harness(
         &self,
         profile: &ProfileConfig,
         args: Vec<String>,
         source_paths: bool,
+        cwd: Option<String>,
     ) -> Result<Prepared, Error> {
         let (state, mut plan) = self.harness_plan(profile, args)?;
         if source_paths && self.isolated() {
             super::source_paths::expose(&state, self.identity, &mut plan)?;
         }
         project_paths(&mut plan, self.cwd());
+        if let Some(cwd)=cwd {plan.cwd=cwd;}
         if self.isolated() {self.mount_context(&state,&mut plan,profile)?;}
         let lock = match plan.writer() {
             Some(export) => export.try_clone_root()?,

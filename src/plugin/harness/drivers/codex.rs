@@ -241,11 +241,7 @@ impl Codex {
     }
     async fn create(&self, bridge: &Bridge, args: &Value) -> Result<Value, Error> {
         let workspace = self.workspace(string(args, "workspaceId")?)?;
-        let directory = match args.get("directory") {
-            Some(value) => self.runtime.as_ref().ok_or_else(Error::unsupported)?
-                .working_directory(value.as_str().ok_or_else(Error::invalid)?)?,
-            None => workspace.path.to_string_lossy().into_owned(),
-        };
+        let directory=crate::harness::session_channel::directory(self.runtime.as_deref(),&workspace.path,args)?;
         let mut params = json!({"cwd":directory,"approvalPolicy":"on-request","sandbox":if self.runtime.is_some(){"danger-full-access"}else{"workspace-write"},"historyMode":"legacy"});
         if let Some(runtime) = &self.runtime {
             let state = runtime.state()?;

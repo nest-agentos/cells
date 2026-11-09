@@ -326,7 +326,7 @@ fn launch(
     }
     let mut prepared = runtime
         .as_ref()
-        .map(|r| r.prepare(config, args.clone()))
+        .map(|r| r.prepare_at(config,args.clone(),session["cwd"].as_str().ok_or_else(Error::invalid)?))
         .transpose()?;
     let mut command = match prepared.as_mut() {
         Some(p) => std::mem::replace(&mut p.command, tokio::process::Command::new("/bin/false")),
