@@ -93,13 +93,13 @@ impl FileGate {
         self.check()?;
         let mutations = self.inner.clone().try_write_owned().map_err(|_| self.busy("exclusive"))?;
         let started = std::time::Instant::now();
-        let result = tokio::time::timeout(std::time::Duration::from_millis(budget_ms.min(1000)),
+        let result = tokio::time::timeout(std::time::Duration::from_millis(budget_ms.min(3000)),
             self.readers.clone().write_owned()).await;
         crate::core::events::emit(crate::core::events::Level::Info, "file.gate.command", serde_json::json!({
             "operation":"file.gate.acquire", "operationId":request_id, "stage":"exclusive-readers",
-            "result":if result.is_ok(){"success"}else{"failure"}, "code":if result.is_ok(){None}else{Some("EBUSY")},
+            "result":if result.is_ok(){"success"}else{"failure"}, "code":if result.is_ok(){None}else{Some("PROCESS_READERS_BUSY")},
             "durationMs":started.elapsed().as_millis()}));
-        let readers = result.map_err(|_| Error::busy())?;
+        let readers = result.map_err(|_| Error::conflict("PROCESS_READERS_BUSY"))?;
         self.check()?;
         Ok(ExclusivePermit {_mutations: mutations, _readers: readers})
     }
@@ -183,7 +183,7 @@ mod tests {
     async fn command_timeout_and_cancel_release_both_gates() {
         let gate = FileGate::new();
         let reader = gate.read_only().unwrap();
-        assert_eq!(gate.command("timeout", 10).await.unwrap_err().code, "EBUSY");
+        assert_eq!(gate.command("timeout", 10).await.unwrap_err().code, "PROCESS_READERS_BUSY");
         assert!(gate.shared().is_ok());
         assert!(gate.read_only().is_ok());
         let mut pending = Box::pin(gate.command("cancelled-wait", 1000));

@@ -123,7 +123,7 @@ NestOS 项目右键菜单选择“启用远程命令”后，File Tools 和 Bash
 
 每条命令最多一个 rw export（其他 export 为 ro）；该 writer 的独占锁保留给 monitor。单命令、最长 300 秒、stdout/stderr 各 64 KiB，超出输出上限会取消。返回最终有界输出，尚无实时流或 PTY。最多保留 1024 条内存进程记录；容量达到上限时，将已确定结束的回执归档到当前 epoch 的私有 SQLite 临时磁盘库（2 MiB 缓存、主库上限 256 MiB），相同 identity/requestId 继续查询原结果，不能重新执行。running/unknown 不归档，全部为未结算进程时返回 PROCESS_LIMIT；归档故障返回 PROCESS_RECEIPT_STORAGE_FAILED，保留原身份且拒绝新准入。重启更换 epoch，不提供旧结果续接。
 
-命令持有文件/进程互斥门；普通进程 API 和 `projects.exec` 在仅有目录/内容读取时公平等待最多 1 秒（不超过请求超时），后来的读取不能插队；等待超时或取消会释放门，不提交命令。Native turn 或其他命令占用时仍立即拒绝。日志 `file.gate.command` 记录请求 ID、等待阶段、结果和耗时。重复请求沿原回执返回，等待期间已取消的身份不得执行。命令运行期间所有文件 API 返回 EBUSY；下载流、上传与后台提交保留其门直到结束。命令退出/取消并回收后使所有旧 revision 失效，避免 Bash 改动绕过条件写入。exclusive export 不允许其他宿主进程并发写入。执行锁在 monitor 中保留，daemon 意外退出后锁随进程清理释放。
+命令持有文件/进程互斥门；普通进程 API 和 `projects.exec` 在仅有目录/内容读取时公平等待最多 3 秒（不超过请求超时），后来的读取不能插队；等待超时返回 `PROCESS_READERS_BUSY`，取消等待也会释放门，不提交命令；该错误不触发 Git 的短重试。Native turn 或其他命令占用时仍立即拒绝。日志 `file.gate.command` 记录请求 ID、等待阶段、结果和耗时。重复请求沿原回执返回，等待期间已取消的身份不得执行。命令运行期间所有文件 API 返回 EBUSY；下载流、上传与后台提交保留其门直到结束。命令退出/取消并回收后使所有旧 revision 失效，避免 Bash 改动绕过条件写入。exclusive export 不允许其他宿主进程并发写入。执行锁在 monitor 中保留，daemon 意外退出后锁随进程清理释放。
 
 验收：`CELLS_PROCESS_TEST=1 cargo test`（要求可创建 Linux user/PID/network namespace）。
 
