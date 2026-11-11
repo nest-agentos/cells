@@ -24,6 +24,7 @@ fn enqueue(queue: &mut Value, args: &Value) -> Result<(), Error> {
             "steerTurnId",
             "preparation",
             "queueEpoch",
+            "traceContext",
         ]
         .iter()
         .any(|k| item.get(k).is_some())
@@ -59,7 +60,7 @@ fn enqueue(queue: &mut Value, args: &Value) -> Result<(), Error> {
     queue["items"]
         .as_array_mut()
         .ok_or_else(Error::invalid)?
-        .push(item.clone());
+        .push({let mut accepted=item.clone();accepted["traceContext"]=crate::core::trace::capture();accepted});
     let active = queue["items"]
         .as_array()
         .unwrap()
@@ -128,6 +129,7 @@ fn retry(queue: &mut Value, id: &Value) -> Result<(), Error> {
     ] {
         item.as_object_mut().unwrap().remove(key);
     }
+    item["traceContext"]=crate::core::trace::capture();
     queue["paused"] = json!(false);
     Ok(())
 }

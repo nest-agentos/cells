@@ -9,6 +9,7 @@ pub mod error;
 pub mod events;
 pub mod gate;
 mod gate_owner;
+mod gate_admission;
 pub(crate) mod gate_read;
 pub mod ids;
 pub mod log_file;

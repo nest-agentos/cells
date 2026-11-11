@@ -3,6 +3,7 @@ use crate::core::{
     error::Error,
     gate::{ActivityPermit, FileGate},
 };
+use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
     sync::Mutex,
@@ -13,6 +14,7 @@ struct Active {
     operation: String,
     turn: Option<String>,
     completed: HashSet<String>,
+    trace:serde_json::Map<String,Value>,
     _permit: ActivityPermit,
 }
 #[derive(Default)]
@@ -33,12 +35,18 @@ impl Activities {
             session.into(),
             Active {
                 operation: operation.into(),
+                trace:{let mut fields=crate::core::trace::current();fields.insert("operationId".into(),operation.into());fields},
                 turn: None,
                 completed: HashSet::new(),
                 _permit: gate.activity()?,
             },
         );
         Ok(())
+    }
+    pub fn correlation(&self,session:&str,turn:Option<&str>)->Option<serde_json::Map<String,Value>> {
+        let active=self.0.lock().ok()?;let current=active.get(session)?;
+        if turn.is_some()&&current.turn.is_some()&&turn!=current.turn.as_deref(){return None;}
+        Some(current.trace.clone())
     }
     pub fn bind(&self, session: &str, operation: &str, turn: &str) -> Option<ActivityPermit> {
         let mut active = self.0.lock().unwrap();

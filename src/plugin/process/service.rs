@@ -22,7 +22,7 @@ pub fn start(state: &Arc<State>, identity: usize, request: Request) -> Result<St
         crate::core::events::emit(
             crate::core::events::Level::Warn,
             "process.rejected",
-            serde_json::json!({"requestId": id, "identity": identity, "code": error.code}),
+            serde_json::json!({"operationId":id,"requestId": id, "identity": identity, "code": error.code}),
         );
     })
 }
@@ -39,7 +39,7 @@ pub async fn start_command(state: &Arc<State>, identity: usize, request: Request
         start_authorized(state, identity, request, Some(permit))
     }.await;
     result.inspect_err(|error: &Error| crate::core::events::emit(crate::core::events::Level::Warn,
-        "process.rejected", serde_json::json!({"requestId":id,"identity":identity,"code":error.code})))
+        "process.rejected", serde_json::json!({"operationId":id,"requestId":id,"identity":identity,"code":error.code})))
 }
 
 fn authorize_request(state: &Arc<State>, identity: usize, request: &Request) -> Result<(), Error> {
@@ -91,7 +91,9 @@ fn start_authorized(
                 crate::core::events::emit(crate::core::events::Level::Info, "process.admitted",
                     serde_json::json!({"operation":"process.start","stage":"launch","result":"success",
                         "operationId":request.request_id,"identity":identity,"projectId":request.project_id,
-                        "mountCount":plan.mounts.len(),"timeoutMs":plan.timeout_ms}));
+                        "mountCount":plan.mounts.len(),"timeoutMs":plan.timeout_ms,
+                        "requestedReadOnly":request.read_only,"readOnlyEnforced":request.read_only&&!crate::projects::native::enabled(state),
+                        "gateMode":"exclusive","commandKind":command_kind(&request.command),"argumentCount":request.args.len()}));
                 // The registered task, not the HTTP waiter, owns spawn and cleanup.
                 tokio::spawn(crate::core::trace::scope(crate::core::trace::current(), runner::run(
                     state.clone(),
@@ -132,7 +134,7 @@ pub fn cancel(state: &State, identity: usize, epoch: &str, id: &str) -> Result<S
     crate::core::events::emit(
         crate::core::events::Level::Info,
         "process.cancel_requested",
-        serde_json::json!({"requestId": id, "identity": identity}),
+        serde_json::json!({"operationId":id,"requestId": id, "identity": identity}),
     );
     Ok(status)
 }
@@ -153,4 +155,10 @@ fn authorize(state: &State, epoch: &str, id: &str) -> Result<(), Error> {
         return Err(Error::invalid());
     }
     Ok(())
+}
+
+fn command_kind(command:&str)->&'static str {
+    match std::path::Path::new(command).file_name().and_then(|s|s.to_str()) {
+        Some("git")=>"git",Some("sh"|"bash"|"dash")=>"shell",Some("node"|"nodejs")=>"node",_=>"other"
+    }
 }

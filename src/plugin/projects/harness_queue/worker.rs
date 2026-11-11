@@ -22,7 +22,7 @@ pub(crate) fn ensure(state: &Arc<State>, binding: &Binding) {
     }
     let state = Arc::downgrade(state);
     let binding = binding.clone();
-    tokio::spawn(async move {
+    crate::core::trace::spawn(async move {
         let mut events = None;
         let mut last_error = None;
         loop {
@@ -190,6 +190,9 @@ pub(super) async fn advance(
     if item.is_null() || item["state"] == "failed" {
         return Ok(());
     }
+    crate::core::trace::scope(crate::core::trace::resume(&item["traceContext"]),advance_item(state,identity,binding,&record,item)).await
+}
+async fn advance_item(state:&Arc<State>,identity:usize,binding:&Binding,record:&Value,item:Value)->Result<(),Error> {
     let session = native(state, identity, binding, "harness_session_info", json!({})).await?
         ["session"]
         .clone();
@@ -210,7 +213,7 @@ pub(super) async fn advance(
         return Ok(());
     }
     if active.is_some() {
-        return supplement(state, identity, binding, &record, &session).await;
+        return supplement(state, identity, binding, record, &session).await;
     }
     if !["idle", "notLoaded"].contains(&session["status"].as_str().unwrap_or("")) {
         return Ok(());
@@ -221,6 +224,7 @@ pub(super) async fn advance(
         .profiles()["epoch"]
         .clone();
     let mut claimed = item.clone();
+    claimed["traceContext"]=crate::core::trace::capture();
     claimed["state"] = json!("dispatching");
     claimed["dispatchedAt"] = json!(now());
     claimed["queueEpoch"] = epoch.clone();
@@ -526,11 +530,13 @@ where
     change(queue, index)?;
     commands::bump(queue)?;
     let result = store::save(channels, binding, &raw, &record);
+    crate::core::trace::sync_scope(crate::core::trace::resume(&expected["traceContext"]),||{
     crate::core::events::emit(
         crate::core::events::Level::Info,
         "harness.queue.transition",
         json!({"operation":"harness.queue","operationId":attempt(expected),"sessionId":binding.session_id,"stage":"persist_transition","result":if result.is_ok(){"success"}else{"failure"},"revision":record["instructionQueue"]["revision"],"count":record["instructionQueue"]["items"].as_array().map(Vec::len),"code":result.as_ref().err().map(|e|e.code),"durationMs":started.elapsed().as_millis()}),
     );
+    });
     result
 }
 async fn reconcile(
@@ -770,6 +776,7 @@ async fn supplement(
         return Ok(());
     }
     let mut claimed = item.clone();
+    claimed["traceContext"]=crate::core::trace::capture();
     claimed["state"] = json!("dispatching");
     claimed["dispatchedAt"] = json!(now());
     claimed["steerTurnId"] = json!(turn);

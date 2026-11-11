@@ -603,7 +603,7 @@ impl Profile {
         };
         // Execution outlives an HTTP disconnect; queries can confirm a later result.
         let context = super::diagnostics::operation_context(name, &args);
-        let work = tokio::spawn(super::diagnostics::scope(
+        let work = crate::core::trace::spawn(super::diagnostics::scope(
             context,
             self.clone()
                 .execute(name.to_owned(), args, id.clone(), permit),

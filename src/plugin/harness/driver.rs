@@ -27,7 +27,12 @@ pub trait HarnessDriver: Send + Sync {
         name: &'a str,
         args: &'a Value,
     ) -> BoxFuture<'a, NativeExecution> {
-        Box::pin(async move { NativeExecution::Dispatched(self.execute(name, args).await) })
+        Box::pin(async move {
+            match self.execute(name,args).await {
+                Err(error) if error.code=="NATIVE_WORKSPACE_BUSY"=>NativeExecution::NotStarted(error),
+                result=>NativeExecution::Dispatched(result),
+            }
+        })
     }
     /// Return native evidence for an existing uncertain mutation; never execute it again.
     fn reconcile_operation<'a>(

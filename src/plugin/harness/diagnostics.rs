@@ -19,6 +19,7 @@ pub(super) fn native_context(params: &Value) -> Value {
     let mut context = OPERATION
         .try_with(Clone::clone)
         .unwrap_or_else(|_| json!({}));
+    context.as_object_mut().unwrap().extend(crate::core::trace::current());
     if let Some(id) = label(&params["threadId"]) {
         context["sessionId"] = json!(id);
     }

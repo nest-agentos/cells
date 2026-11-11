@@ -80,7 +80,7 @@ impl Dsh {
         let live = self.owned(id)?;
         let input = super::super::commands::arguments(args)?;
         let operation = string(args, "requestId")?;
-        self.begin_command(id, operation, &live)?;
+        self.begin_command(id, operation, &live).await?;
         *dispatched = true;
         let result = self.run_command(client, id, name, input).await;
         self.finish_command(operation, &live, result)
@@ -99,15 +99,9 @@ impl Dsh {
                 "output":result["result"]["text"].as_str().unwrap_or(name),"failed":result["result"]["kind"]=="error","status":"completed"}))
     }
 
-    fn begin_command(&self, id: &str, operation: &str, live: &Live) -> Result<(), Error> {
-        let mut cursor = live.cursor.lock().unwrap();
-        admission::require_ready(&cursor)?;
-        if cursor.busy() || live.session.lock().unwrap()["status"] == "active" {
-            return Err(Error::busy());
-        }
-        if let Some(runtime) = &self.runtime {
-            runtime.begin(id, operation)?;
-        }
+    async fn begin_command(&self, id: &str, operation: &str, live: &Live) -> Result<(), Error> {
+        self.begin_execution(id,operation,live).await?;
+        let mut cursor=live.cursor.lock().unwrap();
         cursor.command_pending = Some(command_admission::CommandAdmission::new(operation));
         Ok(())
     }
@@ -212,18 +206,18 @@ mod admission_tests {
         }
     }
 
-    #[test]
-    fn original_response_remains_reconcilable_and_blocks_dispatch_until_a_matching_receipt_is_confirmed(
+    #[tokio::test]
+    async fn original_response_remains_reconcilable_and_blocks_dispatch_until_a_matching_receipt_is_confirmed(
     ) {
         let (driver, live) = fixture();
-        driver.begin_command("s", "original", &live).unwrap();
+        driver.begin_command("s", "original", &live).await.unwrap();
         let result = driver
             .finish_command("original", &live, Ok(output("native")))
             .unwrap();
         assert_eq!(driver.command_evidence("original"), Some(result.clone()));
         assert!(driver.command_evidence("foreign").is_none());
         assert_eq!(
-            driver.begin_command("s", "next", &live).err().unwrap().code,
+            driver.begin_command("s", "next", &live).await.err().unwrap().code,
             "DSH_COMMAND_RESULT_PENDING"
         );
         assert!(driver.idle_since().is_none());
@@ -233,7 +227,7 @@ mod admission_tests {
             &json!({"requestId":"original","outcome":"committed","result":result}),
         );
         assert!(driver.command_evidence("original").is_none());
-        driver.begin_command("s", "next", &live).unwrap();
+        driver.begin_command("s", "next", &live).await.unwrap();
         driver.operation_settled(
             "original",
             &json!({"requestId":"original","outcome":"committed","result":result}),
@@ -242,10 +236,10 @@ mod admission_tests {
         assert_eq!(cursor.command_pending.as_ref().unwrap().id, "next");
     }
 
-    #[test]
-    fn unknown_transport_never_uses_matching_log_events_as_original_command_evidence() {
+    #[tokio::test]
+    async fn unknown_transport_never_uses_matching_log_events_as_original_command_evidence() {
         let (driver, live) = fixture();
-        driver.begin_command("s", "unknown", &live).unwrap();
+        driver.begin_command("s", "unknown", &live).await.unwrap();
         assert_eq!(
             driver
                 .finish_command("unknown", &live, Err(Error::timed_out()))
@@ -263,7 +257,7 @@ mod admission_tests {
         );
         assert!(driver.command_evidence("unknown").is_none());
         assert_eq!(
-            driver.begin_command("s", "next", &live).err().unwrap().code,
+            driver.begin_command("s", "next", &live).await.err().unwrap().code,
             "DSH_COMMAND_RESULT_PENDING"
         );
         driver.operation_settled(
@@ -273,11 +267,11 @@ mod admission_tests {
         assert!(live.cursor.lock().unwrap().command_pending.is_some());
     }
 
-    #[test]
-    fn confirmed_rejection_releases_only_the_matching_admission_and_conflicting_native_evidence_is_rejected(
+    #[tokio::test]
+    async fn confirmed_rejection_releases_only_the_matching_admission_and_conflicting_native_evidence_is_rejected(
     ) {
         let (driver, live) = fixture();
-        driver.begin_command("s", "rejected", &live).unwrap();
+        driver.begin_command("s", "rejected", &live).await.unwrap();
         assert!(driver
             .finish_command("rejected", &live, Err(Error::busy()))
             .is_err());
@@ -286,7 +280,7 @@ mod admission_tests {
             "rejected",
             &json!({"requestId":"rejected","outcome":"not-committed"}),
         );
-        driver.begin_command("s", "accepted", &live).unwrap();
+        driver.begin_command("s", "accepted", &live).await.unwrap();
         driver
             .finish_command("accepted", &live, Ok(output("native")))
             .unwrap();

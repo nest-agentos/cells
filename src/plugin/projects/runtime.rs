@@ -298,9 +298,12 @@ impl ProjectRuntime {
         let profile=super::execution::resolve(&service.execution_profiles,&self.project.owner,&self.project.execution)?;
         super::execution::prepare_native(command,profile,&self.project.execution)
     }
-    pub fn begin(&self, thread: &str, operation: &str) -> Result<(), Error> {
+    pub async fn begin(&self, thread: &str, operation: &str) -> Result<(), Error> {
         let state = self.state()?;
+        let handoff=state.files.admit_activity(operation,3000).await?;
+        self.state()?;
         self.active.begin(&state.files, thread, operation)?;
+        drop(handoff);
         if let Err(error)=state.services.require::<super::ProjectService>()?.channels.prepare_turn(&self.project.id,thread,operation) {
             self.reject(thread,operation);return Err(error);
         }
@@ -343,6 +346,15 @@ impl ProjectRuntime {
         drop(permit);
     }
     pub fn event(&self, message: &Value) {
+        let thread=message["params"]["threadId"].as_str();
+        let turn=message["params"]["turn"]["id"].as_str();
+        let trace=thread.and_then(|id|self.active.correlation(id,turn));
+        if let Some(trace)=trace.filter(|_|matches!(message["method"].as_str(),Some("turn/started"|"turn/completed"|"error"|"harness/disconnected"))) {crate::core::trace::sync_scope(trace,||{
+            crate::core::events::emit(crate::core::events::Level::Info,"project.execution.event",serde_json::json!({
+                "operation":"native.execution","projectId":self.project.id,"sessionId":thread,"turnId":turn,
+                "stage":message["method"],"status":message["params"]["turn"]["status"]}));
+        });}
+
         if let Ok(state)=self.state() {
             if let Some(service)=state.services.get::<super::ProjectService>() {
                 if let Err(error)=service.channels.observe(&self.project.id,message) {
@@ -367,6 +379,8 @@ impl ProjectRuntime {
         self.stop(Some(thread), clean);
     }
     fn stop(&self, thread: Option<&str>, clean: bool) {
+        let traces=self.active.sessions().into_iter().filter(|id|thread.is_none_or(|target|target==id))
+            .filter_map(|id|self.active.correlation(&id,None).map(|trace|(id,trace))).collect::<Vec<_>>();
         for session in self.active.sessions().into_iter().filter(|id| thread.is_none_or(|target|target==id)) {
             self.event(&serde_json::json!({"method":"harness/disconnected","params":{"threadId":session}}));
         }
@@ -379,5 +393,10 @@ impl ProjectRuntime {
             }
         }
         drop(permits);
+        for (session,trace) in traces {crate::core::trace::sync_scope(trace,||{
+            crate::core::events::emit(if clean{crate::core::events::Level::Info}else{crate::core::events::Level::Warn},"project.execution.cleanup",serde_json::json!({
+                "operation":"native.execution","stage":"cleanup","sessionId":session,"projectId":self.project.id,
+                "result":if clean{"confirmed"}else{"unknown"},"code":if clean{None}else{Some("NATIVE_CLEANUP_UNCONFIRMED")}}));
+        });}
     }
 }

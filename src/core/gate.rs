@@ -14,8 +14,9 @@ use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 /// Cloneable handle to the process-wide file/process gate.
 #[derive(Clone, Default)]
 pub struct FileGate {
-    owners: super::gate_owner::Owners,
-    inner: Arc<RwLock<()>>,
+    pub(super) owners: super::gate_owner::Owners,
+    pub(super) native_admission: Arc<tokio::sync::Mutex<()>>,
+    pub(super) inner: Arc<RwLock<()>>,
     readers: Arc<RwLock<()>>,
     poisoned: Arc<AtomicBool>,
     activity: Arc<Mutex<Activity>>,
@@ -131,6 +132,17 @@ impl FileGate {
         Ok(ActivityPermit(self.activity.clone()))
     }
 
+    pub(super) fn join_activity(&self)->Result<Option<ActivityPermit>,Error> {
+        self.check()?;let mut activity=self.activity.lock().map_err(|_|Error::internal())?;
+        if activity.count==0{return Ok(None);}
+        activity.count+=1;Ok(Some(ActivityPermit(self.activity.clone())))
+    }
+    pub(super) fn retain_activity(&self,guard:OwnedRwLockWriteGuard<()>)->Result<ActivityPermit,Error> {
+        self.check()?;let mut activity=self.activity.lock().map_err(|_|Error::internal())?;
+        if activity.count!=0{return Err(Error::internal());}
+        activity.guard=Some(guard);activity.count=1;Ok(ActivityPermit(self.activity.clone()))
+    }
+
     /// Permanently close the gate after an unreaped command.
     pub fn poison(&self) {
         self.poisoned.store(true, Ordering::Release);
@@ -164,7 +176,7 @@ impl FileGate {
         Error::busy()
     }
 
-    fn check(&self) -> Result<(), Error> {
+    pub(super) fn check(&self) -> Result<(), Error> {
         if self.is_poisoned() {
             return Err(Error::unavailable());
         }

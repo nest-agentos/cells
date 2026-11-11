@@ -157,7 +157,7 @@ impl Codex {
         let id = string(args, "sessionId")?;
         let operation = string(args, "requestId")?;
         if let Some(runtime) = &self.runtime {
-            runtime.begin(id, operation)?;
+            runtime.begin(id, operation).await?;
         }
         if let Err(error) = bridge
             .events
@@ -206,7 +206,7 @@ impl Codex {
         let id = string(args, "sessionId")?;
         let operation = string(args, "requestId")?;
         if let Some(runtime) = &self.runtime {
-            runtime.begin(id, operation)?;
+            runtime.begin(id, operation).await?;
         }
         let target = if input.trim().is_empty() {
             json!({"type":"uncommittedChanges"})

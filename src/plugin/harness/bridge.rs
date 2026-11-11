@@ -395,6 +395,7 @@ fn dispatch(message: Value, pending: &PendingCalls, events: &Mutex<Events>) -> R
                     | "thread/archive"
                     | "thread/unarchive"
                     | "thread/delete"
+                    | "turn/start" | "turn/interrupt" | "thread/compact/start" | "review/start"
             ) {
                 crate::core::events::emit(
                     crate::core::events::Level::Info,

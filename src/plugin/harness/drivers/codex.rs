@@ -394,7 +394,7 @@ impl Codex {
             "summary":params["summary"],"durationMs":started.elapsed().as_millis() as u64}),
         );
         if let Some(runtime) = &self.runtime {
-            runtime.begin(id, operation)?;
+            runtime.begin(id, operation).await?;
         }
         let result = bridge.persistent_call("turn/start", params.clone()).await;
         if let (Err(error), Some(runtime)) = (&result, &self.runtime) {

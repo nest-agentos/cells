@@ -366,7 +366,7 @@ impl Claude {
         self.refresh_channel(&process).await?;
         let turn = uuid()?;
         if let Some(runtime) = &self.runtime {
-            runtime.begin(id, &turn)?;
+            runtime.begin(id, &turn).await?;
             runtime.bind_turn(id, &turn, &turn);
         }
         let result = async {

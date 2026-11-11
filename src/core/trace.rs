@@ -9,6 +9,29 @@ pub fn current() -> Map<String, Value> {
 pub async fn scope<T>(context: Map<String, Value>, work: impl Future<Output = T>) -> T {
     CONTEXT.scope(context, work).await
 }
+/// Spawn a causal child instead of losing task-local correlation at an async boundary.
+pub fn spawn<F>(work:F)->tokio::task::JoinHandle<F::Output> where F:Future+Send+'static,F::Output:Send+'static {
+    tokio::spawn(scope(resume(&Value::Object(current())),work))
+}
+/// Persist only validated correlation identifiers, never arbitrary request metadata.
+pub fn capture()->Value {Value::Object(validated(&Value::Object(current())))}
+pub fn resume(value:&Value)->Map<String,Value> {
+    let mut context=validated(value);
+    if !context.contains_key("traceId"){return fields(None,None,None);}
+    if let Some(parent)=context.get("spanId").cloned(){context.insert("parentSpanId".into(),parent);}
+    if let Some(span)=random_hex(8){context.insert("spanId".into(),span.into());}
+    context
+}
+fn validated(value:&Value)->Map<String,Value> {
+    let mut result=Map::new();
+    for key in ["traceId","spanId","parentSpanId","requestId","parentRequestId","browserSessionId"] {
+        let Some(text)=value[key].as_str() else{continue};
+        let valid=match key {"traceId"=>hex(text,32),"spanId"|"parentSpanId"=>hex(text,16),
+            _=>crate::core::ids::is_identifier_within(text,128)};
+        if valid{result.insert(key.into(),text.into());}
+    }
+    result
+}
 pub fn sync_scope<T>(context: Map<String, Value>, work: impl FnOnce() -> T) -> T {
     CONTEXT.sync_scope(context, work)
 }
@@ -108,5 +131,20 @@ mod tests {
                 .map(|v| hex(v, 32))
                 .unwrap_or(false));
         }
+    }
+}
+
+#[cfg(test)]
+mod causal_tests {
+    use super::*;
+    #[tokio::test]
+    async fn spawned_and_recovered_work_retain_the_origin_trace_without_copying_payloads() {
+        let mut origin=fields(None,None,Some("request-1"));origin.insert("secret".into(),"PRIVATE".into());
+        let expected=origin["traceId"].clone();let parent=origin["spanId"].clone();
+        let (child,persisted)=scope(origin,async{let persisted=capture();(spawn(async{current()}).await.unwrap(),persisted)}).await;
+        assert_eq!(child["traceId"],expected);assert_eq!(child["parentSpanId"],parent);
+        assert_ne!(child["spanId"],parent);assert!(!persisted.to_string().contains("PRIVATE"));
+        assert_eq!(resume(&persisted)["traceId"],expected);assert!(current().is_empty());
+        assert!(!resume(&serde_json::json!({"traceId":"invalid","secret":"PRIVATE"})).contains_key("secret"));
     }
 }

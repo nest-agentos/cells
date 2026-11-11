@@ -398,3 +398,14 @@ async fn active_turn_supplements_are_admitted_once_without_starting_another_turn
     assert_eq!(count.sent.load(Ordering::SeqCst), 1);
     shutdown(&state).await;
 }
+
+#[test]
+fn queue_persists_validated_origin_correlation_and_rejects_caller_spoofing() {
+    let origin=crate::core::trace::fields(None,None,Some("enqueue-request"));let expected=origin["traceId"].clone();
+    let mut queue=empty();
+    crate::core::trace::sync_scope(origin,||commands::apply(&mut queue,&enqueue("traced","hello"))).unwrap();
+    let saved:Value=serde_json::from_str(&queue.to_string()).unwrap();
+    assert_eq!(crate::core::trace::resume(&saved["items"][0]["traceContext"])["traceId"],expected);
+    let mut forged=enqueue("forged","hello");forged["item"]["traceContext"]=json!({"traceId":"private"});
+    assert!(commands::apply(&mut queue,&forged).is_err());
+}

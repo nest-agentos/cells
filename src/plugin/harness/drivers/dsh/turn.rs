@@ -14,7 +14,7 @@ impl Dsh {
         let prompt = validate_prompt(args)?;
         let operation = string(args, "requestId")?;
         let selection = self.prepare_model_selection(client, args).await?;
-        self.begin(id, operation, prompt, &live)?;
+        self.begin(id, operation, prompt, &live).await?;
         *dispatched = true;
         let result = self.submit_turn(client, args, selection).await;
         self.admission(id, operation, &live, result)
@@ -38,22 +38,30 @@ impl Dsh {
             )
             .await
     }
-    fn begin(&self, id: &str, operation: &str, prompt: &str, live: &Live) -> Result<(), Error> {
-        let mut cursor = live.cursor.lock().unwrap();
-        admission::require_ready(&cursor)?;
-        if cursor.busy() || live.session.lock().unwrap()["status"] == "active" {
-            return Err(Error::busy());
-        }
-        if let Some(runtime) = &self.runtime {
-            runtime.begin(id, operation)?;
-            runtime.bind_turn(id, operation, operation);
-        }
+    async fn begin(&self, id: &str, operation: &str, prompt: &str, live: &Live) -> Result<(), Error> {
+        self.begin_execution(id,operation,live).await?;
+        if let Some(runtime)=&self.runtime {runtime.bind_turn(id,operation,operation);}
+        let mut cursor=live.cursor.lock().unwrap();
         cursor.turn = operation.into();
         cursor.native_turn = None;
         cursor.observed_native = None;
         cursor.expected_request = Some(operation.into());
         cursor.admission = Some(admission::PromptAdmission::new(operation, prompt));
         live.session.lock().unwrap()["activeTurnId"] = json!(operation);
+        Ok(())
+    }
+    pub(super) async fn begin_execution(&self,id:&str,operation:&str,live:&Live)->Result<(),Error> {
+        self.require_idle(live)?;
+        if let Some(runtime)=&self.runtime {runtime.begin(id,operation).await?;}
+        if let Err(error)=self.require_idle(live) {
+            if let Some(runtime)=&self.runtime {runtime.reject(id,operation);}
+            return Err(error);
+        }
+        Ok(())
+    }
+    fn require_idle(&self,live:&Live)->Result<(),Error> {
+        let cursor=live.cursor.lock().unwrap();admission::require_ready(&cursor)?;
+        if cursor.busy()||live.session.lock().unwrap()["status"]=="active" {return Err(Error::busy());}
         Ok(())
     }
     fn admission(

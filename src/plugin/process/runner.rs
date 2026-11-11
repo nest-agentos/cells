@@ -41,7 +41,7 @@ pub async fn run(
         crate::core::events::emit(
             crate::core::events::Level::Info,
             "process.cancelled_before_start",
-            serde_json::json!({"requestId": request_id, "identity": identity}),
+            serde_json::json!({"operationId":request_id,"requestId": request_id, "identity": identity}),
         );
         return;
     }
@@ -53,7 +53,7 @@ pub async fn run(
             crate::core::events::emit(
                 crate::core::events::Level::Error,
                 "process.spawn_failed",
-                serde_json::json!({"requestId": request_id, "identity": identity,
+                serde_json::json!({"operationId":request_id,"requestId": request_id, "identity": identity,
                 "errorKind": format!("{:?}", error.kind()), "osError": error.raw_os_error()}),
             );
             return;
@@ -63,7 +63,7 @@ pub async fn run(
     crate::core::events::emit(
         crate::core::events::Level::Info,
         "process.started",
-        serde_json::json!({"requestId": request_id, "identity": identity, "pid": child.id()}),
+        serde_json::json!({"operationId":request_id,"requestId": request_id, "identity": identity, "pid": child.id()}),
     );
     // The launcher inherited the descriptors; the parent can let them go.
     drop(prepared.directories);
@@ -90,7 +90,7 @@ pub async fn run(
                     crate::core::events::Level::Warn
                 },
                 "process.finished",
-                serde_json::json!({"requestId": request_id, "identity": identity,
+                serde_json::json!({"operationId":request_id,"requestId": request_id, "identity": identity,
                 "state": terminal, "exitCode": code, "elapsedMs": started.elapsed().as_millis(),
                 "stdoutBytes": stdout.len(), "stderrBytes": stderr.len(), "truncated": stdout_truncated || stderr_truncated}),
             );
@@ -116,7 +116,7 @@ pub async fn run(
             crate::core::events::emit(
                 crate::core::events::Level::Error,
                 "process.cleanup_failed",
-                serde_json::json!({"requestId": request_id,
+                serde_json::json!({"operationId":request_id,"requestId": request_id,
                 "identity": identity, "state": "unknown", "fileGate": "poisoned"}),
             );
         }
