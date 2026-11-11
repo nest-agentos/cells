@@ -30,6 +30,7 @@ pub fn start(state: &Arc<State>, identity: usize, request: Request) -> Result<St
 /// Wait fairly for short readers before admitting a new command; duplicates never replay.
 pub async fn start_command(state: &Arc<State>, identity: usize, request: Request) -> Result<Status, Error> {
     let id = request.request_id.clone();
+    let kind=command_kind(&request.command);let read_only=request.read_only;let argument_count=request.args.len();
     let result = async {
         authorize_request(state, identity, &request)?;
         if let Some(process) = state.services.require::<crate::process::Execution>()?.registry().get(identity, &id)? {
@@ -39,7 +40,8 @@ pub async fn start_command(state: &Arc<State>, identity: usize, request: Request
         start_authorized(state, identity, request, Some(permit))
     }.await;
     result.inspect_err(|error: &Error| crate::core::events::emit(crate::core::events::Level::Warn,
-        "process.rejected", serde_json::json!({"operationId":id,"requestId":id,"identity":identity,"code":error.code})))
+        "process.rejected", serde_json::json!({"operation":"process.start","operationId":id,"requestId":id,"identity":identity,"code":error.code,
+            "stage":"admission","result":"failure","executionStarted":false,"commandKind":kind,"argumentCount":argument_count,"requestedReadOnly":read_only,"gateMode":"exclusive"})))
 }
 
 fn authorize_request(state: &Arc<State>, identity: usize, request: &Request) -> Result<(), Error> {
