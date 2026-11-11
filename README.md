@@ -123,7 +123,7 @@ NestOS 项目右键菜单选择“启用远程命令”后，File Tools 和 Bash
 
 每条命令最多一个 rw export（其他 export 为 ro）；该 writer 的独占锁保留给 monitor。单命令、最长 300 秒、stdout/stderr 各 64 KiB，超出输出上限会取消。返回最终有界输出，尚无实时流或 PTY。最多保留 1024 条内存进程记录；容量达到上限时，将已确定结束的回执归档到当前 epoch 的私有 SQLite 临时磁盘库（2 MiB 缓存、主库上限 256 MiB），相同 identity/requestId 继续查询原结果，不能重新执行。running/unknown 不归档，全部为未结算进程时返回 PROCESS_LIMIT；归档故障返回 PROCESS_RECEIPT_STORAGE_FAILED，保留原身份且拒绝新准入。重启更换 epoch，不提供旧结果续接。
 
-命令持有文件/进程互斥门；普通进程 API 和 `projects.exec` 在仅有目录/内容读取时公平等待最多 3 秒（不超过请求超时），后来的读取不能插队；等待超时返回 `PROCESS_READERS_BUSY`，取消等待也会释放门，不提交命令；该错误不触发 Git 的短重试。Native turn 或其他命令占用时仍立即拒绝。日志 `file.gate.command` 记录请求 ID、等待阶段、结果和耗时。重复请求沿原回执返回，等待期间已取消的身份不得执行。命令运行期间所有文件 API 返回 EBUSY；下载流、上传与后台提交保留其门直到结束。命令退出/取消并回收后使所有旧 revision 失效，避免 Bash 改动绕过条件写入。exclusive export 不允许其他宿主进程并发写入。执行锁在 monitor 中保留，daemon 意外退出后锁随进程清理释放。
+命令持有文件/进程互斥门；普通进程 API 和 `projects.exec` 在仅有目录/内容读取时公平等待最多 3 秒（不超过请求超时），后来的读取不能插队；等待超时返回 `PROCESS_READERS_BUSY`，取消等待也会释放门，不提交命令；该错误不触发 Git 的短重试。Native turn 或其他命令占用时仍立即拒绝。日志 `file.gate.command` 记录请求 ID、等待阶段、结果和耗时。重复请求沿原回执返回，等待期间已取消的身份不得执行。命令运行期间文件访问受互斥门保护；`stat`、`entries` 和 `content` 的只读请求在包括项目授权检查的入口遇到 `EBUSY` 时最多重试三次，退避 50/100/200 ms，所有尝试共用原请求截止时间且不增加 HTTP 请求。持续占用仍返回 `EBUSY`，截止返回 `ETIMEDOUT`，其他错误不重试；写入和命令不自动重放。冲突日志 `file.gate.conflict` 包含 `blockerOperationId`、`blockerRequestId`、`blockerKind`、`blockerPid` 与 `heldMs`，重试日志 `file.gate.read_retry` 包含次数、耗时和结果；`process.admitted` 以 operationId 关联项目和命令启动，后台进程继承 HTTP trace，不记录命令正文或参数。下载流、上传与后台提交保留其门直到结束。命令退出/取消并回收后使所有旧 revision 失效，避免 Bash 改动绕过条件写入。exclusive export 不允许其他宿主进程并发写入。执行锁在 monitor 中保留，daemon 意外退出后锁随进程清理释放。
 
 验收：`CELLS_PROCESS_TEST=1 cargo test`（要求可创建 Linux user/PID/network namespace）。
 
@@ -173,7 +173,7 @@ max_file_bytes = 10485760
 retained_files = 5
 ```
 
-事件使用 JSON 行；每行首先输出带毫秒和本机时区偏移的可读 `time`，再输出 level、event、fields，末尾保留 Unix 毫秒 `timeMs` 供程序处理。例如 `{"time":"2026-10-08T13:44:42.034+08:00","level":"info","event":"server.ready","fields":{"address":"127.0.0.1:8787"},"timeMs":1791438282034}`。时区使用服务进程的本地设置，可通过 `TZ` 调整。sync.diagnostics 是每分钟的调试性能汇总，仅在 debug/trace 下输出；普通运行保持 info 即可。
+事件使用 JSON 行；每行首先输出带毫秒和 `Z` 的 UTC `time`，再输出 level、event、fields，末尾保留 Unix 毫秒 `timeMs` 供程序处理。例如 `{"time":"2026-10-08T05:44:42.034Z","level":"info","event":"server.ready","fields":{"address":"127.0.0.1:8787"},"timeMs":1791438282034}`。日志时间固定为 UTC，与运行机器的本地时区无关；浏览器按本地时区转换并显示实际 UTC 偏移。sync.diagnostics 是每分钟的调试性能汇总，仅在 debug/trace 下输出；普通运行保持 info 即可。
 
 - debug：文件变更/命令准入；info：启动就绪、变更提交、命令启动与成功结束、取消和关闭。
 - warn/error：认证拒绝、HTTP 错误、命令非零退出、超时、启动或清理失败；保留操作/请求 ID、状态和退出码。

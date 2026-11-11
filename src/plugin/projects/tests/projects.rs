@@ -876,3 +876,32 @@ async fn remount_does_not_create_two_registered_project_identities_for_one_new_b
     let error=call(&state,0,"project_remount",json!({"projectId":original["id"],"revision":original["revision"],"access":"rw","directory":{"alias":"new","path":"group/existing"}})).await.unwrap_err();
     assert_eq!(error.code,"PROJECT_DIRECTORY_ALREADY_REGISTERED");
 }
+
+#[tokio::test]
+async fn project_stat_retries_a_real_short_command_with_one_http_request() {
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    let root = tempfile::tempdir().unwrap();
+    let mut config = deployment(root.path());
+    config.projects.as_mut().unwrap().isolation = cells::projects::model::Isolation::None;
+    let state = State::from_config(&config).unwrap();
+    cells::process::enable(&state).await.unwrap();
+    let project = register(&state, "group/existing", false).await;
+    let epoch = state.services.require::<cells::process::Execution>().unwrap().epoch().to_owned();
+    call(&state, 0, "project_exec", json!({"projectId":project["id"],"revision":project["revision"],
+        "epoch":epoch,"requestId":"short-stat-conflict","command":"/bin/sh",
+        "args":["-c","sleep 0.029; printf ready > retry-note"],"timeoutMs":2000})).await.unwrap();
+    let started = std::time::Instant::now();
+    let response = cells::router(state.clone(), &[]).unwrap().oneshot(axum::http::Request::builder()
+        .method("POST").uri("/v1/fs/home/stat").header("authorization", "Bearer project-test-secret-0123456789")
+        .header("x-fsagent-project", project["id"].as_str().unwrap())
+        .header("x-fsagent-project-revision", project["revision"].to_string())
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(r#"{"paths":["group/existing/retry-note"]}"#)).unwrap()).await.unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let data: Value = serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(data["results"][0]["stat"]["kind"], "file");
+    assert_eq!(cells::process::status(&state, 0, &epoch, "short-stat-conflict").unwrap().state, "exited");
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    eprintln!("stat contention: elapsedMs={}, logicalApiCalls=1, httpRequests=1", started.elapsed().as_millis());
+}

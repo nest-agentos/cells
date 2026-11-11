@@ -7,7 +7,7 @@ use serde::Deserialize;
 /// `cursor` is meaningful only for `entries`, but the same type is used for
 /// `content` so an incidental `cursor` parameter is accepted rather than
 /// rejected as an unknown field.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ListQuery {
     pub path: String,

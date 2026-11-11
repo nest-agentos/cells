@@ -47,7 +47,7 @@ impl FileLog {
             .create(&directory)?;
         let name = format!(
             "cells-{}-{}.jsonl",
-            chrono::Local::now().format("%Y%m%dT%H%M%S%.9f"),
+            chrono::Utc::now().format("%Y%m%dT%H%M%S%.9fZ"),
             std::process::id()
         );
         let path = directory.join(name);

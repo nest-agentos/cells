@@ -1,5 +1,5 @@
 //! Structured stderr/file sinks and severity filtering; callers choose safe metadata.
-use chrono::{DateTime, Local, SecondsFormat};
+use chrono::{DateTime, Utc, SecondsFormat};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -63,7 +63,7 @@ pub fn emit(level: Level, event: &str, fields: Value) {
     if let Some(value) = fields.as_object_mut() {
         value.extend(crate::core::trace::current());
     }
-    let record = Record::new(Local::now(), level, event, fields);
+    let record = Record::new(Utc::now(), level, event, fields);
     // A closed logging sink must not interrupt process supervision or cleanup.
     if let Ok(line) = serde_json::to_string(&record) {
         let _ = writeln!(std::io::stderr().lock(), "{line}");
@@ -91,9 +91,9 @@ struct Record<'a> {
     time_ms: i64,
 }
 impl<'a> Record<'a> {
-    fn new(time: DateTime<Local>, level: Level, event: &'a str, fields: Value) -> Self {
+    fn new(time: DateTime<Utc>, level: Level, event: &'a str, fields: Value) -> Self {
         Self {
-            time: time.to_rfc3339_opts(SecondsFormat::Millis, false),
+            time: time.to_rfc3339_opts(SecondsFormat::Millis, true),
             level,
             event,
             fields,
@@ -136,10 +136,10 @@ mod tests {
         assert!(toml::from_str::<Settings>("log_level = 'verbose'").is_err());
     }
     #[test]
-    fn readable_local_time_is_first_and_matches_the_machine_timestamp() {
+    fn readable_utc_time_is_first_and_matches_the_machine_timestamp() {
         let time = DateTime::parse_from_rfc3339("2026-10-08T13:44:42.034+08:00")
             .unwrap()
-            .with_timezone(&Local);
+            .with_timezone(&Utc);
         let line = serde_json::to_string(&Record::new(
             time,
             Level::Info,
@@ -147,7 +147,7 @@ mod tests {
             serde_json::json!({"address":"127.0.0.1:8787"}),
         ))
         .unwrap();
-        assert!(line.starts_with("{\"time\":\""));
+        assert!(line.starts_with("{\"time\":\"2026-10-08T05:44:42.034Z\""));
         let parsed: Value = serde_json::from_str(&line).unwrap();
         let readable = DateTime::parse_from_rfc3339(parsed["time"].as_str().unwrap()).unwrap();
         assert_eq!(readable.timestamp_millis(), 1791438282034);

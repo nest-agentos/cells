@@ -88,8 +88,12 @@ fn start_authorized(
                 let process = Arc::new(Process::new());
                 crate::core::events::emit(crate::core::events::Level::Debug, "process.accepted", serde_json::json!({"requestId": request.request_id,
                     "identity": identity, "cwd": plan.cwd, "mountCount": plan.mounts.len(), "timeoutMs": plan.timeout_ms}));
+                crate::core::events::emit(crate::core::events::Level::Info, "process.admitted",
+                    serde_json::json!({"operation":"process.start","stage":"launch","result":"success",
+                        "operationId":request.request_id,"identity":identity,"projectId":request.project_id,
+                        "mountCount":plan.mounts.len(),"timeoutMs":plan.timeout_ms}));
                 // The registered task, not the HTTP waiter, owns spawn and cleanup.
-                tokio::spawn(runner::run(
+                tokio::spawn(crate::core::trace::scope(crate::core::trace::current(), runner::run(
                     state.clone(),
                     prepared,
                     process.clone(),
@@ -97,7 +101,7 @@ fn start_authorized(
                     plan.timeout_ms,
                     identity,
                     request.request_id.clone(),
-                ));
+                )));
                 Ok(process)
             })?;
     Ok(process.status())

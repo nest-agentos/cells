@@ -18,7 +18,7 @@ use std::sync::Arc;
 const MAX_PATHS: usize = 256;
 const MAX_PATH_BYTES: usize = 64 * 1024;
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StatRequest {
     paths: Vec<String>,
@@ -27,6 +27,18 @@ pub struct StatRequest {
 }
 
 pub async fn stat(
+    AxumState(state): AxumState<Arc<State>>,
+    Path(alias): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<StatRequest>,
+) -> Result<Json<Value>, Error> {
+    let deadline = access::deadline(&headers)?;
+    crate::core::gate_read::retry(deadline, || stat_once(
+        AxumState(state.clone()), Path(alias.clone()), headers.clone(), Json(input.clone()),
+    )).await
+}
+
+async fn stat_once(
     AxumState(state): AxumState<Arc<State>>,
     Path(alias): Path<String>,
     headers: HeaderMap,

@@ -59,6 +59,7 @@ pub async fn run(
             return;
         }
     };
+    gate.process_started(child.id());
     crate::core::events::emit(
         crate::core::events::Level::Info,
         "process.started",

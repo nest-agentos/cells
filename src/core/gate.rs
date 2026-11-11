@@ -14,6 +14,7 @@ use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 /// Cloneable handle to the process-wide file/process gate.
 #[derive(Clone, Default)]
 pub struct FileGate {
+    owners: super::gate_owner::Owners,
     inner: Arc<RwLock<()>>,
     readers: Arc<RwLock<()>>,
     poisoned: Arc<AtomicBool>,
@@ -29,6 +30,8 @@ struct Activity {
 /// Full exclusion for supervised commands and project topology changes.
 #[derive(Debug)]
 pub struct ExclusivePermit {
+    // Clear ownership before releasing the locks to avoid clearing a new owner.
+    _owner: Option<super::gate_owner::OwnerGuard>,
     _mutations: OwnedRwLockWriteGuard<()>,
     _readers: OwnedRwLockWriteGuard<()>,
 }
@@ -36,6 +39,11 @@ pub struct ExclusivePermit {
 /// Native executions share mutation exclusion while observational reads continue.
 #[derive(Debug)]
 pub struct ActivityPermit(Arc<Mutex<Activity>>);
+impl ExclusivePermit {
+    pub fn process_started(&self, pid: Option<u32>) {
+        if let Some(owner) = &self._owner { owner.process_started(pid); }
+    }
+}
 impl Drop for ActivityPermit {
     fn drop(&mut self) {
         let mut activity = self.0.lock().unwrap();
@@ -77,12 +85,14 @@ impl FileGate {
             .clone()
             .try_write_owned()
             .map_err(|_| self.busy("exclusive"))?;
+        let owner = self.owners.enter("exclusive", None);
         let readers = self
             .readers
             .clone()
             .try_write_owned()
             .map_err(|_| self.busy("exclusive-readers"))?;
         Ok(ExclusivePermit {
+            _owner: Some(owner),
             _mutations: mutations,
             _readers: readers,
         })
@@ -92,6 +102,7 @@ impl FileGate {
     pub async fn command(&self, request_id: &str, budget_ms: u64) -> Result<ExclusivePermit, Error> {
         self.check()?;
         let mutations = self.inner.clone().try_write_owned().map_err(|_| self.busy("exclusive"))?;
+        let owner = self.owners.enter("command", Some(request_id));
         let started = std::time::Instant::now();
         let result = tokio::time::timeout(std::time::Duration::from_millis(budget_ms.min(3000)),
             self.readers.clone().write_owned()).await;
@@ -101,7 +112,7 @@ impl FileGate {
             "durationMs":started.elapsed().as_millis()}));
         let readers = result.map_err(|_| Error::conflict("PROCESS_READERS_BUSY"))?;
         self.check()?;
-        Ok(ExclusivePermit {_mutations: mutations, _readers: readers})
+        Ok(ExclusivePermit {_owner: Some(owner), _mutations: mutations, _readers: readers})
     }
 
     /// Admit a native turn while excluding file mutations and supervised commands.
@@ -134,19 +145,21 @@ impl FileGate {
         let mutations = self.inner.clone().write_owned().await;
         let readers = self.readers.clone().write_owned().await;
         ExclusivePermit {
+            _owner: None,
             _mutations: mutations,
             _readers: readers,
         }
     }
 
     fn busy(&self, stage: &'static str) -> Error {
+        let mut fields = self.owners.fields();
+        fields.as_object_mut().unwrap().extend(serde_json::json!({"operation":"file.gate.acquire",
+            "operationId":format!("gate-{}-{}", std::process::id(), chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()),
+            "stage":stage,"result":"failure","code":"EBUSY","durationMs":0}).as_object().unwrap().clone());
         crate::core::events::emit(
             crate::core::events::Level::Warn,
             "file.gate.conflict",
-            serde_json::json!({"operation":"file.gate.acquire",
-                "operationId":format!("gate-{}-{}", std::process::id(), chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()),
-                "stage":stage,"result":"failure",
-                "code":"EBUSY","durationMs":0}),
+            fields,
         );
         Error::busy()
     }
@@ -162,6 +175,25 @@ impl FileGate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn conflict_metadata_tracks_command_and_clears_on_release_and_cancel() {
+        let gate = FileGate::new();
+        let context = serde_json::json!({"requestId":"http-command-1"}).as_object().unwrap().clone();
+        let command = crate::core::trace::scope(context, gate.command("command-1", 1000)).await.unwrap();
+        let fields = gate.owners.fields();
+        assert_eq!(fields["blockerOperationId"], "command-1");
+        assert_eq!(fields["blockerRequestId"], "http-command-1");
+        assert_eq!(fields["blockerKind"], "command");
+        assert!(fields["heldMs"].is_number());
+        drop(command);
+        assert!(gate.owners.fields().get("blockerOperationId").is_none());
+        let _reader = gate.read_only().unwrap();
+        let mut pending = Box::pin(gate.command("cancelled", 1000));
+        tokio::select! {biased; _ = &mut pending => panic!("reader still held"), _ = tokio::task::yield_now() => {}}
+        assert_eq!(gate.owners.fields()["blockerOperationId"], "cancelled");
+        drop(pending);
+        assert!(gate.owners.fields().get("blockerOperationId").is_none());
+    }
     #[tokio::test]
     async fn command_waits_fairly_for_readers_and_keeps_mutation_exclusion() {
         let gate = FileGate::new();

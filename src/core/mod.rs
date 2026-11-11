@@ -8,6 +8,8 @@ pub mod cursor;
 pub mod error;
 pub mod events;
 pub mod gate;
+mod gate_owner;
+pub(crate) mod gate_read;
 pub mod ids;
 pub mod log_file;
 pub mod node_status;

@@ -1,0 +1,75 @@
+//! Bounded retries for explicitly read-only HTTP operations, including authorization.
+use super::error::Error;
+use std::future::Future;
+use tokio::time::{Duration, Instant};
+
+pub async fn retry<T, F: Future<Output = Result<T, Error>>>(deadline: Instant, mut work: impl FnMut() -> F) -> Result<T, Error> {
+    let started = Instant::now();
+    for retry in 0..=3 {
+        let result = if Instant::now() >= deadline { Err(Error::timed_out()) } else {
+            tokio::time::timeout_at(deadline, work()).await.unwrap_or_else(|_| Err(Error::timed_out()))
+        };
+        if !matches!(&result, Err(error) if error.code == "EBUSY") || retry == 3 {
+            if retry > 0 { report(started, retry, &result); }
+            return result;
+        }
+        if tokio::time::timeout_at(deadline, tokio::time::sleep(Duration::from_millis(50 << retry))).await.is_err() {
+            let result = Err(Error::timed_out());
+            report(started, retry, &result);
+            return result;
+        }
+    }
+    unreachable!("bounded read attempts")
+}
+
+fn report<T>(started: Instant, retries: u32, result: &Result<T, Error>) {
+    use super::events::{emit, Level};
+    emit(if result.is_ok() {Level::Info} else {Level::Warn}, "file.gate.read_retry",
+        serde_json::json!({"operation":"file.gate.acquire","stage":"read-retry",
+            "result":if result.is_ok(){"success"}else{"failure"},
+            "code":result.as_ref().err().map(|error|error.code),"retryCount":retries,
+            "durationMs":started.elapsed().as_millis()}));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::gate::FileGate;
+
+    async fn read(gate: &FileGate, deadline: Instant) -> Result<tokio::sync::OwnedRwLockReadGuard<()>, Error> {
+        retry(deadline, || std::future::ready(gate.read_only())).await
+    }
+
+    #[tokio::test]
+    async fn short_command_releases_before_read_and_long_command_stays_exclusive() {
+        let gate = FileGate::new();
+        let command = gate.command("short-command", 1000).await.unwrap();
+        let releaser = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(29)).await;
+            drop(command);
+        });
+        let guard = read(&gate, Instant::now() + Duration::from_secs(1)).await.unwrap();
+        releaser.await.unwrap();
+        assert!(gate.exclusive().is_err());
+        drop(guard);
+        let _command = gate.command("long-command", 1000).await.unwrap();
+        let started = Instant::now();
+        assert_eq!(read(&gate, started + Duration::from_secs(2)).await.unwrap_err().code, "EBUSY");
+        assert!(started.elapsed() >= Duration::from_millis(350));
+        assert!(gate.shared().is_err());
+    }
+
+    #[tokio::test]
+    async fn deadline_cancellation_and_poisoning_never_replay_work_or_leak_guards() {
+        let gate = FileGate::new();
+        let command = gate.command("deadline", 1000).await.unwrap();
+        assert_eq!(read(&gate, Instant::now() + Duration::from_millis(10)).await.unwrap_err().code, "ETIMEDOUT");
+        let mut pending = Box::pin(read(&gate, Instant::now() + Duration::from_secs(1)));
+        tokio::select! {biased; _ = &mut pending => panic!("command still held"), _ = tokio::task::yield_now() => {}}
+        drop(pending);
+        drop(command);
+        assert!(gate.exclusive().is_ok());
+        gate.poison();
+        assert_eq!(read(&gate, Instant::now() + Duration::from_secs(1)).await.unwrap_err().code, "EIO");
+    }
+}

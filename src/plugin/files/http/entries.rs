@@ -26,6 +26,18 @@ pub async fn entries(
     headers: HeaderMap,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Value>, Error> {
+    let deadline = access::deadline(&headers)?;
+    crate::core::gate_read::retry(deadline, || entries_once(
+        AxumState(state.clone()), Path(alias.clone()), headers.clone(), Query(query.clone()),
+    )).await
+}
+
+async fn entries_once(
+    AxumState(state): AxumState<Arc<State>>,
+    Path(alias): Path<String>,
+    headers: HeaderMap,
+    Query(query): Query<ListQuery>,
+) -> Result<Json<Value>, Error> {
     let (identity, export) = access::export(&state, &headers, &alias)?;
     let _project_guard =
         access::authorize_path(&state, &headers, &alias, &query.path, false, false)?;
