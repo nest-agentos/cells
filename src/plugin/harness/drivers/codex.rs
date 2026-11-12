@@ -285,13 +285,10 @@ impl Codex {
         let cwd = translated.as_deref().unwrap_or(cwd);
         let mut params=json!({"threadId":id,"cwd":cwd,"excludeTurns":true,"approvalPolicy":"on-request","sandbox":if self.runtime.is_some(){"danger-full-access"}else{"workspace-write"}});
         if let Some(runtime)=&self.runtime {
-            if let Some(config)=runtime.state()?.services.require::<crate::projects::ProjectService>()?.channels.config(&runtime.project.id,cwd,&runtime.project.owner)? {params["config"]=config;}
+            params["config"]=runtime.state()?.services.require::<crate::projects::ProjectService>()?.channels.session_config(&runtime.project.id,cwd,&runtime.project.owner,id)?;
         }
         let fingerprint=params.get("config").map(Value::to_string);
         let result=bridge.persistent_call("thread/resume",params).await?;
-        if let Some(runtime)=&self.runtime {
-            runtime.state()?.services.require::<crate::projects::ProjectService>()?.channels.bind(&runtime.project.id,cwd,id).map_err(|_|Error::new(axum::http::StatusCode::SERVICE_UNAVAILABLE,"HARNESS_RECEIPT_STORAGE"))?;
-        }
         if let Some(fingerprint)=fingerprint {self.channel_configs.lock().await.insert(id.into(),fingerprint);}
         self.owned.lock().await.insert(id.into());
         self.remember_model(&result).await;
@@ -303,13 +300,12 @@ impl Codex {
         let cwd=runtime.resolve_cwd(string(&thread,"cwd")?)?;
         let state=runtime.state()?;
         let service=state.services.require::<crate::projects::ProjectService>()?;
-        let Some(config)=service.channels.config(&runtime.project.id,&cwd,&runtime.project.owner)? else {return Ok(());};
+        let config=service.channels.session_config(&runtime.project.id,&cwd,&runtime.project.owner,id)?;
         let fingerprint=config.to_string();
         if self.channel_configs.lock().await.get(id)==Some(&fingerprint) {return Ok(());}
         if thread["status"]["type"]=="active" {return Err(Error::busy());}
         self.unload_channel(bridge,id).await?;
         bridge.persistent_call("thread/resume",json!({"threadId":id,"cwd":cwd,"excludeTurns":true,"config":config})).await?;
-        service.channels.bind(&runtime.project.id,&cwd,id)?;
         self.channel_configs.lock().await.insert(id.into(),fingerprint);
         Ok(())
     }

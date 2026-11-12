@@ -28,7 +28,7 @@ impl Bindings {
     }
     pub fn bind(&self, id: &str, config: Option<&Value>) -> Result<(), Error> {
         let mut values = self.values.lock().map_err(|_| Error::internal())?;
-        if let Some(server) = config.and_then(|c| c.get("mcp_servers.cells_session")) {
+        if let Some(server) = config.and_then(|c| c.get("mcp_servers.cells_session")).filter(|server|server["enabled"]!=false) {
             values.insert(
                 id.into(),
                 json!({"url":server["url"],"headers":server["http_headers"]}),
@@ -73,6 +73,8 @@ mod tests {
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+        let mut disabled=config("retired-token");disabled["mcp_servers.cells_session"]["enabled"]=json!(false);
+        bindings.bind("second",Some(&disabled)).unwrap();assert!(read().get("second").is_none());
         bindings.bind("first", None).unwrap();
         assert!(read().get("first").is_none());
         drop(bindings);

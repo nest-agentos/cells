@@ -71,6 +71,25 @@ impl Channels {
         let scoped=rows.first().map(|(token,endpoint_saved)| json!({"features.mcp_2026_07_28":true,"mcp_servers.cells_session":{"url":endpoint.as_ref().unwrap_or(endpoint_saved),"required":true,"default_tools_approval_mode":"approve","enabled_tools":["session_context","session_report","session_receipt","session_request","session_response"],"http_headers":{"Authorization":format!("Bearer {token}")}}}));
         drop(db);self.agent_config(owner,scoped)
     }
+    /// A conversation outlives its task scope; it must never inherit another Session's capability.
+    pub fn session_config(&self, project:&str,cwd:&str,owner:&str,session:&str)->Result<Value,Error> {
+        match self.bind(project,cwd,session) {
+            Ok(())=>{
+                let mut config=self.config(project,cwd,owner)?.unwrap_or(json!({}));
+                if config.get("mcp_servers.cells_session").is_none() {
+                    config["mcp_servers.cells_session"]=disabled_channel();
+                }
+                Ok(config)
+            },
+            Err(error) if error.code=="CHANNEL_SESSION_CHANGED"=>{
+                let config=self.agent_config(owner,Some(json!({"mcp_servers.cells_session":disabled_channel()})))?.unwrap();
+                crate::core::events::emit(crate::core::events::Level::Info,"channel.session.detached",
+                    json!({"operationId":session,"projectId":project,"stage":"session-config","result":"success","code":"CHANNEL_SCOPE_REPLACED","elapsedMs":0}));
+                Ok(config)
+            },
+            Err(error)=>Err(error),
+        }
+    }
     pub fn agent(&self, token: &str, method: &str, args: &Value) -> Result<Value, Error> {
         let mut db = self.0.lock().map_err(storage)?;
         let tx = db.transaction().map_err(storage)?;
@@ -139,7 +158,8 @@ impl Channels {
         let db=self.0.lock().map_err(storage)?;
         let existing:Option<Option<String>>=db.query_row("SELECT json_extract(execution,'$.sessionId') FROM scopes WHERE project=?1 AND cwd=?2 AND closed=0",params![project,cwd],|r|r.get(0)).optional().map_err(storage)?;
         if existing.flatten().is_some_and(|id|id!=session) {return Err(Error::conflict("CHANNEL_SESSION_CHANGED"));}
-        db.execute("UPDATE scopes SET execution=?3 WHERE project=?1 AND cwd=?2 AND closed=0 AND json_extract(execution,'$.sessionId') IS NULL",params![project,cwd,value.to_string()]).map_err(storage)?; self.touch(); Ok(())
+        let changed=db.execute("UPDATE scopes SET execution=?3 WHERE project=?1 AND cwd=?2 AND closed=0 AND json_extract(execution,'$.sessionId') IS NULL",params![project,cwd,value.to_string()]).map_err(storage)?;
+        if changed>0 {self.touch();} Ok(())
     }
     pub fn project_context(&self,project:&str,cwd:Option<&str>,session:Option<&str>)->Result<Option<Value>,Error> {
         let raw:Option<String>=self.0.lock().map_err(storage)?.query_row(
@@ -196,6 +216,7 @@ impl Channels {
         self.touch(); Ok(json!({"closed":true}))
     }
 }
+fn disabled_channel()->Value {json!({"url":"http://127.0.0.1","enabled":false,"required":false,"enabled_tools":[]})}
 fn replace_scope(db:&rusqlite::Transaction,project:&str,cwd:&str,args:&Value)->Result<Value,Error> {
     let active:Option<(String,String)>=db.query_row("SELECT id,execution FROM scopes WHERE project=?1 AND cwd=?2 AND closed=0",params![project,cwd],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(storage)?;
     let Some((id,raw))=active else {
@@ -371,6 +392,23 @@ mod tests {
         let mut resumed=args();resumed["scopeId"]=json!("review");resumed["previousScopeId"]=json!("hook");resumed["previousSessionId"]=json!("hook-native");resumed["sessionId"]=json!("original");
         store.create("p",&resumed).unwrap();assert_eq!(store.list("p","review").unwrap()["execution"]["sessionId"],"original");
         assert_eq!(store.create("p",&args()).unwrap_err().code,"CHANNEL_SCOPE_CLOSED");
+    }
+    #[test]
+    fn old_conversation_detaches_without_inheriting_or_rebinding_a_successor_scope() {
+        let root=tempfile::tempdir().unwrap();let store=Channels::open(root.path()).unwrap();store.create("p",&args()).unwrap();
+        store.bind("p","/projects/p/work","original").unwrap();let old=token(&store);
+        store.observe("p",&json!({"method":"turn/completed","params":{"threadId":"original","turn":{"id":"t","status":"completed"}}})).unwrap();
+        let mut next=args();next["scopeId"]=json!("hook");next["previousScopeId"]=json!("attempt-1");next["previousSessionId"]=json!("original");
+        store.create("p",&next).unwrap();store.bind("p","/projects/p/work","hook-native").unwrap();
+        let before=store.current("p","/projects/p/work").unwrap();
+        store.server_save("owner",&json!({"id":"custom","name":"Custom","url":"https://example.test/mcp","revision":0,"enabled":true,"tools":["read"]})).unwrap();
+        let config=store.session_config("p","/projects/p/work","owner","original").unwrap();
+        assert_eq!(config["mcp_servers.cells_session"],disabled_channel());
+        assert!(config.get("mcp_servers.custom").is_some());assert!(!config.to_string().contains("Bearer"));
+        assert_eq!(store.current("p","/projects/p/work").unwrap(),before);assert!(!store.token_valid(&old));
+        assert!(store.session_config("p","/projects/p/work","owner","hook-native").unwrap()["mcp_servers.cells_session"]["http_headers"].is_object());
+        store.close("p","hook").unwrap();
+        assert_eq!(store.session_config("p","/projects/p/work","owner","original").unwrap()["mcp_servers.cells_session"],disabled_channel());
     }
     #[test]
     fn context_requests_and_host_acknowledgments_are_durable_and_immutable() {

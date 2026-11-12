@@ -24,21 +24,18 @@ pub fn configuration(
         .services
         .require::<crate::projects::ProjectService>()?;
     let cwd = runtime.resolve_cwd(cwd)?;
-    let config = service
+    let config = Some(service
         .channels
-        .config(&runtime.project.id, &cwd, &runtime.project.owner)?
+        .session_config(&runtime.project.id, &cwd, &runtime.project.owner, session)?)
         .filter(|config| config.get("mcp_servers.cells_session").is_some());
-    if config.is_some() {
-        service.channels.bind(&runtime.project.id, &cwd, session)?;
-    }
     Ok(config)
 }
 pub fn http_servers(config: Option<&Value>) -> Value {
     match config.and_then(|value| value.get("mcp_servers.cells_session")) {
-        Some(value) => {
+        Some(value) if value["enabled"]!=false => {
             json!({"cells_session":{"type":"http","url":value["url"],"headers":value.get("http_headers").cloned().unwrap_or(json!({}))}})
         }
-        None => json!({}),
+        _ => json!({}),
     }
 }
 
@@ -56,5 +53,6 @@ mod tests {
         assert!(servers.get("extra").is_none());
         assert_eq!(servers.as_object().unwrap().len(), 1);
         assert_eq!(http_servers(None), json!({}));
+        assert_eq!(http_servers(Some(&json!({"mcp_servers.cells_session":{"enabled":false,"url":"http://localhost/retired"}}))),json!({}));
     }
 }

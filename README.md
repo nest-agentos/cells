@@ -628,3 +628,8 @@ Queue state, operation identities and recovery receipts live in the private proj
 The node persists claims before native dispatch, owns background subscriptions, waits for exact turn/command completion, and continues without NestOS or browser processes. Restart reconciliation checks the persisted native execution identity, live runtime and writer lock; unknown execution is never classified as completed or automatically resent. Recovery and its success receipt commit atomically. Rust transition rules are separated from storage and runtime adapters; clients consume the fixed protocol instead of maintaining another recovery authority.
 
 执行链追踪：HTTP trace 通过 `core::trace::spawn` 显式传入 Harness 后台执行；原生 RPC 回执保留提交时上下文，不能继承长活 reader 的启动请求。队列项由服务端保存经过校验的 traceContext，显式重试绑定新请求，恢复保留原 trace 并建立新的 child span；客户端不能伪造此字段。原生终态由实际活动许可关联到原 operationId/traceId。跨重启仍以稳定 operationId、attemptId、requestId 和正式回执核对，不靠 trace 决定权限或重复执行。历史无追踪上下文的队列在首次领取时建立并保存新追踪，不能补造原始浏览器链。
+
+
+### Superseded task channels
+
+A native conversation can outlive the task scope bound to its directory. Resuming or refreshing that conversation disables its revoked `cells_session` MCP capability rather than inheriting the active scope of another Session. The successor's binding, token and execution record remain unchanged. Codex explicitly disables the persisted server; Claude and DSH remove its routing. Ordinary owner-authorized agent servers remain available. This does not reactivate a closed scope or replay a previously rejected instruction.
