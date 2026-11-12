@@ -905,3 +905,43 @@ async fn project_stat_retries_a_real_short_command_with_one_http_request() {
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
     eprintln!("stat contention: elapsedMs={}, logicalApiCalls=1, httpRequests=1", started.elapsed().as_millis());
 }
+
+#[tokio::test]
+async fn registration_uses_catalog_and_metadata_transactions_while_native_turns_are_running() {
+    let root = tempfile::tempdir().unwrap();
+    let state = State::from_config(&deployment(root.path())).unwrap();
+    let original = register(&state, "group/existing", false).await;
+    let project = state.services.require::<cells::projects::ProjectService>().unwrap().get(0, original["id"].as_str().unwrap()).unwrap();
+    let runtime = ProjectRuntime::new(&state, 0, project).unwrap();
+    runtime.begin("active-session", "native-operation").await.unwrap();
+    runtime.bind_turn("active-session", "native-operation", "active-turn");
+    assert!(state.files.shared().is_err());
+    assert_eq!(register(&state, "group/existing", false).await, original);
+    let new = register(&state, "group/independent", true).await;
+    assert_ne!(new["id"], original["id"]);
+    assert!(root.path().join("exports/group/independent/.nestos").is_dir());
+    assert_eq!(remount(&state, &original, "ro").await.unwrap_err().code, "EBUSY");
+    runtime.event(&json!({"method":"turn/completed","params":{"threadId":"active-session","turn":{"id":"active-turn"}}}));
+    assert!(state.files.shared().is_ok());
+    assert_eq!(register(&state, "group/independent", false).await, new);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_registration_preserves_one_identity_and_failures_do_not_leak_catalog_admission() {
+    let root = tempfile::tempdir().unwrap();
+    let state = State::from_config(&deployment(root.path())).unwrap();
+    let _native = state.files.activity().unwrap();
+    let workers: Vec<_> = (0..8).map(|_| {
+        let state = state.clone();
+        tokio::spawn(async move {register(&state, "group/existing", false).await})
+    }).collect();
+    let mut projects = Vec::new();
+    for worker in workers {projects.push(worker.await.unwrap());}
+    assert!(projects.iter().all(|project|project == &projects[0]));
+    let failed = call(&state, 0, "project_register", json!({"name":"Missing","alias":"home","path":"missing/child","access":"rw","createDirectory":true})).await;
+    assert!(failed.is_err());
+    assert_eq!(register(&state, "group/existing", false).await, projects[0]);
+    state.files.poison();
+    assert_eq!(call(&state, 0, "project_register", json!({"name":"Refused","alias":"home","path":"group/refused","access":"rw","createDirectory":true})).await.unwrap_err().code,"EIO");
+    assert!(!root.path().join("exports/group/refused").exists());
+}

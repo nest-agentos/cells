@@ -99,7 +99,7 @@ pub async fn call(
             json!({"project":super::descriptor::project(state,identity,&service.get(identity,text(&args,"projectId")?)?)?}),
         ),
         "project_register" => {
-            let _gate = state.files.exclusive()?;
+            // Catalog and metadata scope transactions own registration, not native execution.
             let input = serde_json::from_value(args).map_err(|_| Error::invalid())?;
             Ok(
                 json!({"project":super::descriptor::project(state,identity,&service.register(state,identity,input)?)?}),

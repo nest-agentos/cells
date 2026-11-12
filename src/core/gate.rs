@@ -176,7 +176,7 @@ impl FileGate {
         Error::busy()
     }
 
-    pub(super) fn check(&self) -> Result<(), Error> {
+    pub fn check(&self) -> Result<(), Error> {
         if self.is_poisoned() {
             return Err(Error::unavailable());
         }

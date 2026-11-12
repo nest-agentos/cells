@@ -10,6 +10,7 @@ use crate::{
     process::{self, Mount},
 };
 use std::sync::{Arc, Mutex};
+use super::registration::RegistrationAudit;
 use serde_json::Value;
 
 pub struct ProjectService {
@@ -120,7 +121,15 @@ impl ProjectService {
         if state.auth.client(identity).anonymous() {
             return Err(Error::forbidden("EACCES"));
         }
+        let started = std::time::Instant::now();
+        let mut audit = RegistrationAudit::new();
         let _serial = self.admission.lock().map_err(|_| Error::internal())?;
+        audit.acquired(started.elapsed().as_millis());
+        let result = state.files.check().and_then(|_| self.register_inner(state, identity, &mut input, &mut audit));
+        audit.complete(&result);
+        result
+    }
+    fn register_inner(&self, state: &State, identity: usize, input: &mut Register, audit: &mut RegistrationAudit) -> Result<Project, Error> {
         input.path = normalize(&input.path)?;
         if let Some(project) = self
             .list(identity)?
@@ -128,50 +137,53 @@ impl ProjectService {
             .find(|p| p.alias == input.alias && p.path == input.path)
         {
             authorize(state, identity, &project)?;
+            audit.stage("metadata-scope", Some(&project.id));
             maintain_metadata(state, identity, &project)?;
             return Ok(project);
         }
+        let mut project = self.new_registration(state, identity, input)?;
+        self.ensure_registration_directory(state, identity, &project, input.create_directory, audit)?;
+        audit.stage("directory-pin", Some(&project.id));
+        capture(state, &mut project)?;
+        validate(state, identity, &project, true)?;
+        audit.stage("metadata-scope", Some(&project.id));
+        maintain_metadata(state, identity, &project)?;
+        audit.stage("catalog-persist", Some(&project.id));
+        self.store.save(project, None)
+    }
+    fn new_registration(&self, state: &State, identity: usize, input: &Register) -> Result<Project, Error> {
         let existing = self.store.used_ids()?;
         let id = super::identity::allocate(&input.name, existing.iter().map(String::as_str), input.id.as_deref())?;
-        let mut project = Project {
+        Ok(Project {
             id,
-            name: input.name,
-            alias: input.alias,
-            path: input.path,
-            access: input.access,
+            name: input.name.clone(),
+            alias: input.alias.clone(),
+            path: input.path.clone(),
+            access: input.access.clone(),
             revision: 1,
-            mounts: input.mounts,
+            mounts: input.mounts.clone(),
             owner: state.auth.client(identity).id().into(),
             root_identity: String::new(),
             mount_identities: vec![],
             execution: Default::default(),
-        };
-        validate(state, identity, &project, false)?;
-        let export = state
-            .exports
-            .get(&project.alias)
-            .ok_or_else(Error::invalid)?;
+        })
+    }
+    fn ensure_registration_directory(&self, state: &State, identity: usize, project: &Project, create: bool, audit: &mut RegistrationAudit) -> Result<(), Error> {
+        audit.stage("directory-validation", Some(&project.id));
+        validate(state, identity, project, false)?;
+        let export = state.exports.get(&project.alias).ok_or_else(Error::invalid)?;
         match export.open_dir(&project.path) {
-            Ok(_) => (),
-            Err(error) if error.is_not_found() && input.create_directory => {
-                if project.path.is_empty() || !state.auth.client(identity).may_write(&project.alias)
-                {
+            Ok(_) => Ok(()),
+            Err(error) if error.is_not_found() && create => {
+                if project.path.is_empty() || !state.auth.client(identity).may_write(&project.alias) {
                     return Err(Error::forbidden("EROFS"));
                 }
                 // Create one child below an existing parent, never recursively create host paths.
-                export.apply(
-                    &Change::Mkdir {
-                        path: project.path.clone(),
-                    },
-                    || Ok(()),
-                )?;
+                audit.stage("directory-create", Some(&project.id));
+                export.apply(&Change::Mkdir {path: project.path.clone()}, || Ok(()))
             }
-            Err(error) => return Err(error),
+            Err(error) => Err(error),
         }
-        capture(state, &mut project)?;
-        validate(state, identity, &project, true)?;
-        maintain_metadata(state, identity, &project)?;
-        self.store.save(project, None)
     }
     pub fn set_environment(&self, state: &State, identity: usize, id: &str, revision: u64,
         environment: super::execution::ProjectEnvironment) -> Result<Project, Error> {

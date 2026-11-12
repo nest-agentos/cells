@@ -1,5 +1,6 @@
 //! Project catalog and authorization shared by files, processes and harnesses.
 mod activity;
+mod registration;
 pub mod channel;
 mod channel_subscription;
 mod api;
