@@ -565,7 +565,7 @@ Firecracker 服务的启动脚本负责创建 Codex、Claude、DSH 的原生配�
 
 Cells 0.4.7 起，Claude 适配器传递 `ANTHROPIC_*` 与 `CLAUDE_CODE_*`，DSH 适配器传递 `DEEPSEEK_*` 与 `DSH_*`，包括模型和运行选项；这些选项是否受支持仍由原生 CLI 决定。受管 home、协议事件开关等内部必要设置仍由 Cells 固定，不复制其他宿主变量。环境变量值必须是 TOML 字符串，数值也需加引号。
 
-模型凭据写入私有服务源 manifest 现有的 `[environment]` 表（例如 `/etc/nestos-firecracker/service-sources/cells-x1/service.toml`），不要提交到仓库。DSH 读取 `DEEPSEEK_API_KEY` 和可选的 `DEEPSEEK_BASE_URL`；Claude Code 读取 `ANTHROPIC_API_KEY` 或 `ANTHROPIC_AUTH_TOKEN`，以及可选的 `ANTHROPIC_BASE_URL`。不要为同一凭据同时设置两个冲突的认证变量。原生配置文件分别由各 harness 的 `home` 指定。Cells 配置的 `[[harnesses]]` 没有任意 `env` 字段；受管 DSH Web 的传输令牌由 Cells 自动生成，与模型 API key 独立。
+模型凭据写入私有服务源 manifest 现有的 `[environment]` 表（例如 `/etc/nestos/firecracker/service-sources/cells-x1/service.toml`），不要提交到仓库。DSH 读取 `DEEPSEEK_API_KEY` 和可选的 `DEEPSEEK_BASE_URL`；Claude Code 读取 `ANTHROPIC_API_KEY` 或 `ANTHROPIC_AUTH_TOKEN`，以及可选的 `ANTHROPIC_BASE_URL`。不要为同一凭据同时设置两个冲突的认证变量。原生配置文件分别由各 harness 的 `home` 指定。Cells 配置的 `[[harnesses]]` 没有任意 `env` 字段；受管 DSH Web 的传输令牌由 Cells 自动生成，与模型 API key 独立。
 
 更新服务源 manifest 后，停止服务、重新 install 同一服务源并启动服务，使新环境进入 guest；只重启 VM 不会重新导入 manifest。仅替换共享的 Cells 可执行文件时，重启 guest 加载新程序即可，无需重新安装服务源。
 
