@@ -16,7 +16,7 @@ use cells::{
 use std::{collections::BTreeMap, sync::Arc};
 
 pub const SECRET: &str = "test-secret-at-least-24-bytes";
-pub const ORIGIN: &str = "https://mindos.example";
+pub const ORIGIN: &str = "https://nestos.example";
 
 /// A router over a single read-only `docs` export.
 pub fn app(root: &std::path::Path) -> axum::Router {
