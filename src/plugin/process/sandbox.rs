@@ -25,8 +25,8 @@ pub struct Prepared {
 
 /// Build the launcher invocation for an authorized plan.
 ///
-/// `lock` is retained by bubblewrap's monitor through `--sync-fd`, which keeps
-/// the exclusive export lock alive across a daemon crash.
+/// The directory descriptor is retained by the monitor as a capability only.
+/// No advisory lock is associated with it.
 pub fn assemble(plan: &Plan, lock: File) -> Result<Prepared, Error> {
     let mut prepared = mount_plan(plan, lock)?;
     prepared
@@ -40,8 +40,13 @@ pub fn mount_plan(plan: &Plan, lock: File) -> Result<Prepared, Error> {
     let mut command = base();
     for mount in &plan.mounts {
         let directory = mount.export.open_dir(&mount.path)?;
-        if mount.identity.as_ref().map(|expected|crate::projects::service::identity_matches(&directory,expected))
-            .transpose()?.is_some_and(|matches|!matches) {
+        if mount
+            .identity
+            .as_ref()
+            .map(|expected| crate::projects::service::identity_matches(&directory, expected))
+            .transpose()?
+            .is_some_and(|matches| !matches)
+        {
             return Err(Error::conflict("PROJECT_DIRECTORY_CHANGED"));
         }
         command

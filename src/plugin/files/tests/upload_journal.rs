@@ -10,7 +10,7 @@ use std::{
 
 const STATE: &str = ".itookit-upload-state/uploads.sqlite";
 
-// Fork/exec briefly inherits other threads' open flock descriptors before CLOEXEC runs.
+// Crash workers share a bounded test environment.
 fn serial() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     LOCK.lock().unwrap_or_else(|error| error.into_inner())
@@ -62,7 +62,7 @@ fn upload_crash_worker() {
         return;
     };
     let root = Path::new(&root);
-    let export = Export::exclusive(root).unwrap();
+    let export = Export::open_writable(root).unwrap();
     let upload = export.stage("nested/result").unwrap();
     let mut writer = upload.writer().unwrap();
     writer.write_all(b"complete body").unwrap();
@@ -84,7 +84,7 @@ fn a_crashed_upload_is_removed_from_its_recorded_directory() {
     let root = tempfile::tempdir().unwrap();
     crash(root.path(), false);
     let name = staged_name(root.path());
-    let _export = Export::exclusive(root.path()).unwrap();
+    let _export = Export::open_writable(root.path()).unwrap();
     assert!(!name.exists());
     assert_eq!(count(root.path()), 0);
 }
@@ -94,7 +94,7 @@ fn recovery_after_publish_only_retires_the_record_and_preserves_final_bytes() {
     let _guard = serial();
     let root = tempfile::tempdir().unwrap();
     crash(root.path(), true);
-    let _export = Export::exclusive(root.path()).unwrap();
+    let _export = Export::open_writable(root.path()).unwrap();
     assert_eq!(
         fs::read(root.path().join("nested/result")).unwrap(),
         b"complete body"
@@ -106,7 +106,7 @@ fn recovery_after_publish_only_retires_the_record_and_preserves_final_bytes() {
 fn cancellation_and_commit_retire_their_records_and_keep_the_store_private() {
     let _guard = serial();
     let root = tempfile::tempdir().unwrap();
-    let export = Export::exclusive(root.path()).unwrap();
+    let export = Export::open_writable(root.path()).unwrap();
     let staged = export.stage("cancelled").unwrap();
     assert_eq!(count(root.path()), 1);
     drop(staged);
@@ -141,7 +141,7 @@ fn recovery_keeps_a_replacement_file_and_its_unresolved_record() {
     let name = staged_name(root.path());
     fs::write(root.path().join("replacement"), b"unrelated").unwrap();
     fs::rename(root.path().join("replacement"), &name).unwrap();
-    let _export = Export::exclusive(root.path()).unwrap();
+    let _export = Export::open_writable(root.path()).unwrap();
     assert_eq!(fs::read(name).unwrap(), b"unrelated");
     assert_eq!(count(root.path()), 1);
 }
@@ -156,7 +156,7 @@ fn an_unverified_create_intent_cannot_delete_an_existing_file() {
         .unwrap()
         .execute("UPDATE uploads SET device=NULL,inode=NULL", [])
         .unwrap();
-    let _export = Export::exclusive(root.path()).unwrap();
+    let _export = Export::open_writable(root.path()).unwrap();
     assert!(name.exists());
     assert_eq!(count(root.path()), 1);
 }
@@ -178,7 +178,7 @@ fn replacing_a_parent_or_a_staged_file_with_a_symlink_cannot_escape_the_export()
             std::os::unix::fs::symlink(outside.path().join(name.file_name().unwrap()), &name)
                 .unwrap();
         }
-        let _export = Export::exclusive(root.path()).unwrap();
+        let _export = Export::open_writable(root.path()).unwrap();
         assert_eq!(
             fs::read(outside.path().join(name.file_name().unwrap())).unwrap(),
             b"outside"
@@ -191,7 +191,7 @@ fn replacing_a_parent_or_a_staged_file_with_a_symlink_cannot_escape_the_export()
 fn recovery_batches_records_and_does_not_follow_injected_paths() {
     let _guard = serial();
     let root = tempfile::tempdir().unwrap();
-    drop(Export::exclusive(root.path()).unwrap());
+    drop(Export::open_writable(root.path()).unwrap());
     let metadata = fs::metadata(root.path()).unwrap();
     let mut db = rusqlite::Connection::open(root.path().join(STATE)).unwrap();
     let transaction = db.transaction().unwrap();
@@ -210,22 +210,27 @@ fn recovery_batches_records_and_does_not_follow_injected_paths() {
     }
     transaction.commit().unwrap();
     drop(db);
-    let _export = Export::exclusive(root.path()).unwrap();
+    let _export = Export::open_writable(root.path()).unwrap();
     assert_eq!(count(root.path()), 1);
 }
 
 #[test]
-fn readonly_open_does_not_create_a_journal_and_active_uploads_retain_the_writer_lock() {
+fn readonly_open_is_lazy_and_recovery_skips_each_active_upload_lease() {
     let _guard = serial();
     let root = tempfile::tempdir().unwrap();
     drop(Export::open(root.path()).unwrap());
     assert!(!root.path().join(".itookit-upload-state").exists());
-    let export = Export::exclusive(root.path()).unwrap();
+    let export = Export::open_writable(root.path()).unwrap();
     let upload = export.stage("file").unwrap();
     drop(export);
-    assert!(Export::exclusive(root.path()).is_err());
+    let second = Export::open_writable(root.path()).unwrap();
+    assert_eq!(count(root.path()), 1);
+    assert_eq!(
+        second.list("", &Default::default()).unwrap().entries.len(),
+        0
+    );
     drop(upload);
-    assert!(Export::exclusive(root.path()).is_ok());
+    assert!(Export::open_writable(root.path()).is_ok());
 }
 
 #[test]
@@ -238,13 +243,13 @@ fn a_symlinked_or_corrupt_journal_fails_without_touching_outside_data() {
     fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
     fs::write(outside.path().join("data"), b"outside").unwrap();
     std::os::unix::fs::symlink(outside.path().join("data"), root.path().join(STATE)).unwrap();
-    assert!(Export::exclusive(root.path()).is_err());
+    assert!(Export::open_writable(root.path()).is_err());
     assert_eq!(fs::read(outside.path().join("data")).unwrap(), b"outside");
     fs::remove_file(root.path().join(STATE)).unwrap();
-    drop(Export::exclusive(root.path()).unwrap());
+    drop(Export::open_writable(root.path()).unwrap());
     fs::write(root.path().join(STATE), b"corrupted").unwrap();
     assert_eq!(
-        Export::exclusive(root.path()).err().unwrap().code,
+        Export::open_writable(root.path()).err().unwrap().code,
         "UPLOAD_JOURNAL_IO"
     );
 }

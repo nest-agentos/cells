@@ -4,6 +4,7 @@
 //! epochs, duplicate request ids, capacity and per-request execution identity are
 //! decided here.
 
+use crate::projects::runtime::ProjectLauncher;
 use crate::{
     app::State,
     core::{error::Error, ids},
@@ -12,7 +13,6 @@ use crate::{
         policy, runner, sandbox,
     },
 };
-use crate::projects::runtime::ProjectLauncher;
 use std::sync::Arc;
 
 /// Start a command, or return the record of an identical earlier request.
@@ -28,20 +28,40 @@ pub fn start(state: &Arc<State>, identity: usize, request: Request) -> Result<St
 }
 
 /// Admit an independent command; duplicate request identities never replay.
-pub async fn start_command(state: &Arc<State>, identity: usize, request: Request) -> Result<Status, Error> {
+pub async fn start_command(
+    state: &Arc<State>,
+    identity: usize,
+    request: Request,
+) -> Result<Status, Error> {
     let id = request.request_id.clone();
-    let kind=command_kind(&request.command);let read_only=request.read_only;let argument_count=request.args.len();
+    let kind = command_kind(&request.command);
+    let read_only = request.read_only;
+    let argument_count = request.args.len();
     let result = async {
         authorize_request(state, identity, &request)?;
-        if let Some(process) = state.services.require::<crate::process::Execution>()?.registry().get(identity, &id)? {
+        if let Some(process) = state
+            .services
+            .require::<crate::process::Execution>()?
+            .registry()
+            .get(identity, &id)?
+        {
             return Ok(process.status());
         }
-        let permit = state.files.command(&id, request.timeout_ms).await?;
+        let permit = admission(state,identity,&request)?;
         start_authorized(state, identity, request, Some(permit))
-    }.await;
+    }
+    .await;
     result.inspect_err(|error: &Error| crate::core::events::emit(crate::core::events::Level::Warn,
         "process.rejected", serde_json::json!({"operation":"process.start","operationId":id,"requestId":id,"identity":identity,"code":error.code,
             "stage":"admission","result":"failure","executionStarted":false,"commandKind":kind,"argumentCount":argument_count,"requestedReadOnly":read_only,"gateMode":"shared"})))
+}
+
+fn admission(state:&State,identity:usize,request:&Request)->Result<crate::core::gate::ExecutionPermit,Error>{
+    let permit=state.files.command_now(&request.request_id)?;
+    let Some(id)=&request.project_id else{return Ok(permit);};
+    let projects=state.services.require::<crate::projects::ProjectService>()?;
+    projects.get(identity,id)?;
+    Ok(permit.with_resource(projects.lifecycle(id).command_now(&request.request_id)?))
 }
 
 fn authorize_request(state: &Arc<State>, identity: usize, request: &Request) -> Result<(), Error> {
@@ -71,11 +91,11 @@ fn start_authorized(
             .registry()
             .get_or_create(identity, &request.request_id, || {
                 // Track command lifetime without blocking unrelated file or native work.
-                let gate = match permit {Some(permit) => permit, None => state.files.command_now(&request.request_id)?};
+                let gate = match permit {Some(permit) => permit, None => admission(state,identity,&request)?};
                 let plan = policy::plan(state, identity, &request)?;
                 let lock = match plan.writer() {
                     Some(export) => export.try_clone_root()?,
-                    None => state.services.require::<crate::process::Execution>()?.lock_handle()?,
+                    None => state.services.require::<crate::process::Execution>()?.root_handle()?,
                 };
                 let prepared = if request.project_id.is_some() {
                     {
@@ -159,8 +179,14 @@ fn authorize(state: &State, epoch: &str, id: &str) -> Result<(), Error> {
     Ok(())
 }
 
-fn command_kind(command:&str)->&'static str {
-    match std::path::Path::new(command).file_name().and_then(|s|s.to_str()) {
-        Some("git")=>"git",Some("sh"|"bash"|"dash")=>"shell",Some("node"|"nodejs")=>"node",_=>"other"
+fn command_kind(command: &str) -> &'static str {
+    match std::path::Path::new(command)
+        .file_name()
+        .and_then(|s| s.to_str())
+    {
+        Some("git") => "git",
+        Some("sh" | "bash" | "dash") => "shell",
+        Some("node" | "nodejs") => "node",
+        _ => "other",
     }
 }

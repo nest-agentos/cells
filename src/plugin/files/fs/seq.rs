@@ -70,9 +70,13 @@ pub fn snapshot(export: &Export, path: &str) -> Result<Snapshot, Error> {
     Ok(page.snapshot)
 }
 pub fn query(export: &Export, path: &str, input: Selection) -> Result<Page, Error> {
+    export
+        .path_locks
+        .with(&[(path, false)], || query_inner(export, path, input))
+}
+fn query_inner(export: &Export, path: &str, input: Selection) -> Result<Page, Error> {
     validate(path)?;
     validate_selection(&input)?;
-    let mut revisions = export.lock_revisions();
     let opened = database::open(export, path, false)?;
     let Some((db, file, _parent)) = opened else {
         if input.expected_revision.is_some() {
@@ -86,12 +90,16 @@ pub fn query(export: &Export, path: &str, input: Selection) -> Result<Page, Erro
             next: None,
         });
     };
-    let revision = revisions.as_mut().map(|r| r.get(&file)).transpose()?;
+    db.execute_batch("BEGIN DEFERRED;").map_err(sql)?;
+    let entries = select(&db, &input)?;
+    let revision = export
+        .lock_revisions()
+        .as_mut()
+        .map(|r| r.get(&file))
+        .transpose()?;
     if input.expected_revision.is_some() && input.expected_revision != revision {
         return Err(Error::precondition_failed());
     }
-    db.execute_batch("BEGIN DEFERRED;").map_err(sql)?;
-    let entries = select(&db, &input)?;
     let limit = input.limit.unwrap_or(100);
     let next = if input.keys.is_none() && entries.len() > limit {
         entries.get(limit - 1).map(|e| e.key.clone())
@@ -221,32 +229,45 @@ pub fn update(
         return Err(Error::invalid());
     }
     checkpoint()?;
-    // Existing files commit in place under the same revision lock as uploads/renames.
-    let mut revisions = export
-        .lock_revisions()
-        .ok_or_else(|| Error::forbidden("EROFS"))?;
-    if let Some((mut db, file, _parent)) = database::open(export, &input.path, true)? {
-        let revision = revisions.get(&file)?;
-        if Some(&revision) != input.expected_revision.as_ref() {
+    let existing = export.path_locks.with(&[(&input.path, true)], || {
+        // Coordinate an inode replacement with this database's in-place transaction.
+        let _inode_lease = match export.lock_existing_file(&input.path) {
+            Ok(lease) => lease,
+            Err(error) if error.is_not_found() => None,
+            Err(error) => return Err(error),
+        };
+        if let Some((mut db, file, _parent)) = database::open(export, &input.path, true)? {
+            let tx = db
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(sql)?;
+            {
+                let mut revisions = export.lock_revisions().unwrap();
+                let revision = revisions.get(&file)?;
+                if Some(&revision) != input.expected_revision.as_ref() {
+                    return Err(Error::precondition_failed());
+                }
+                revisions.retire(&file)?;
+            }
+            apply_changes(&tx, &input.changes, &checkpoint)?;
+            commit(tx)?;
+            let revision = export.lock_revisions().unwrap().get(&file)?;
+            return Ok(Some(serde_json::json!({"revision":revision})));
+        }
+        if input.expected_revision.is_some() {
             return Err(Error::precondition_failed());
         }
-        // Invalidate before commit, including uncertain I/O failures. Never reuse an old validator.
-        revisions.retire(&file)?;
-        let revision = revisions.get(&file)?;
-        apply(&mut db, input.changes, &checkpoint)?;
-        return Ok(serde_json::json!({"revision": revision}));
+        Ok(None)
+    })?;
+    if let Some(result) = existing {
+        return Ok(result);
     }
-    if input.expected_revision.is_some() {
-        return Err(Error::precondition_failed());
-    }
-    drop(revisions);
     // Only first creation publishes a small standalone SQLite image atomically.
     let mut db = Connection::open_in_memory().map_err(sql)?;
     db.execute_batch(
         "CREATE TABLE entries(key TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL) WITHOUT ROWID;",
     )
     .map_err(sql)?;
-    apply(&mut db, input.changes, &checkpoint)?;
+    apply(&mut db, &input.changes, &checkpoint)?;
     publish(export, &input.path, &db, None, checkpoint)
 }
 fn publish(
@@ -267,10 +288,18 @@ fn publish(
 }
 fn apply(
     db: &mut Connection,
-    changes: Vec<Change>,
+    changes: &[Change],
     checkpoint: &impl Fn() -> Result<(), Error>,
 ) -> Result<(), Error> {
     let tx = db.transaction().map_err(sql)?;
+    apply_changes(&tx, changes, checkpoint)?;
+    commit(tx)
+}
+fn apply_changes(
+    tx: &rusqlite::Transaction,
+    changes: &[Change],
+    checkpoint: &impl Fn() -> Result<(), Error>,
+) -> Result<(), Error> {
     for change in changes {
         checkpoint()?;
         match change {
@@ -285,7 +314,9 @@ fn apply(
             }
         }
     }
-    checkpoint()?;
+    checkpoint()
+}
+fn commit(tx: rusqlite::Transaction) -> Result<(), Error> {
     tx.commit().map_err(|failure| {
         let mut error = sql(failure);
         error.outcome = Some("unknown");

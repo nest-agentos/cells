@@ -94,6 +94,7 @@ pub async fn replace(
         deadline,
         operation: task.clone(),
         gate,
+        project_guards:_project_guard,
     };
     // The operation owns the work and its cleanup after the waiter disconnects.
     tokio::spawn(async move {
@@ -114,6 +115,7 @@ struct Replacement {
     deadline: Instant,
     operation: Arc<Operation>,
     gate: OwnedRwLockReadGuard<()>,
+    project_guards: Vec<OwnedRwLockReadGuard<()>>,
 }
 
 impl Replacement {
@@ -126,13 +128,13 @@ impl Replacement {
             condition,
             deadline,
             operation,
-            gate,
+            gate,project_guards,
         } = self;
         let permit = state.workers.acquire(deadline).await?;
         operation.checkpoint(deadline)?;
         let staging = export.clone();
         let staged_path = path.clone();
-        let staged = tokio::task::spawn_blocking(move || staging.stage(&staged_path))
+        let (staged,gate,project_guards) = tokio::task::spawn_blocking(move || staging.stage(&staged_path).map(|staged|(staged,gate,project_guards)))
             .await
             .map_err(|_| Error::internal())??;
 
@@ -164,6 +166,7 @@ impl Replacement {
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let _gate = gate;
+            let _project_guards=project_guards;
             upload::commit(&export, &path, staged, expected.as_deref(), || {
                 operation.checkpoint(deadline)
             })
@@ -198,11 +201,8 @@ pub async fn mutate(
         return Err(Error::unsupported());
     }
     let audit_paths = json!({"action": command.action, "path": command.path, "to": command.to});
-    let _project_guard =
-        access::authorize_path(&state, &headers, &alias, &command.path, true, false)?;
-    if let Some(to) = &command.to {
-        let _project_guard = access::authorize_path(&state, &headers, &alias, to, true, false)?;
-    }
+    let mut project_guards=access::authorize_path(&state,&headers,&alias,&command.path,true,false)?;
+    if let Some(to)=&command.to {project_guards.extend(access::authorize_path(&state,&headers,&alias,to,true,false)?);}
     let change = if command.action == "metadata" {
         path::validate(&command.path)?;
         let patch = command.metadata.ok_or_else(Error::invalid)?;
@@ -246,6 +246,7 @@ pub async fn mutate(
                 match tokio::task::spawn_blocking(move || {
                     let _permit = permit;
                     let _gate = gate;
+                    let _project_guards=project_guards;
                     export.apply(&change, || tracked.checkpoint(deadline))
                 })
                 .await

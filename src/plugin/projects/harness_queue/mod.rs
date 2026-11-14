@@ -32,7 +32,7 @@ async fn execute(state: &Arc<State>, identity: usize, args: &Value) -> Result<Va
         return Err(Error::invalid());
     }
     let channels = &state.services.require::<super::ProjectService>()?.channels;
-    let _gate = channels.3.lock().await;
+    let _gate = harness_recovery::locks::session_lock(state, &binding, "queue.command").await?;
     if args["action"] == "read" {
         return Ok(
             json!({"queue":harness_recovery::store::load(channels,&binding)?.1["instructionQueue"]}),

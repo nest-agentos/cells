@@ -5,9 +5,8 @@
 //! `openat2(RESOLVE_BENEATH | NO_SYMLINKS | NO_MAGICLINKS)`, so no wire path
 //! can escape the root even if it is a symlink or a mount point.
 //!
-//! Writable exports additionally hold an advisory `flock` for their lifetime:
-//! cooperating instances cannot serve the same directory, which is what makes
-//! the in-memory revision table a meaningful conditional-write authority.
+//! Export descriptors grant access without locking the directory. Conditional
+//! replacement coordinates only the current file; SQLite owns its file transactions.
 
 use crate::core::error::Error;
 use crate::fs::{
@@ -28,7 +27,7 @@ const DIRECTORY_LIMIT: usize = 100_000;
 
 pub struct Export {
     pub(crate) root: File,
-    pub(crate) metadata_gate: Mutex<()>,
+    pub(crate) path_locks: crate::core::path_locks::PathLocks,
     revisions: Option<Mutex<Revisions>>,
     pub(crate) upload_journal: Option<Arc<super::upload_journal::UploadJournal>>,
 }
@@ -47,7 +46,7 @@ impl Export {
         }
         let export = Self {
             root,
-            metadata_gate: Mutex::new(()),
+            path_locks: Default::default(),
             revisions: None,
             upload_journal: None,
         };
@@ -56,20 +55,9 @@ impl Export {
         Ok(export)
     }
 
-    /// Open a writable capability: exclusive lock, revision table, recovery.
-    pub fn exclusive(root: &Path) -> Result<Self, Error> {
+    /// Open a writable capability with revisions and resource-scoped recovery.
+    pub fn open_writable(root: &Path) -> Result<Self, Error> {
         let mut export = Self::open(root)?;
-        rustix::fs::flock(
-            &export.root,
-            rustix::fs::FlockOperation::NonBlockingLockExclusive,
-        )
-        .map_err(|error| {
-            if error == rustix::io::Errno::WOULDBLOCK {
-                Error::busy()
-            } else {
-                error.into()
-            }
-        })?;
         export.revisions = Some(Mutex::new(Revisions::new()?));
         export.upload_journal = Some(Arc::new(super::upload_journal::UploadJournal::open(
             &export.root,
@@ -83,7 +71,7 @@ impl Export {
         self.revisions.is_some()
     }
 
-    /// Duplicate the root descriptor; the duplicate shares the advisory lock.
+    /// Duplicate the root directory capability.
     pub fn try_clone_root(&self) -> Result<File, Error> {
         Ok(self.root.try_clone()?)
     }
@@ -95,15 +83,18 @@ impl Export {
 
     /// Look up one entry. `Ok(None)` means "does not exist"; other failures are real.
     pub fn stat(&self, path: &str) -> Result<Option<Stat>, Error> {
-        let mut revisions = self.lock_revisions();
+        self.path_locks
+            .with(&[(path, false)], || self.stat_inner(path))
+    }
+    fn stat_inner(&self, path: &str) -> Result<Option<Stat>, Error> {
         match self.open_path(path, OFlags::PATH) {
             Ok(file) => {
                 let mut stat = attributes(&file)?;
-                stat.revision = revisions.as_mut().map(|r| r.get(&file)).transpose()?;
-                let _metadata = self
-                    .metadata_gate
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner());
+                stat.revision = self
+                    .lock_revisions()
+                    .as_mut()
+                    .map(|r| r.get(&file))
+                    .transpose()?;
                 let (metadata_root, relative) = self.metadata_scope(path)?;
                 if let Some(store) = super::metadata::Metadata::open(&metadata_root, false)? {
                     stat.metadata = store.read(&relative)?;
@@ -134,12 +125,19 @@ impl Export {
 
     /// Open a regular file for reading together with its current revision.
     pub fn read(&self, path: &str) -> Result<(File, Option<String>), Error> {
-        let mut revisions = self.lock_revisions();
+        self.path_locks
+            .with(&[(path, false)], || self.read_inner(path))
+    }
+    fn read_inner(&self, path: &str) -> Result<(File, Option<String>), Error> {
         let file = self.open_path(path, OFlags::RDONLY)?;
         if !file.metadata()?.is_file() {
             return Err(Error::unsupported());
         }
-        let revision = revisions.as_mut().map(|r| r.get(&file)).transpose()?;
+        let revision = self
+            .lock_revisions()
+            .as_mut()
+            .map(|r| r.get(&file))
+            .transpose()?;
         if path.ends_with(".seq") {
             use std::os::unix::fs::FileExt;
             let mut header = [0u8; 16];
@@ -210,6 +208,29 @@ impl Export {
             .map(|lock| lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner()))
     }
 
+    pub(crate) fn lock_existing_file(&self, path: &str) -> Result<Option<File>, Error> {
+        let file = self.open_path(path, OFlags::RDONLY)?;
+        if !file.metadata()?.is_file() {
+            return Ok(None);
+        }
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive).map_err(
+            |error| {
+                if error == rustix::io::Errno::WOULDBLOCK {
+                    Error::busy()
+                } else {
+                    error.into()
+                }
+            },
+        )?;
+        let current = self.open_path(path, OFlags::PATH)?;
+        use std::os::unix::fs::MetadataExt;
+        let locked = file.metadata()?;
+        let current = current.metadata()?;
+        if (locked.dev(), locked.ino()) != (current.dev(), current.ino()) {
+            return Err(Error::precondition_failed());
+        }
+        Ok(Some(file))
+    }
     /// Resolve `path` under the root capability.
     pub(crate) fn open_path(&self, path: &str, flags: OFlags) -> Result<File, Error> {
         path::validate(path)?;

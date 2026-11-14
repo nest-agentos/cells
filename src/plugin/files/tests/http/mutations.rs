@@ -7,7 +7,7 @@ use std::os::unix::fs::PermissionsExt;
 use tower::ServiceExt;
 
 fn writable(root: &std::path::Path) -> axum::Router {
-    app_export(Export::exclusive(root).unwrap())
+    app_export(Export::open_writable(root).unwrap())
 }
 
 fn has_staged_file(root: &std::path::Path) -> bool {
@@ -25,8 +25,8 @@ fn has_staged_file(root: &std::path::Path) -> bool {
 async fn conditional_replace_serializes_writers_and_never_replays_ids() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("note"), "original").unwrap();
-    let export = Export::exclusive(root.path()).unwrap();
-    assert!(Export::exclusive(root.path()).is_err());
+    let export = Export::open_writable(root.path()).unwrap();
+    assert!(Export::open_writable(root.path()).is_ok());
     let server = app_export(export);
     let response = server
         .clone()

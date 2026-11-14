@@ -1,6 +1,6 @@
 //! Durable upload ownership records, independent of the size of the exported tree.
 use crate::{core::error::Error, fs::export::Export};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use rustix::fs::{Mode, OFlags};
 use std::{fs::File, os::fd::AsRawFd, os::unix::fs::MetadataExt, sync::Mutex};
 
@@ -11,7 +11,6 @@ const APPLICATION_ID: i64 = 0x50415550;
 pub(crate) struct UploadJournal {
     database: Mutex<Connection>,
     _directory: File,
-    _root_lock: File,
 }
 
 #[derive(Clone)]
@@ -23,6 +22,7 @@ pub(crate) struct PendingUpload {
     pub parent_inode: i64,
     pub device: Option<i64>,
     pub inode: Option<i64>,
+    _lease: Option<std::sync::Arc<File>>,
 }
 
 impl UploadJournal {
@@ -36,14 +36,28 @@ impl UploadJournal {
         let database =
             Connection::open_with_flags(file, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
                 .map_err(sql)?;
+        database
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(sql)?;
         initialize(&database)?;
         Ok(Self {
             database: Mutex::new(database),
             _directory: directory,
-            _root_lock: root.try_clone()?,
         })
     }
 
+    fn acquire_lease(&self, device: i64, inode: i64, name: &str) -> Result<Option<File>, Error> {
+        let key = lease_name(device, inode, name);
+        let file = private_file(&self._directory, &key)?;
+        match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => Ok(Some(file)),
+            Err(rustix::io::Errno::WOULDBLOCK) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+    pub(crate) fn recovery_lease(&self, upload: &PendingUpload) -> Result<Option<File>, Error> {
+        self.acquire_lease(upload.parent_device, upload.parent_inode, &upload.name)
+    }
     pub fn prepare(
         &self,
         parent: &str,
@@ -51,6 +65,9 @@ impl UploadJournal {
         directory: &File,
     ) -> Result<PendingUpload, Error> {
         let metadata = directory.metadata()?;
+        let lease = self
+            .acquire_lease(metadata.dev() as i64, metadata.ino() as i64, name)?
+            .ok_or_else(Error::busy)?;
         let database = self
             .database
             .lock()
@@ -65,6 +82,7 @@ impl UploadJournal {
             parent_inode: metadata.ino() as i64,
             device: None,
             inode: None,
+            _lease: Some(std::sync::Arc::new(lease)),
         })
     }
 
@@ -82,11 +100,35 @@ impl UploadJournal {
     }
 
     pub fn forget(&self, id: i64) -> Result<(), Error> {
-        self.database
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .execute("DELETE FROM uploads WHERE id=?1", [id])
-            .map_err(sql)?;
+        let lease = {
+            let mut database = self
+                .database
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let tx = database.transaction().map_err(sql)?;
+            let lease: Option<(i64, i64, String)> = tx
+                .query_row(
+                    "SELECT parent_device,parent_inode,name FROM uploads WHERE id=?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()
+                .map_err(sql)?;
+            tx.execute("DELETE FROM uploads WHERE id=?1", [id])
+                .map_err(sql)?;
+            tx.commit().map_err(sql)?;
+            lease
+        };
+        if let Some((device, inode, name)) = lease {
+            match rustix::fs::unlinkat(
+                &self._directory,
+                lease_name(device, inode, &name),
+                rustix::fs::AtFlags::empty(),
+            ) {
+                Ok(()) | Err(rustix::io::Errno::NOENT) => (),
+                Err(error) => return Err(error.into()),
+            }
+        }
         Ok(())
     }
 
@@ -111,6 +153,7 @@ impl UploadJournal {
                     parent_inode: row.get(4)?,
                     device: row.get(5)?,
                     inode: row.get(6)?,
+                    _lease: None,
                 })
             })
             .map_err(sql)?;
@@ -125,6 +168,14 @@ impl PendingUpload {
         self.inode = Some(metadata.ino() as i64);
         Ok(())
     }
+}
+
+fn lease_name(device: i64, inode: i64, name: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!(
+        "lease-{:x}",
+        Sha256::digest(format!("{device}:{inode}:{name}").as_bytes())
+    )
 }
 
 fn private_directory(root: &File) -> Result<File, Error> {
@@ -146,7 +197,7 @@ fn private_directory(root: &File) -> Result<File, Error> {
     Ok(directory)
 }
 
-fn private_file(directory: &File, name: &str) -> Result<(), Error> {
+fn private_file(directory: &File, name: &str) -> Result<File, Error> {
     let file = File::from(rustix::fs::openat(
         directory,
         name,
@@ -161,7 +212,7 @@ fn private_file(directory: &File, name: &str) -> Result<(), Error> {
     {
         return Err(Error::forbidden("UPLOAD_JOURNAL_PERMISSIONS"));
     }
-    Ok(())
+    Ok(file)
 }
 
 fn initialize(database: &Connection) -> Result<(), Error> {

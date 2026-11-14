@@ -107,9 +107,8 @@ pub async fn run(
             });
         }
         Err(()) => {
-            // Reaping failed: process ownership is unknown, so keep the
-            // exports closed instead of reopening them.
-            state.files.poison();
+            // Reaping failed: fence the affected resource without closing unrelated projects.
+            gate.poison();
             drop(gate);
             process.unreaped();
             crate::core::events::emit(

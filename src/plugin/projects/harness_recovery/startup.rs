@@ -30,50 +30,50 @@ async fn scan(state: &Arc<State>) -> Result<(), Error> {
         .services
         .require::<super::super::ProjectService>()?
         .channels;
-    for binding in store::bindings(channels)? {
-        let Some(identity) = state
-            .auth
-            .clients()
-            .iter()
-            .position(|c| c.id() == binding.owner)
-        else {
-            continue;
-        };
-        let args = json!({"projectId":binding.project_id,"revision":binding.revision,"namespace":binding.namespace,"profileId":binding.profile_id,"sessionId":binding.session_id});
-        if authorize(state, identity, &args).is_err() {
-            continue;
-        }
-        super::super::harness_queue::worker_start(state, &binding);
-        let Ok(_native_guard) = state
-            .services
-            .require::<crate::harness::Harnesses>()?
-            .recovery_guard(state, identity, args)
-            .await
-        else {
-            continue;
-        };
-        let _guard = channels.3.lock().await;
-        let result = reconcile(state, identity, &binding).await;
-        drop(_guard);
-        drop(_native_guard);
-        if let Err(error) = result {
-            if ![
-                "HARNESS_RECOVERY_RESTART_PROOF_REQUIRED",
-                "HARNESS_RECOVERY_NOT_DETACHED",
-                "HARNESS_RECOVERY_HEAD_UNSAFE",
-                "HARNESS_RECOVERY_PENDING_OPERATIONS",
-            ]
-            .contains(&error.code)
-            {
-                crate::core::events::emit(
-                    crate::core::events::Level::Warn,
-                    "harness.recovery.deferred",
-                    json!({"operation":"harness.recovery","stage":"startup_reconcile","sessionId":binding.session_id,"result":"deferred","code":error.code}),
-                );
-            }
+    use futures_util::{stream, StreamExt};
+    stream::iter(store::bindings(channels)?)
+        .for_each_concurrent(8, |binding| reconcile_binding(state, binding))
+        .await;
+    Ok(())
+}
+async fn reconcile_binding(state: &Arc<State>, binding: Binding) {
+    let Some(identity) = state
+        .auth
+        .clients()
+        .iter()
+        .position(|c| c.id() == binding.owner)
+    else {
+        return;
+    };
+    let args = json!({"projectId":binding.project_id,"revision":binding.revision,"namespace":binding.namespace,"profileId":binding.profile_id,"sessionId":binding.session_id});
+    if authorize(state, identity, &args).is_err() {
+        return;
+    }
+    super::super::harness_queue::worker_start(state, &binding);
+    let Some(harness) = state.services.get::<crate::harness::Harnesses>() else {
+        return;
+    };
+    let Ok(_native_guard) = harness.recovery_guard(state, identity, args).await else {
+        return;
+    };
+    let result = reconcile(state, identity, &binding).await;
+    drop(_native_guard);
+    if let Err(error) = result {
+        if ![
+            "HARNESS_RECOVERY_RESTART_PROOF_REQUIRED",
+            "HARNESS_RECOVERY_NOT_DETACHED",
+            "HARNESS_RECOVERY_HEAD_UNSAFE",
+            "HARNESS_RECOVERY_PENDING_OPERATIONS",
+        ]
+        .contains(&error.code)
+        {
+            crate::core::events::emit(
+                crate::core::events::Level::Warn,
+                "harness.recovery.deferred",
+                json!({"operation":"harness.recovery","stage":"startup_reconcile","sessionId":binding.session_id,"result":"deferred","code":error.code}),
+            );
         }
     }
-    Ok(())
 }
 pub(in crate::plugin::projects) async fn reconcile(
     state: &Arc<State>,
@@ -84,7 +84,7 @@ pub(in crate::plugin::projects) async fn reconcile(
         .services
         .require::<super::super::ProjectService>()?
         .channels;
-    let (raw, record) = store::load(channels, binding)?;
+    let (_, record) = store::load(channels, binding)?;
     let item = &record["instructionQueue"]["items"][0];
     if item["state"] != "dispatching" || !item["receipt"]["turnId"].is_string() {
         return Ok(());
@@ -109,6 +109,8 @@ pub(in crate::plugin::projects) async fn reconcile(
         )
     );
     let args = json!({"operationId":operation,"instructionId":item["id"],"expectedRevision":record["instructionQueue"]["revision"]});
+    let _guard = locks::session_lock(state, binding, "recovery.startup.commit").await?;
+    let (raw, record) = store::load(channels, binding)?;
     let (record, outcome) = decision::recover(record, &session, &history, &args, true)?;
     store::commit(channels, binding, &args, &raw, &record, outcome)?;
     crate::core::events::emit(

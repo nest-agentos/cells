@@ -19,7 +19,6 @@ use crate::{
         export::Export,
         model::{attributes, Stat},
         path,
-        revision::Revisions,
         upload_journal::{PendingUpload, UploadJournal},
     },
 };
@@ -27,7 +26,7 @@ use rustix::fs::{Mode, OFlags, RenameFlags};
 use std::{
     fs::File,
     os::unix::fs::{MetadataExt, PermissionsExt},
-    sync::{Arc, MutexGuard},
+    sync::Arc,
 };
 
 /// Mode for a newly created file. The service does not consult `umask`, so the
@@ -147,72 +146,82 @@ fn publish(
     executable: Option<bool>,
     checkpoint: impl Fn() -> Result<(), Error>,
 ) -> Result<Stat, Error> {
-    let mut revisions = export
-        .lock_revisions()
-        .ok_or_else(|| Error::forbidden("EROFS"))?;
-    checkpoint()?;
-    // Re-resolve the parent under the lock: renaming it invalidates the upload.
-    let (target, name) = export.parent(path)?;
-    if identity(&target) != identity(&upload.parent) {
-        return Err(Error::precondition_failed());
+    if !export.writable() {
+        return Err(Error::forbidden("EROFS"));
     }
-    let mut mode = match expected {
-        Some(expected) => replaced_mode(export, path, expected, &mut revisions)?,
-        None => DEFAULT_FILE_MODE,
-    };
-    if let Some(executable) = executable {
-        let bits = if executable {
-            mode.bits() | 0o111
-        } else {
-            mode.bits() & !0o111
-        };
-        mode = Mode::from_bits_truncate(bits);
-    }
-    checkpoint()?;
-    // Give the published inode the mode the caller would expect to find.
-    rustix::fs::fchmod(&upload.file, mode)?;
-    upload.file.sync_all()?;
-    let mut stat = attributes(&upload.file)?;
-    stat.revision = Some(revisions.get(&upload.file)?);
-    rustix::fs::renameat_with(
-        &upload.parent,
-        upload.name.as_str(),
-        &target,
-        name.as_str(),
-        if expected.is_none() {
-            RenameFlags::NOREPLACE
-        } else {
-            RenameFlags::empty()
-        },
-    )
-    .map_err(|error| {
-        if expected.is_none() && error == rustix::io::Errno::EXIST {
-            Error::precondition_failed()
-        } else {
-            error.into()
+    export.path_locks.with(&[(path, true)], || {
+        checkpoint()?;
+        // Re-resolve the parent under the lock: renaming it invalidates the upload.
+        let (target, name) = export.parent(path)?;
+        if identity(&target) != identity(&upload.parent) {
+            return Err(Error::precondition_failed());
         }
-    })?;
-    Ok(stat)
+        let (mut mode, _file_lease) = match expected {
+            Some(expected) => {
+                let (mode, lease) = replaced_mode(export, path, expected)?;
+                (mode, Some(lease))
+            }
+            None => (DEFAULT_FILE_MODE, None),
+        };
+        if let Some(executable) = executable {
+            let bits = if executable {
+                mode.bits() | 0o111
+            } else {
+                mode.bits() & !0o111
+            };
+            mode = Mode::from_bits_truncate(bits);
+        }
+        checkpoint()?;
+        // Give the published inode the mode the caller would expect to find.
+        rustix::fs::fchmod(&upload.file, mode)?;
+        upload.file.sync_all()?;
+        rustix::fs::renameat_with(
+            &upload.parent,
+            upload.name.as_str(),
+            &target,
+            name.as_str(),
+            if expected.is_none() {
+                RenameFlags::NOREPLACE
+            } else {
+                RenameFlags::empty()
+            },
+        )
+        .map_err(|error| {
+            if expected.is_none() && error == rustix::io::Errno::EXIST {
+                Error::precondition_failed()
+            } else {
+                error.into()
+            }
+        })?;
+        let result=(||{
+            let mut stat=attributes(&upload.file)?;
+            stat.revision=Some(export.lock_revisions().unwrap().get(&upload.file)?);
+            Ok(stat)
+        })();
+        result.map_err(|error:Error|{
+            crate::core::events::emit(crate::core::events::Level::Error,"file.publish.failed",serde_json::json!({"operation":"file.publish","stage":"published-stat","result":"failure","code":error.code,"outcome":"partial"}));
+            Error::partial("FILE_PUBLISHED_STAT_FAILED")
+        })
+    })
 }
 
 /// Reject the write unless `path` still carries exactly `expected`, then
 /// return the permission bits to carry over to the replacement.
-fn replaced_mode(
-    export: &Export,
-    path: &str,
-    expected: &str,
-    revisions: &mut MutexGuard<'_, Revisions>,
-) -> Result<Mode, Error> {
+fn replaced_mode(export: &Export, path: &str, expected: &str) -> Result<(Mode, File), Error> {
     let current = export
-        .open_path(path, OFlags::PATH)
-        .map_err(|_| Error::precondition_failed())?;
+        .lock_existing_file(path)?
+        .ok_or_else(Error::precondition_failed)?;
     let metadata = current.metadata()?;
+    let mut revisions = export
+        .lock_revisions()
+        .ok_or_else(|| Error::forbidden("EROFS"))?;
     if !metadata.is_file() || revisions.get(&current)? != expected {
         return Err(Error::precondition_failed());
     }
     revisions.retire(&current)?;
-    Ok(Mode::from_bits_truncate(
-        metadata.permissions().mode() & MODE_MASK,
+    Ok((
+        Mode::from_bits_truncate(metadata.permissions().mode() & MODE_MASK),
+        current,
     ))
 }
 

@@ -405,9 +405,8 @@ async fn native_project_bash_and_codex_share_directory_grants() {
     std::fs::write(root.path().join("reference/guide"), "reference").unwrap();
     let reader = state.files.read_only().unwrap();
     let mut admission=Box::pin(call(&state,0,"project_exec",json!({"projectId":id,"revision":2,"epoch":state.services.require::<cells::process::Execution>().unwrap().epoch(),"requestId":"bash","command":"/bin/bash","args":["-c","set -eu; test $(pwd) = /workspace; cat ref/guide; test ! -e /etc/passwd; if echo x > ref/guide 2>/dev/null; then exit 7; fi; echo project > note"],"timeoutMs":5000})));
-    tokio::select! {biased; _ = &mut admission => panic!("reader still held"), _ = tokio::task::yield_now() => {}}
+    let started = tokio::time::timeout(std::time::Duration::from_secs(3), &mut admission).await.unwrap().unwrap();
     drop(reader);
-    let started = admission.await.unwrap();
     assert!(started["process"].is_object());
     let result = loop {
         let result = cells::process::status(
@@ -611,7 +610,7 @@ async fn project_scope_migrates_legacy_directory_and_keeps_owner_records_separat
     let project_root = root.path().join("exports/group/existing");
     std::fs::write(project_root.join("note.md"), "note").unwrap();
     {
-        let export = cells::fs::Export::exclusive(&project_root).unwrap();
+        let export = cells::fs::Export::open_writable(&project_root).unwrap();
         patch_note(&export, "note.md");
     }
     std::fs::write(project_root.join(".nestos/info.seq"), "preserved-sequence").unwrap();
@@ -954,4 +953,91 @@ async fn concurrent_registration_preserves_one_identity_and_failures_do_not_leak
     state.files.poison();
     assert_eq!(call(&state, 0, "project_register", json!({"name":"Refused","alias":"home","path":"group/refused","access":"rw","createDirectory":true})).await.unwrap_err().code,"EIO");
     assert!(!root.path().join("exports/group/refused").exists());
+}
+
+#[tokio::test]
+async fn project_controls_ignore_other_native_sessions_and_preserve_their_own_fence(){
+    let root=tempfile::tempdir().unwrap();let state=State::from_config(&deployment(root.path())).unwrap();
+    let a=register(&state,"group/existing",false).await;
+    let b=register(&state,"group/independent",true).await;
+    let service=state.services.require::<cells::projects::ProjectService>().unwrap();
+    let runtime=ProjectRuntime::new(&state,0,service.get(0,a["id"].as_str().unwrap()).unwrap()).unwrap();
+    runtime.begin("a-session","a-operation").await.unwrap();runtime.bind_turn("a-session","a-operation","a-turn");
+    let started=std::time::Instant::now();
+    for (name,extra) in [
+        ("project_configure",json!({"name":"Independent","mounts":[]})),
+        ("project_set_execution",json!({"execution":{"profile":null,"variables":{}}})),
+        ("project_remount",json!({"access":"ro"})),
+        ("project_forget",json!({})),
+    ]{
+        let mut args=json!({"projectId":b["id"],"revision":service.get(0,b["id"].as_str().unwrap()).unwrap().revision});
+        args.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        let result=call(&state,0,name,args).await;
+        // A valid control must never be rejected because another project owns a native turn.
+        assert!(!matches!(&result,Err(error) if error.code=="EBUSY"),"{name}: {result:?}");
+        result.unwrap();
+    }
+    let blocked=call(&state,0,"project_configure",json!({"projectId":a["id"],"revision":1,"name":"Same","mounts":[]})).await.unwrap_err();
+    assert_eq!(blocked.code,"EBUSY");
+    runtime.event(&json!({"method":"turn/completed","params":{"threadId":"a-session","turn":{"id":"a-turn"}}}));
+    call(&state,0,"project_configure",json!({"projectId":a["id"],"revision":1,"name":"Same","mounts":[]})).await.unwrap();
+    assert!(started.elapsed()<std::time::Duration::from_secs(5));
+    eprintln!("project control isolation: projects=2 activeNativeTurns=1 logicalApiCalls=6 httpRequests=0 elapsedMs={}",started.elapsed().as_millis());
+}
+
+#[tokio::test]
+async fn streamed_project_files_retain_only_their_project_until_the_body_is_released(){
+    use tower::ServiceExt;
+    let root=tempfile::tempdir().unwrap();let state=State::from_config(&deployment(root.path())).unwrap();
+    let a=register(&state,"group/existing",false).await;let b=register(&state,"group/other",true).await;
+    std::fs::write(root.path().join("exports/group/existing/note"),"content").unwrap();
+    let request=axum::http::Request::builder().uri("/v1/fs/home/content?path=group/existing/note")
+        .header("authorization","Bearer project-test-secret-0123456789")
+        .header("x-fsagent-project",a["id"].as_str().unwrap()).header("x-fsagent-project-revision","1")
+        .body(axum::body::Body::empty()).unwrap();
+    let response=cells::router(state.clone(),&[]).unwrap().oneshot(request).await.unwrap();
+    assert_eq!(response.status(),axum::http::StatusCode::OK);
+    let configure=|project:&Value|json!({"projectId":project["id"],"revision":1,"name":"Updated","mounts":[]});
+    assert_eq!(call(&state,0,"project_configure",configure(&a)).await.unwrap_err().code,"EBUSY");
+    call(&state,0,"project_configure",configure(&b)).await.unwrap();
+    drop(response);call(&state,0,"project_configure",configure(&a)).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_project_waiting_on_its_metadata_database_does_not_serialize_another_project(){
+    let root=tempfile::tempdir().unwrap();let state=State::from_config(&deployment(root.path())).unwrap();
+    let a=register(&state,"group/existing",false).await;let b=register(&state,"group/other",true).await;
+    let database=rusqlite::Connection::open(root.path().join("exports/group/existing/.nestos/meta.sqlite")).unwrap();
+    database.execute_batch("BEGIN IMMEDIATE;").unwrap();
+    let (ready,entered)=tokio::sync::oneshot::channel();
+    let worker={let state=state.clone();let a=a.clone();tokio::task::spawn_blocking(move||{
+        let service=state.services.require::<cells::projects::ProjectService>().unwrap();
+        let _node=state.files.shared().unwrap();
+        let _project=service.lifecycle(a["id"].as_str().unwrap()).exclusive().unwrap();
+        ready.send(()).unwrap();
+        service.remount(&state,0,a["id"].as_str().unwrap(),1,"ro",None)
+    })};
+    entered.await.unwrap();
+    let mut independent={let state=state.clone();tokio::task::spawn_blocking(move||tokio::runtime::Handle::current().block_on(call(&state,0,"project_configure",json!({"projectId":b["id"],"revision":1,"name":"Independent","mounts":[]}))))};
+    let before_release=tokio::time::timeout(std::time::Duration::from_secs(1),&mut independent).await;
+    database.execute_batch("ROLLBACK;").unwrap();worker.await.unwrap().unwrap();
+    match before_release{Ok(result)=>{result.unwrap().unwrap();},Err(error)=>{independent.await.unwrap().unwrap();panic!("another project's metadata write was serialized: {error}");}}
+}
+
+#[test]
+fn independent_directory_registrations_allocate_distinct_readable_ids_concurrently(){
+    let root=tempfile::tempdir().unwrap();let state=State::from_config(&deployment(root.path())).unwrap();
+    let barrier=std::sync::Barrier::new(12);
+    let ids=std::thread::scope(|scope|{
+        let mut workers=Vec::new();
+        for index in 0..12{
+            let state=&state;let barrier=&barrier;
+            workers.push(scope.spawn(move||{
+                barrier.wait();let request=serde_json::from_value(json!({"name":"Concurrent","alias":"home","path":format!("parallel-{index}"),"access":"rw","createDirectory":true})).unwrap();
+                state.services.require::<cells::projects::ProjectService>().unwrap().register(state,0,request).unwrap().id
+            }));
+        }
+        workers.into_iter().map(|worker|worker.join().unwrap()).collect::<std::collections::HashSet<_>>()
+    });
+    assert_eq!(ids.len(),12);assert!(ids.contains("concurrent"));assert!(ids.contains("concurrent-12"));
 }

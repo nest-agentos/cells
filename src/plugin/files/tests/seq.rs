@@ -7,7 +7,7 @@ use serde_json::json;
 #[test]
 fn sqlite_seqfile_is_portable_and_conditional_transactions_do_not_lose_updates() {
     let root = tempfile::tempdir().unwrap();
-    let export = Export::exclusive(root.path()).unwrap();
+    let export = Export::open_writable(root.path()).unwrap();
     let snapshot = seq::snapshot(&export, "info.seq").unwrap();
     assert!(snapshot.entries.is_empty());
     seq::update(
@@ -74,7 +74,7 @@ fn sqlite_seqfile_is_portable_and_conditional_transactions_do_not_lose_updates()
 #[test]
 fn cancelled_or_invalid_batch_keeps_the_original_database() {
     let root = tempfile::tempdir().unwrap();
-    let export = Export::exclusive(root.path()).unwrap();
+    let export = Export::open_writable(root.path()).unwrap();
     seq::update(
         &export,
         Update {
@@ -127,7 +127,7 @@ fn cancelled_or_invalid_batch_keeps_the_original_database() {
 fn reads_do_not_create_files_and_invalid_sqlite_or_symlinks_are_not_replaced() {
     let root = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
-    let export = Export::exclusive(root.path()).unwrap();
+    let export = Export::open_writable(root.path()).unwrap();
     assert!(seq::snapshot(&export, "missing.seq")
         .unwrap()
         .entries
@@ -192,7 +192,7 @@ fn reads_do_not_create_files_and_invalid_sqlite_or_symlinks_are_not_replaced() {
 #[test]
 fn concurrent_seqfile_creators_cannot_overwrite_each_other() {
     let root = tempfile::tempdir().unwrap();
-    let export = Export::exclusive(root.path()).unwrap();
+    let export = Export::open_writable(root.path()).unwrap();
     let barrier = std::sync::Barrier::new(2);
     std::thread::scope(|scope| {
         let write = |name: &str| {
@@ -231,7 +231,7 @@ fn concurrent_seqfile_creators_cannot_overwrite_each_other() {
 #[test]
 fn bounded_queries_seek_keys_and_page_literal_prefixes_with_revision_fencing() {
     let root = tempfile::tempdir().unwrap();
-    let export = Export::exclusive(root.path()).unwrap();
+    let export = Export::open_writable(root.path()).unwrap();
     seq::update(
         &export,
         Update {
@@ -309,7 +309,7 @@ fn bounded_queries_seek_keys_and_page_literal_prefixes_with_revision_fencing() {
 fn large_databases_use_native_pages_without_replacing_the_inode() {
     use std::os::unix::fs::MetadataExt;
     let root = tempfile::tempdir().unwrap();
-    let export = Export::exclusive(root.path()).unwrap();
+    let export = Export::open_writable(root.path()).unwrap();
     seq::update(
         &export,
         Update {
@@ -367,7 +367,7 @@ fn large_databases_use_native_pages_without_replacing_the_inode() {
 fn sqlite_sidecar_symlinks_and_hardlinks_fail_closed() {
     let root = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
-    let export = Export::exclusive(root.path()).unwrap();
+    let export = Export::open_writable(root.path()).unwrap();
     seq::update(
         &export,
         Update {
@@ -422,7 +422,7 @@ fn immutable_bodies_verify_content_and_can_precede_database_creation() {
     use seq::bodies::{self, BodyQuery, BodyWrite};
     use sha2::{Digest, Sha256};
     let root = tempfile::tempdir().unwrap();
-    let export = Export::exclusive(root.path()).unwrap();
+    let export = Export::open_writable(root.path()).unwrap();
     let text = "a large but immutable body".to_owned();
     let hash = format!("{:x}", Sha256::digest(text.as_bytes()));
     let query = BodyQuery {
@@ -477,7 +477,7 @@ fn immutable_bodies_verify_content_and_can_precede_database_creation() {
 fn raw_download_is_a_stable_sqlite_backup_while_later_transactions_commit() {
     use std::io::Read;
     let root = tempfile::tempdir().unwrap();
-    let export = Export::exclusive(root.path()).unwrap();
+    let export = Export::open_writable(root.path()).unwrap();
     seq::update(
         &export,
         Update {
@@ -522,7 +522,7 @@ fn raw_download_is_a_stable_sqlite_backup_while_later_transactions_commit() {
 fn publishing_a_body_directory_keeps_the_database_validator_and_missing_parents_read_empty() {
     use sha2::{Digest, Sha256};
     let root = tempfile::tempdir().unwrap();
-    let export = Export::exclusive(root.path()).unwrap();
+    let export = Export::open_writable(root.path()).unwrap();
     assert!(seq::snapshot(&export, "missing/folder/info.seq")
         .unwrap()
         .entries
@@ -567,4 +567,83 @@ fn publishing_a_body_directory_keeps_the_database_validator_and_missing_parents_
         || Ok(()),
     )
     .unwrap();
+}
+
+#[test]
+fn an_in_place_seq_transaction_blocks_only_replacement_of_that_inode() {
+    use cells::fs::upload;
+    use std::io::Write;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc, Mutex,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let export = Export::open_writable(root.path()).unwrap();
+    seq::update(
+        &export,
+        Update {
+            path: "one.seq".into(),
+            expected_revision: None,
+            changes: vec![Change::Set {
+                key: "value".into(),
+                value: json!(1),
+            }],
+        },
+        || Ok(()),
+    )
+    .unwrap();
+    let revision = seq::snapshot(&export, "one.seq").unwrap().revision;
+    let other = Export::open_writable(root.path()).unwrap();
+    let other_revision = other.stat("one.seq").unwrap().unwrap().revision;
+    let (ready, entered) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let released = Mutex::new(released);
+    let checkpoints = AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            seq::update(
+                &export,
+                Update {
+                    path: "one.seq".into(),
+                    expected_revision: revision,
+                    changes: vec![Change::Set {
+                        key: "value".into(),
+                        value: json!(2),
+                    }],
+                },
+                || {
+                    if checkpoints.fetch_add(1, Ordering::SeqCst) == 1 {
+                        ready.send(()).unwrap();
+                        released.lock().unwrap().recv().unwrap();
+                    }
+                    Ok(())
+                },
+            )
+        });
+        entered
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        let upload = other.stage("one.seq").unwrap();
+        upload.writer().unwrap().write_all(b"replacement").unwrap();
+        let conflict = upload::commit(&other, "one.seq", upload, other_revision.as_deref(), || {
+            Ok(())
+        });
+        let independent = seq::update(
+            &other,
+            Update {
+                path: "two.seq".into(),
+                expected_revision: None,
+                changes: vec![],
+            },
+            || Ok(()),
+        );
+        release.send(()).unwrap();
+        worker.join().unwrap().unwrap();
+        assert_eq!(conflict.err().unwrap().code, "EBUSY");
+        independent.unwrap();
+    });
+    assert_eq!(
+        seq::snapshot(&export, "one.seq").unwrap().entries[0].value,
+        json!(2)
+    );
 }

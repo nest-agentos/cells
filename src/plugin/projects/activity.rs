@@ -1,4 +1,4 @@
-//! Independent native turns retain one file-exclusion permit each.
+//! Native turns retain node and project lifecycle permits until actual cleanup.
 use crate::core::{
     error::Error,
     gate::{ActivityPermit, FileGate},
@@ -23,7 +23,11 @@ impl Activities {
     pub fn sessions(&self) -> Vec<String> {
         self.0.lock().map(|active|active.keys().cloned().collect()).unwrap_or_default()
     }
+    #[cfg(test)]
     pub fn begin(&self, gate: &FileGate, session: &str, operation: &str) -> Result<(), Error> {
+        self.begin_with_permit(gate.activity_for(Some(session),Some(operation))?,session,operation)
+    }
+    pub fn begin_with_permit(&self,permit:ActivityPermit,session:&str,operation:&str)->Result<(),Error>{
         let mut active = self.0.lock().map_err(|_| Error::internal())?;
         if active.contains_key(session) {
             return Err(Error::busy());
@@ -38,7 +42,7 @@ impl Activities {
                 trace:{let mut fields=crate::core::trace::current();fields.insert("operationId".into(),operation.into());fields},
                 turn: None,
                 completed: HashSet::new(),
-                _permit: gate.activity_for(Some(session), Some(operation))?,
+                _permit: permit,
             },
         );
         Ok(())

@@ -27,6 +27,7 @@ pub async fn snapshot(
     state
         .workers
         .read(&state.files, deadline, move |token| {
+            let _project_guard = _project_guard;
             if token.is_cancelled() {
                 return Err(Error::cancelled());
             }
@@ -53,6 +54,7 @@ pub async fn query(
     state
         .workers
         .read(&state.files, deadline, move |token| {
+            let _project_guard = _project_guard;
             if token.is_cancelled() {
                 return Err(Error::cancelled());
             }
@@ -75,7 +77,7 @@ pub async fn transaction(
         alias,
         identity,
         "transaction",
-        move |task, deadline| seq::update(&export, input, || task.checkpoint(deadline)),
+        move |task, deadline| {let _project_guard=_project_guard;seq::update(&export, input, || task.checkpoint(deadline))},
     )
     .await
 }
@@ -101,9 +103,11 @@ pub async fn body(
     state
         .workers
         .read(&state.files, deadline, move |token| {
+            let _project_guard = _project_guard;
             if token.is_cancelled() {
                 return Err(Error::cancelled());
             }
+            let _body_guard=_body_guard;
             seq::bodies::read(&export, &input).map(Json)
         })
         .await
@@ -131,7 +135,7 @@ pub async fn put_body(
         alias,
         identity,
         "body.publish",
-        move |task, deadline| seq::bodies::write(&export, input, || task.checkpoint(deadline)),
+        move |task, deadline| {let _project_guard=_project_guard;let _body_guard=_body_guard;seq::bodies::write(&export, input, || task.checkpoint(deadline))},
     )
     .await
 }

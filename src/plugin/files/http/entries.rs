@@ -51,6 +51,7 @@ async fn entries_once(
     let listing = state
         .workers
         .read(&state.files, deadline, move |token| {
+            let _project_guard = _project_guard;
             export.list_fields(&query.path, &token, query.fields)
         })
         .await?;

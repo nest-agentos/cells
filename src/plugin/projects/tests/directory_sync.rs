@@ -694,3 +694,30 @@ async fn compares_binary_limits_and_browses_only_authorized_project_directories(
     .await
     .is_err());
 }
+
+#[tokio::test]
+async fn directory_sync_does_not_take_the_node_or_an_unrelated_project_exclusively(){
+    let root=tempfile::tempdir().unwrap();let (_,state,a)=setup(root.path()).await;
+    publish(&state,2,json!([]));bind(&state,&a,"sub").await;
+    let b=call(&state,0,"project_register",json!({"name":"Other","alias":"home","path":"other","access":"rw","createDirectory":true})).await.unwrap()["project"].clone();
+    let service=state.services.require::<cells::projects::ProjectService>().unwrap();
+    let other=service.lifecycle(b["id"].as_str().unwrap()).exclusive().unwrap();
+    let started=std::time::Instant::now();let plan=preview(&state).await;
+    assert!(plan["id"].is_string());assert!(state.files.shared().is_ok());drop(other);
+    let own=service.lifecycle(a["id"].as_str().unwrap()).exclusive().unwrap();
+    let result=call(&state,0,"project_sync_preview",json!({"bindingId":"binding","projectId":b["id"]})).await.unwrap_err();
+    assert_eq!(result.code,"EBUSY");drop(own);
+    execute(&state,&plan["id"]).await.unwrap();
+    assert!(started.elapsed()<std::time::Duration::from_secs(5));
+    eprintln!("directory sync isolation: projects=2 bindings=1 logicalApiCalls=3 httpRequests=0 elapsedMs={}",started.elapsed().as_millis());
+}
+
+#[tokio::test]
+async fn parallel_new_binding_ids_cannot_claim_overlapping_directories(){
+    let root=tempfile::tempdir().unwrap();let (_,state,project)=setup(root.path()).await;publish(&state,2,json!([]));
+    let request=|id:&str|json!({"bindingId":id,"projectId":project["id"],"revision":1,"syncProjectId":"p","datasetId":"files","historyEpoch":state.services.require::<SyncService>().unwrap().epoch(),"target":"sub"});
+    let (a,b)=tokio::join!(call(&state,0,"project_sync_bind",request("a")),call(&state,0,"project_sync_bind",request("b")));
+    assert_eq!(usize::from(a.is_ok())+usize::from(b.is_ok()),1);
+    let error=match (a,b){(Err(error),_)|(_,Err(error))=>error,_=>unreachable!()};
+    assert_eq!(error.code,"TARGET_ALREADY_BOUND");
+}

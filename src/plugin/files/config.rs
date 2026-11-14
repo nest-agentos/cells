@@ -31,6 +31,6 @@ pub enum Access {
     /// Serve reads only; no lock, no revisions.
     #[default]
     Ro,
-    /// Serve reads and conditional writes behind an exclusive advisory lock.
+    /// Serve reads and resource-scoped conditional writes.
     Rw,
 }

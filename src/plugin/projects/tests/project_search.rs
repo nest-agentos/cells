@@ -48,7 +48,7 @@ projects=true
         .services
         .require::<cells::process::Execution>()
         .unwrap()
-        .retain_lock(std::fs::File::open(root.path()).unwrap());
+        .retain_root(std::fs::File::open(root.path()).unwrap());
     state
         .services
         .require::<cells::process::Execution>()

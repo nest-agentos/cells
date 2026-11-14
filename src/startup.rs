@@ -218,7 +218,7 @@ mod tests {
                     let export = if index == 0 {
                         Export::open(root.path())
                     } else {
-                        Export::exclusive(root.path())
+                        Export::open_writable(root.path())
                     };
                     (alias.into(), Arc::new(export.unwrap()))
                 })

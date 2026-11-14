@@ -7,7 +7,7 @@ use tower::ServiceExt;
 #[tokio::test]
 async fn seq_transactions_remain_atomic_during_unrelated_native_and_command_execution() {
     let root=tempfile::tempdir().unwrap();
-    let state=crate::common::state(Export::exclusive(root.path()).unwrap(),None,vec!["docs".into()],vec!["docs".into()]);
+    let state=crate::common::state(Export::open_writable(root.path()).unwrap(),None,vec!["docs".into()],vec!["docs".into()]);
     let _native=state.files.activity_for(Some("other-session"),Some("other-turn")).unwrap();
     let _command=state.files.command_now("other-command").unwrap();
     let server=crate::common::router_for(state);
@@ -28,7 +28,7 @@ async fn seq_transactions_remain_atomic_during_unrelated_native_and_command_exec
 #[tokio::test]
 async fn seq_routes_enforce_authorization_and_write_permissions() {
     let root = tempfile::tempdir().unwrap();
-    let server = app_export(Export::exclusive(root.path()).unwrap());
+    let server = app_export(Export::open_writable(root.path()).unwrap());
     let update = json!({"path":"info.seq","expectedRevision":null,"changes":[{"action":"set","key":"name","value":"Project"}]}).to_string();
     let response = server
         .clone()
@@ -86,7 +86,7 @@ async fn seq_routes_enforce_authorization_and_write_permissions() {
 async fn selective_queries_and_body_routes_enforce_project_access() {
     use sha2::{Digest, Sha256};
     let root = tempfile::tempdir().unwrap();
-    let server = app_export(Export::exclusive(root.path()).unwrap());
+    let server = app_export(Export::open_writable(root.path()).unwrap());
     let text = "immutable text";
     let hash = format!("{:x}", Sha256::digest(text.as_bytes()));
     for (route, input, operation) in [

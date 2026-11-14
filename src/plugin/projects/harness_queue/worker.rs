@@ -2,7 +2,6 @@
 use super::*;
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
-use tokio::sync::MutexGuard;
 pub(crate) fn ensure(state: &Arc<State>, binding: &Binding) {
     let key = json!([
         binding.project_id,
@@ -167,9 +166,6 @@ async fn native(
         .project_call(state, identity, name, args)
         .await
 }
-async fn lock(channels: &Channels) -> MutexGuard<'_, ()> {
-    channels.3.lock().await
-}
 pub(super) async fn advance(
     state: &Arc<State>,
     identity: usize,
@@ -190,9 +186,19 @@ pub(super) async fn advance(
     if item.is_null() || item["state"] == "failed" {
         return Ok(());
     }
-    crate::core::trace::scope(crate::core::trace::resume(&item["traceContext"]),advance_item(state,identity,binding,&record,item)).await
+    crate::core::trace::scope(
+        crate::core::trace::resume(&item["traceContext"]),
+        advance_item(state, identity, binding, &record, item),
+    )
+    .await
 }
-async fn advance_item(state:&Arc<State>,identity:usize,binding:&Binding,record:&Value,item:Value)->Result<(),Error> {
+async fn advance_item(
+    state: &Arc<State>,
+    identity: usize,
+    binding: &Binding,
+    record: &Value,
+    item: Value,
+) -> Result<(), Error> {
     let session = native(state, identity, binding, "harness_session_info", json!({})).await?
         ["session"]
         .clone();
@@ -224,7 +230,7 @@ async fn advance_item(state:&Arc<State>,identity:usize,binding:&Binding,record:&
         .profiles()["epoch"]
         .clone();
     let mut claimed = item.clone();
-    claimed["traceContext"]=crate::core::trace::capture();
+    claimed["traceContext"] = crate::core::trace::capture();
     claimed["state"] = json!("dispatching");
     claimed["dispatchedAt"] = json!(now());
     claimed["queueEpoch"] = epoch.clone();
@@ -517,7 +523,7 @@ where
         .services
         .require::<super::super::ProjectService>()?
         .channels;
-    let _gate = lock(channels).await;
+    let _gate = harness_recovery::locks::session_lock(state, binding, "queue.update").await?;
     let (raw, mut record) = harness_recovery::store::load(channels, binding)?;
     let queue = &mut record["instructionQueue"];
     let index = queue["items"]
@@ -530,13 +536,16 @@ where
     change(queue, index)?;
     commands::bump(queue)?;
     let result = store::save(channels, binding, &raw, &record);
-    crate::core::trace::sync_scope(crate::core::trace::resume(&expected["traceContext"]),||{
-    crate::core::events::emit(
-        crate::core::events::Level::Info,
-        "harness.queue.transition",
-        json!({"operation":"harness.queue","operationId":attempt(expected),"sessionId":binding.session_id,"stage":"persist_transition","result":if result.is_ok(){"success"}else{"failure"},"revision":record["instructionQueue"]["revision"],"count":record["instructionQueue"]["items"].as_array().map(Vec::len),"code":result.as_ref().err().map(|e|e.code),"durationMs":started.elapsed().as_millis()}),
+    crate::core::trace::sync_scope(
+        crate::core::trace::resume(&expected["traceContext"]),
+        || {
+            crate::core::events::emit(
+                crate::core::events::Level::Info,
+                "harness.queue.transition",
+                json!({"operation":"harness.queue","operationId":attempt(expected),"sessionId":binding.session_id,"stage":"persist_transition","result":if result.is_ok(){"success"}else{"failure"},"revision":record["instructionQueue"]["revision"],"count":record["instructionQueue"]["items"].as_array().map(Vec::len),"code":result.as_ref().err().map(|e|e.code),"durationMs":started.elapsed().as_millis()}),
+            );
+        },
     );
-    });
     result
 }
 async fn reconcile(
@@ -599,11 +608,6 @@ async fn reconcile(
                 .require::<crate::harness::Harnesses>()?
                 .recovery_guard(state, identity, base(binding))
                 .await?;
-            let channels = &state
-                .services
-                .require::<super::super::ProjectService>()?
-                .channels;
-            let _gate = lock(channels).await;
             return harness_recovery::startup::reconcile(state, identity, binding).await;
         }
     }
@@ -776,7 +780,7 @@ async fn supplement(
         return Ok(());
     }
     let mut claimed = item.clone();
-    claimed["traceContext"]=crate::core::trace::capture();
+    claimed["traceContext"] = crate::core::trace::capture();
     claimed["state"] = json!("dispatching");
     claimed["dispatchedAt"] = json!(now());
     claimed["steerTurnId"] = json!(turn);

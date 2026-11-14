@@ -47,8 +47,12 @@ impl Workers {
         deadline: tokio::time::Instant,
         work: impl FnOnce(CancellationToken) -> Result<T, Error> + Send + 'static,
     ) -> Result<T, Error> {
-        let _guard = gate.shared()?;
-        self.run_ungated(deadline, work).await
+        let guard = gate.shared()?;
+        self.run_ungated(deadline, move |token| {
+            let _guard = guard;
+            work(token)
+        })
+        .await
     }
 
     /// Read-only work does not contend with native turn admission.

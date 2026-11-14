@@ -32,14 +32,14 @@ path = "/n/prj/x1"                   # 别名默认取目录名：x1
 
 [[exports]]
 path = "/srv/projects/demo"
-access = "rw"                        # 默认 ro；rw 自动加独占锁
+access = "rw"                        # 默认 ro；rw 允许写入，不锁导出目录
 ```
 
 `allowed_origins` 是 CORS 白名单，只决定「哪个网页的 JS 能读取响应」，不代替认证：`http://localhost:3000` 对应 Web 开发（`apps/web-app` 的 Vite 端口），`http://localhost:1420` 对应 Tauri 开发；打包后的 Tauri 用 `tauri://localhost`（Linux/macOS）或 `http://tauri.localhost`（Windows），生产 Web 填实际 https 域名。写 `["*"]` 放通所有源（仅限本机/受控环境），写 `[]` 则拒绝所有浏览器源；两种写法都不影响 CLI 与 curl。
 
 配置文件统一使用 TOML。不传参数时，服务依次在**进程当前工作目录**和**可执行文件所在目录**查找 `config.toml`，取第一个存在的文件；显式参数优先。找不到配置文件时启动失败并列出已搜索路径。
 
-默认只读。需要写入时，在对应 `[[exports]]` 增加 `access = "rw"`（自动请求独占锁）。工作台添加挂载时再勾选允许写入；三层权限都允许才能修改。
+默认只读。需要写入时，在对应 `[[exports]]` 增加 `access = "rw"`（不持有导出目录锁）。工作台添加挂载时再勾选允许写入；三层权限都允许才能修改。
 
 启动时逐项显示实际打开的导出别名与 `ro/rw`、`read/write` 状态，`server.ready` 事件的 `exports` 数组提供相同信息，写权限同时核对目录能力和当前认证身份。此状态表示服务端导出权限；已注册项目及 NestOS 保存的客户端绑定还可限制为只读，修改导出配置不会自动提升已有项目权限。
 
@@ -69,7 +69,7 @@ metadata 修改不会改变正文 revision，也不会使原本合法的正文�
 仅复制正文不会迁移 AI 关联等自定义 metadata。不要为了同一棵目录的不同挂载层级重复配置重叠 export，
 也不要手工编辑数据库或删除其 journal 文件。旧节点不声明 metadata 能力时，客户端明确拒绝写入，不在本地另存替代记录。
 
-`exclusive` 要求所有修改经本服务完成；目录上的 advisory lock 阻止合作的同根实例，不能阻止编辑器、Git 或其他外部程序。配置内拒绝重叠根与重复别名；不同实例的父子导出根仍需部署侧禁止。共享修改目录使用 `ro`。服务支持 HTTP；公网部署在 TLS 反向代理之后。Origin 白名单只解决浏览器访问，不代替身份认证。用户名/密码使用 UTF-8 HTTP Basic，密码至少 8 字节：用户名取 `username`，未写时读环境变量 `FS_SERVER_USER`；密码取内联 `password` 或 `password_env` 指向的环境变量。Basic 凭据不加密，非可信本机网络应使用 HTTPS。推荐 `api_key` 或 `api_key_env`（至少 24 字节、不设置 `username`），使用 Bearer 认证；旧名称 `token`/`token_env` 仍兼容，但不能和对应新名称同时配置。API Key 与密码认证互斥；同时设置 `username` 与 `token`/`token_env` 会启动失败，避免看起来是 Basic 实际只收 Bearer。内联 secret 写在服务端配置文件中。API Key 按启动连接提示输出到 console，不放入结构化事件或 HTTP 响应；旧 Basic 密码不输出。
+导出根目录只作为访问能力，不加生命周期 `flock`，多个可写能力可同时打开同一根。普通文件采用同目录暂存和原子重命名；创建使用 `RENAME_NOREPLACE`，条件替换只对当前目标 inode 做短暂协调并重验版本。锁不覆盖兄弟文件或祖先目录。SQLite 文件使用自身事务。非合作的外部进程仍可绕过这些协调，不能据此宣称跨 Bash、编辑器与 HTTP 的强事务。配置内仍拒绝重叠根与重复别名。服务支持 HTTP；公网部署在 TLS 反向代理之后。Origin 白名单只解决浏览器访问，不代替身份认证。用户名/密码使用 UTF-8 HTTP Basic，密码至少 8 字节：用户名取 `username`，未写时读环境变量 `FS_SERVER_USER`；密码取内联 `password` 或 `password_env` 指向的环境变量。Basic 凭据不加密，非可信本机网络应使用 HTTPS。推荐 `api_key` 或 `api_key_env`（至少 24 字节、不设置 `username`），使用 Bearer 认证；旧名称 `token`/`token_env` 仍兼容，但不能和对应新名称同时配置。API Key 与密码认证互斥；同时设置 `username` 与 `token`/`token_env` 会启动失败，避免看起来是 Basic 实际只收 Bearer。内联 secret 写在服务端配置文件中。API Key 按启动连接提示输出到 console，不放入结构化事件或 HTTP 响应；旧 Basic 密码不输出。
 
 在“工具箱 → Cells”（技能前面）配置节点地址，例如 `http://127.0.0.1:8787`，填写 API Key 或用户名/密码并检查连接。NestOS 通过固定 HTTP API 发现节点和访问项目/Harness，不创建 Cells MCP 服务器条目。工作台新建远程项目选择 Cells 连接和 `/alias/path`；同一节点、账号与规范化路径复用既有项目，改名不移动目录。
 
@@ -87,16 +87,16 @@ API：`GET /v1/exports`、`POST /v1/fs/:alias/stat`（`{paths}`）、`GET entrie
 
 每个请求独立完成，无 begin/end/commit 命令；分页以 `nextCursor: null` 结束。取消读取通过断开 fetch/响应流；修改通过取消端点和 deadline。提交后的取消不回滚。`committed` 表示原子命名空间替换可见，不承诺断电持久性或跨文件事务。
 
-普通文件、SeqFile、受管命令及不同原生 Session 可并发执行，不再以节点级文件/执行互斥制造无关任务的 EBUSY。FileGate 仅登记生命周期供项目拓扑变更和关闭排空使用。文件仍校验路径、权限、条件版本及原子提交；SeqFile 使用 SQLite 事务和版本 CAS，两个持相同旧版本的写入只有一个可提交。原生命令直接写文件不受 HTTP 条件版本约束，不能视为跨入口强事务；任务使用独立工作树，共享 Git 更新仍需 Git 自身锁与版本核验。同一 Session 的命令顺序与原回执身份保持不变，未知清理结果仍封闭新准入。生命周期争用诊断支持多个持有者，并记录操作、会话、PID、关联请求与持有时长。
+普通文件、SeqFile、受管命令及不同原生 Session 可并发执行，不再以节点级文件/执行互斥制造无关任务的 EBUSY。节点 FileGate 只登记关闭排空，项目拓扑变更由独立的项目生命周期门协调。文件仍校验路径、权限、条件版本及原子提交；SeqFile 使用 SQLite 事务和版本 CAS，两个持相同旧版本的写入只有一个可提交。原生命令直接写文件不受 HTTP 条件版本约束，不能视为跨入口强事务；任务使用独立工作树，共享 Git 更新仍需 Git 自身锁与版本核验。同一 Session 的命令顺序与原回执身份保持不变，未知清理结果仍封闭新准入。生命周期争用诊断支持多个持有者，并记录操作、会话、PID、关联请求与持有时长。
 
 
-当前边界：上传最多 256 MiB；驱动完整读取默认 32 MiB；stat 每批 256 项；目录每页 512 项、单目录扫描上限 10 万项；全局最多 16 个文件工作槽。目录分页每页重新扫描，不是快照。非 UTF-8/特殊文件返回诊断；VFS 旧列表适配器遇到诊断会报不支持。禁止链接遍历和 `.itookit-upload-` 保留名称；独占启动时只恢复 SQLite 中登记的暂存文件，不递归扫描导出目录。路径必须是导出内相对路径：允许名称中的冒号（如 `2024:Q1.md`），拒绝盘符前缀（如 `C:/host`）。新建文件权限 0644、新建目录 0755；条件替换保留被替换文件的权限位。`remove` 当前仅支持文件和空目录；递归删除、append/patch、订阅和搜索端点未开放。外挂项目的 Agent 不装配本地 Shell/TTY，防止进程工具读到同名宿主目录。
+当前边界：上传最多 256 MiB；驱动完整读取默认 32 MiB；stat 每批 256 项；目录每页 512 项、单目录扫描上限 10 万项；全局最多 16 个文件工作槽。目录分页每页重新扫描，不是快照。非 UTF-8/特殊文件返回诊断；VFS 旧列表适配器遇到诊断会报不支持。禁止链接遍历和 `.itookit-upload-` 保留名称；可写启动时只恢复 SQLite 中登记的暂存文件，不递归扫描导出目录。路径必须是导出内相对路径：允许名称中的冒号（如 `2024:Q1.md`），拒绝盘符前缀（如 `C:/host`）。新建文件权限 0644、新建目录 0755；条件替换保留被替换文件的权限位。`remove` 当前仅支持文件和空目录；递归删除、append/patch、订阅和搜索端点未开放。外挂项目的 Agent 不装配本地 Shell/TTY，防止进程工具读到同名宿主目录。
 
 ### 上传暂存索引
 
 “上传”指客户端保存远程文件、SeqFile 写入或同步内容落盘。正文暂存在目标文件同目录的 `.itookit-upload-<随机值>` 文件中，再通过原子重命名发布；SQLite 只保存文件位置和身份元数据，不保存正文。
 
-每个可写导出持有独占目录锁，在保留目录 `.itookit-upload-state/` 中维护 `uploads.sqlite`。目录权限 0700、文件权限 0600，对远程文件接口隐藏并拒绝访问；只读导出和权限检查不创建索引。索引使用 SQLite 完整同步事务，创建暂存文件前记录意图，创建后登记父目录和文件的设备号、inode；发布或取消后先同步目录，再删除记录。暂存对象存活期间继续持有导出锁。
+每个可写导出在保留目录 `.itookit-upload-state/` 中维护小型 `uploads.sqlite` 责任索引，正文保留在目标目录暂存文件中。目录权限 0700、文件权限 0600，对远程文件接口隐藏并拒绝访问；只读导出和权限检查不创建索引。创建暂存文件前先取得该随机暂存身份的恢复租约并记录意图，创建后登记父目录和文件的设备号、inode。发布或取消后同步目录、删除记录并清理对应租约文件。第二个可写能力恢复时跳过仍有租约的上传，不锁整个导出。
 
 启动恢复按主键每批读取 128 条未完成记录，只检查对应目录和暂存名称。已消失的暂存文件只删除记录，已发布目标保留；身份匹配的暂存文件清除后再删除记录。目录无法访问、移动或被替换，文件被替换、变成链接，或崩溃发生在创建文件后、登记文件身份前时，保留文件及记录，通过 `uploads.recovered` 的 `retained` 数量告警，不阻止其他目录提供服务。数据库损坏、权限错误或版本不兼容会拒绝可写启动，并保留错误码。
 
@@ -124,9 +124,9 @@ NestOS 项目右键菜单选择“启用远程命令”后，File Tools 和 Bash
 
 `POST /v1/processes` 启动（serverId、epoch、requestId、command、args、cwd、mounts、timeoutMs），`GET /v1/processes/:epoch/:id` 查询，`POST .../cancel` 取消。epoch 来自 capabilities.processEpoch。mount 使用 `{ alias, path, at, access }`，path 为 alias 内相对路径，绝不接受宿主路径。重复 requestId 不再次执行；重启后旧 epoch 被拒绝。取消返回 running 时仍需查询，直到进程确已回收。
 
-每条命令最多一个 rw export（其他 export 为 ro）；该 writer 的独占锁保留给 monitor。单命令、最长 300 秒、stdout/stderr 各 64 KiB，超出输出上限会取消。返回最终有界输出，尚无实时流或 PTY。最多保留 1024 条内存进程记录；容量达到上限时，将已确定结束的回执归档到当前 epoch 的私有 SQLite 临时磁盘库（2 MiB 缓存、主库上限 256 MiB），相同 identity/requestId 继续查询原结果，不能重新执行。running/unknown 不归档，全部为未结算进程时返回 PROCESS_LIMIT；归档故障返回 PROCESS_RECEIPT_STORAGE_FAILED，保留原身份且拒绝新准入。重启更换 epoch，不提供旧结果续接。
+每条命令最多一个 rw export（其他 export 为 ro）；monitor 只保留目录能力，不持有导出目录锁。单命令、最长 300 秒、stdout/stderr 各 64 KiB，超出输出上限会取消。返回最终有界输出，尚无实时流或 PTY。最多保留 1024 条内存进程记录；容量达到上限时，将已确定结束的回执归档到当前 epoch 的私有 SQLite 临时磁盘库（2 MiB 缓存、主库上限 256 MiB），相同 identity/requestId 继续查询原结果，不能重新执行。running/unknown 不归档，全部为未结算进程时返回 PROCESS_LIMIT；归档故障返回 PROCESS_RECEIPT_STORAGE_FAILED，保留原身份且拒绝新准入。重启更换 epoch，不提供旧结果续接。
 
-命令持有文件/进程互斥门；普通进程 API 和 `projects.exec` 在仅有目录/内容读取时公平等待最多 3 秒（不超过请求超时），后来的读取不能插队；等待超时返回 `PROCESS_READERS_BUSY`，取消等待也会释放门，不提交命令；该错误不触发 Git 的短重试。命令遇到 Native turn 或其他命令占用时仍明确拒绝；原生会话启动则在统一文件门等待短暂的命令/文件写入收尾，最多 3 秒，等待发生在原生输入发送前，超时返回 `NATIVE_WORKSPACE_BUSY`，不重放模型请求。多个独立原生会话共享执行许可；观察读取继续可用。原生执行模式没有只读沙箱约束，`readOnly` 声明本身不能免除互斥。日志 `file.gate.command` 记录请求 ID、等待阶段、结果和耗时。重复请求沿原回执返回，等待期间已取消的身份不得执行。命令运行期间文件访问受互斥门保护；`stat`、`entries` 和 `content` 的只读请求在包括项目授权检查的入口遇到 `EBUSY` 时最多重试三次，退避 50/100/200 ms，所有尝试共用原请求截止时间且不增加 HTTP 请求。持续占用仍返回 `EBUSY`，截止返回 `ETIMEDOUT`，其他错误不重试；写入和命令不自动重放。冲突日志 `file.gate.conflict` 包含 `blockerOperationId`、`blockerRequestId`、`blockerKind`、`blockerPid` 与 `heldMs`，重试日志 `file.gate.read_retry` 包含次数、耗时和结果；`process.admitted` 以 operationId 关联项目和命令启动，后台进程继承 HTTP trace，增加 commandKind、argumentCount、requestedReadOnly、readOnlyEnforced、gateMode；不记录命令正文或参数。`file.gate.native_wait/native_admission/released` 分别记录等待、准入结果和实际持锁耗时，冲突同时携带持有者的 trace/span ID。下载流、上传与后台提交保留其门直到结束。命令退出/取消并回收后使所有旧 revision 失效，避免 Bash 改动绕过条件写入。exclusive export 不允许其他宿主进程并发写入。执行锁在 monitor 中保留，daemon 意外退出后锁随进程清理释放。
+命令、普通文件读写及不同原生会话共享生命周期登记，彼此不因节点级内容互斥返回 EBUSY。节点 FileGate 只用于关闭排空；配置、重挂载及移除使用项目自己的生命周期门，文件响应和后台工作持有相应项目许可。同步修改按绑定协调，不排斥整个项目或节点。这是生命周期边界，不是跨入口数据事务。同一文件的条件替换、SeqFile SQLite 事务以及同一原生会话的变更单独协调。命令可能改写任意工作区文件，回收后保守失效旧 revision；外部写入不能获得跨入口强 CAS 保证。诊断保留 operationId、requestId、会话、PID、具体失败分类和耗时，不记录参数或正文。unknown 查询原回执，不自动重放。
 
 验收：`CELLS_PROCESS_TEST=1 cargo test`（要求可创建 Linux user/PID/network namespace）。
 
@@ -196,7 +196,7 @@ retained_files = 5
 
 `POST /v1/fs/:alias/seq/body` 接收 `{path,sha256}` 读取正文（缺失为 `{text:null}`）；`POST /v1/fs/:alias/seq/body/put` 使用修改回执协议，接收 `{path,sha256,text}`，正文最多1 MiB UTF-8，摘要必须匹配。正文保存在 `<path>.assets/<sha256>.json`，同摘要不可变，只能在同一授权范围内访问。先保存并核验正文，再事务提交引用；无引用文件暂不自动删除，备份必须包含正文目录。看板适配在超过8 KiB时使用此能力。
 
-读缺失库不创建文件，父目录需提前准备；只读export拒绝修改。写入文件必须由当前进程用户所有、仅一条硬链接且非组/其他用户可写，数据库和旁路日志拒绝符号链接。路径通过目录描述符约束，`.nestos` 是节点保留目录，普通SeqFile应使用其他授权路径。更新与上传/重命名共享修订锁；不支持其他进程绕过节点写门并发修改文件。unknown 查询原操作回执，不自动重放；提交错误不伪装为确认未提交。通过普通文件接口下载 SQLite `.seq` 会生成一致的 SQLite backup，保证流式读取期间后续事务不会改变已返回快照；只有此显式下载才复制整库。
+读缺失库不创建文件，父目录需提前准备；只读export拒绝修改。写入文件必须由当前进程用户所有、仅一条硬链接且非组/其他用户可写，数据库和旁路日志拒绝符号链接。路径通过目录描述符约束，`.nestos` 是节点保留目录，普通SeqFile应使用其他授权路径。更新只协调该文件，SQLite 事务取得写入权后重验条件版本；提交后再返回新版本。外部不遵守 SQLite/文件协调协议的写者不在条件更新保证内。unknown 查询原操作回执，不自动重放；提交错误不伪装为确认未提交。通过普通文件接口下载 SQLite `.seq` 会生成一致的 SQLite backup，保证流式读取期间后续事务不会改变已返回快照；只有此显式下载才复制整库。
 
 ## 原生 harness 控制中心（MCP 2.0）
 
@@ -300,7 +300,7 @@ NestOS 使用固定 HTTP API 与节点通信，管理接口不使用 MCP envelop
 
 活动 turn 各自持有文件写入保护租约，共享原生执行活动组；stat、目录、内容、SeqFile 查询、项目搜索和 MCP 目录读取可并发进行。最后一个 turn 结束或对应进程确认回收后才开放文件修改、project_exec 和项目挂载变更。读取为当前观察，不保证原生执行期间的内容快照；revision 同时核对大小、mtime 和 ctime，原地修改也会撤销旧校验值。完成事件必须匹配 session 与 turn；在启动回执之前到达的完成事件有界保留，绑定实际 turnId 后才释放，迟到事件不能结束下一轮。某个 Claude 进程退出只回收自身会话，Codex app-server 回收该实例的全部会话；未确认进程回收时继续封闭文件门闩。并发会话共享项目工作区，独立代码修改应显式使用 worktree；服务不自动创建或选择 worktree。
 
-项目注册不获取原生执行大锁。登记已有目录及创建新目录复用项目目录 admission、持久目录原子提交、导出修订锁和 `.nestos` 元数据作用域锁；这些锁只覆盖本次登记和元数据事务，不跨原生轮次持有。重复登记仍核对目录身份并复用原项目 ID。已经在使用的项目挂载、权限或执行环境变更继续经过执行排他准入，不能将注册与改写既有执行拓扑混为同一操作。文件门闩已中毒时注册仍拒绝，不能借独立元数据事务绕过未知进程所有权。
+项目注册不获取原生执行大锁。登记已有目录及创建新目录复用目标目录 admission、短 ID 预留、持久目录原子提交和文件修订校验和 `.nestos` 元数据作用域锁；这些锁只覆盖本次登记和元数据事务，不跨原生轮次持有。重复登记仍核对目录身份并复用原项目 ID。已经在使用的项目挂载、权限或执行环境变更继续经过执行排他准入，不能将注册与改写既有执行拓扑混为同一操作。文件门闩已中毒时注册仍拒绝，不能借独立元数据事务绕过未知进程所有权。
 
 锁按一致性要求划分，不按文件扩展名或是否 `.nestos` 一刀切：普通读取是可变内容的观察；条件写保护目标内容修订；项目目录事务保护身份与注册；元数据作用域锁保护作用域迁移和数据库更新；执行门闩保护未隔离进程与文件修改之间的既有约束。原生进程可绕开服务直接访问文件，不能仅凭不同 projectId 就证明物理目录没有重叠或进程无法访问其他目录。
 
@@ -476,7 +476,7 @@ cells access --config /srv/cells/config.toml principal remove bob
 
 环境变量引用会使用当前 CLI 进程的环境进行校验；运行服务也必须能读取这些环境变量。命令不接受明文 token/password 参数，以免凭据落入 shell 历史或进程参数。目录权限按已登记的共享根继承，不能用该 CLI 给同一 export 的子目录覆盖权限；不同访问策略应使用互不重叠的 export。
 
-CLI 分为三层：`cli/` 解析参数和显示结果；`admin/` 编排本地管理、迁移与原子配置事务；`config/inspect` 复用 `config/authorization` 编译器。检查只读打开目录，不创建项目或同步库、不争抢运行中服务的 export 写锁，也不启动 harness。
+CLI 分为三层：`cli/` 解析参数和显示结果；`admin/` 编排本地管理、迁移与原子配置事务；`config/inspect` 复用 `config/authorization` 编译器。检查只读打开目录，不创建项目或同步库、不初始化导出写入恢复状态，也不启动 harness。
 
 每次有效修改先完成完整的目录授权校验，再在配置同目录原子替换，并保留 `config.toml.backup-*.toml` 原始备份；新配置与备份权限均为 0600。合作式编辑锁和提交前的原文件核对拒绝并发覆盖；失败不替换原配置。`--dry-run` 只返回预览，不写文件。顶层注释与其他设置保留。导出授权统一写为每个 `[[exports]]` 内的 `grants = [{ principal = "owner", access = "rw", execute = true }]` 数组，避免新增导出后误把后续 `[[exports.grants]]` 归给新目录；旧式嵌套表仍可读取，管理命令保存时会规范化授权数组。共享移除只移除配置，不删除目录文件；被 grants、harness 或启用中的 sync 引用的身份，以及最后一个身份，不可直接删除。
 
@@ -544,7 +544,7 @@ Codex rollout 回退历史将带明确 `turn_id` 的 `task_complete` / `turn_abo
 
 Executable directory projects use immutable readable IDs (1–64 ASCII letters/digits, `_` or `-`, starting with a letter/digit). `project_register.id` optionally requests an ID; otherwise the node derives a name slug and numeric collision suffix. UUID-shaped new IDs are rejected. IDs are unique case-insensitively across active and retired records; forgetting a project never permits its ID to target a new directory. Existing IDs remain valid.
 
-会话列表按需读取：`harness_sessions` 的 `limit/cursor` 控制展示摘要页。Codex 使用原生 `thread/list`；Claude 先枚举文件身份和 mtime，排序后仅解析当前窗口及溢出判断需要的头尾摘要，并保留 cwd 授权和符号链接检查；DSH 上游仍返回完整目录，Cells 先用集合核对授权成员，再分页并生成所选行的展示摘要。读取不经过 NestOS TypeScript VFS 的写事务。`harness.read.completed` 在 debug 级别记录只读查询的 operationId、阶段、返回数量和耗时，失败为 warn，不记录正文或完整参数。全局关闭先同步停止准入，释放目录锁后等待各 harness 排空。
+会话列表按需读取：`harness_sessions` 的 `limit/cursor` 控制展示摘要页。Codex 使用原生 `thread/list`；Claude 先枚举文件身份和 mtime，排序后仅解析当前窗口及溢出判断需要的头尾摘要，并保留 cwd 授权和符号链接检查；DSH 上游仍返回完整目录，Cells 先用集合核对授权成员，再分页并生成所选行的展示摘要。读取不经过 NestOS TypeScript VFS 的写事务。`harness.read.completed` 在 debug 级别记录只读查询的 operationId、阶段、返回数量和耗时，失败为 warn，不记录正文或完整参数。全局关闭先同步停止准入，释放发现注册表临界区后等待各 harness 排空。
 
 文件基础事实投影：`GET /v1/fs/:alias/entries?fields=entry` 和 `POST /v1/fs/:alias/stat` 的 `fields: "entry"` 只返回基础属性，跳过 revision/metadata 锁和 sidecar 数据库。完整 `stat` 投影保留条件写入所需版本和 source metadata；路径授权、符号链接限制、批量数量及字节上限在两种投影中一致。驱动与节点按同一协议一起升级。
 

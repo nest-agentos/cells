@@ -65,7 +65,7 @@ impl Change {
 }
 
 impl Export {
-    /// Apply `change` while holding the revision lock.
+    /// Coordinate only the paths named by this change.
     ///
     /// `checkpoint` is polled once before the syscall so a cancelled or
     /// expired operation never mutates the tree.
@@ -74,81 +74,95 @@ impl Export {
         change: &Change,
         checkpoint: impl Fn() -> Result<(), Error>,
     ) -> Result<(), Error> {
-        let mut revisions = self
-            .lock_revisions()
-            .ok_or_else(|| Error::forbidden("EROFS"))?;
-        checkpoint()?;
-        let _metadata = self
-            .metadata_gate
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let (metadata_root, metadata_path) = self.metadata_scope(change.path())?;
-        let metadata_to = if let Change::Rename {to, ..} = change {
-            let (target_root, relative) = self.metadata_scope(to)?;
-            use std::os::unix::fs::MetadataExt;
-            let from = metadata_root.metadata()?; let to = target_root.metadata()?;
-            if from.dev() != to.dev() || from.ino() != to.ino() { return Err(Error::conflict("METADATA_SCOPE_CROSS_MOVE")); }
-            Some(relative)
-        } else {None};
-        let mut metadata = if matches!(change, Change::Rename { .. } | Change::Remove { .. }) {
-            super::metadata::Metadata::existing_write(&metadata_root)?
-        } else {
-            None
-        };
-        match change {
-            Change::Mkdir { path } => {
-                let (directory, name) = self.parent(path)?;
-                rustix::fs::mkdirat(&directory, name.as_str(), DIRECTORY_MODE)?;
-            }
-            Change::Rename { path, to } => {
-                let (from, name) = self.parent(path)?;
-                let (destination, destination_name) = self.parent(to)?;
-                rustix::fs::renameat_with(
-                    &from,
-                    name.as_str(),
-                    &destination,
-                    destination_name.as_str(),
-                    RenameFlags::NOREPLACE,
-                )?;
-                if let Some(metadata) = metadata.as_mut() {
-                    metadata.rename(&metadata_path, metadata_to.as_deref().ok_or_else(Error::internal)?).map_err(|_| {
-                        revisions.invalidate();
-                        Error::partial("FILE_METADATA_MAINTENANCE_FAILED")
-                    })?;
-                }
-            }
-            Change::Remove { path } => {
-                let (directory, name) = self.parent(path)?;
-                let target = self.open_path(path, OFlags::PATH)?;
-                let flags = if target.metadata()?.is_dir() {
-                    AtFlags::REMOVEDIR
-                } else {
-                    AtFlags::empty()
-                };
-                rustix::fs::unlinkat(&directory, name.as_str(), flags)?;
-                if let Some(metadata) = metadata.as_ref() {
-                    metadata.remove(&metadata_path).map_err(|_| {
-                        revisions.invalidate();
-                        Error::partial("FILE_METADATA_MAINTENANCE_FAILED")
-                    })?;
-                }
-            }
-            Change::Metadata {
-                path,
-                patch,
-                remove,
-            } => {
-                self.open_path(path, OFlags::PATH)?;
-                if !patch.is_empty() || !remove.is_empty() {
-                    let mut metadata = super::metadata::Metadata::open(&metadata_root, true)?
-                        .ok_or_else(Error::internal)?;
-                    metadata.patch(&metadata_path, patch, remove)?;
-                }
-            }
+        if !self.writable() {
+            return Err(Error::forbidden("EROFS"));
         }
-        if !matches!(change, Change::Metadata { .. }) {
-            revisions.invalidate();
+        let mut paths = vec![(change.path(), true)];
+        if let Change::Rename { to, .. } = change {
+            paths.push((to, true));
         }
-        Ok(())
+        self.path_locks.with(&paths, || {
+            checkpoint()?;
+            let _file_lease = if matches!(change, Change::Rename { .. } | Change::Remove { .. }) {
+                self.lock_existing_file(change.path())?
+            } else {
+                None
+            };
+            let (metadata_root, metadata_path) = self.metadata_scope(change.path())?;
+            let metadata_to = if let Change::Rename { to, .. } = change {
+                let (target_root, relative) = self.metadata_scope(to)?;
+                use std::os::unix::fs::MetadataExt;
+                let from = metadata_root.metadata()?;
+                let to = target_root.metadata()?;
+                if from.dev() != to.dev() || from.ino() != to.ino() {
+                    return Err(Error::conflict("METADATA_SCOPE_CROSS_MOVE"));
+                }
+                Some(relative)
+            } else {
+                None
+            };
+            let mut metadata = if matches!(change, Change::Rename { .. } | Change::Remove { .. }) {
+                super::metadata::Metadata::existing_write(&metadata_root)?
+            } else {
+                None
+            };
+            match change {
+                Change::Mkdir { path } => {
+                    let (directory, name) = self.parent(path)?;
+                    rustix::fs::mkdirat(&directory, name.as_str(), DIRECTORY_MODE)?;
+                }
+                Change::Rename { path, to } => {
+                    let (from, name) = self.parent(path)?;
+                    let (destination, destination_name) = self.parent(to)?;
+                    rustix::fs::renameat_with(
+                        &from,
+                        name.as_str(),
+                        &destination,
+                        destination_name.as_str(),
+                        RenameFlags::NOREPLACE,
+                    )?;
+                    if let Some(metadata) = metadata.as_mut() {
+                        metadata
+                            .rename(
+                                &metadata_path,
+                                metadata_to.as_deref().ok_or_else(Error::internal)?,
+                            )
+                            .map_err(|_| {
+                                self.invalidate_revisions();
+                                Error::partial("FILE_METADATA_MAINTENANCE_FAILED")
+                            })?;
+                    }
+                }
+                Change::Remove { path } => {
+                    let (directory, name) = self.parent(path)?;
+                    let target = self.open_path(path, OFlags::PATH)?;
+                    let flags = if target.metadata()?.is_dir() {
+                        AtFlags::REMOVEDIR
+                    } else {
+                        AtFlags::empty()
+                    };
+                    rustix::fs::unlinkat(&directory, name.as_str(), flags)?;
+                    if let Some(metadata) = metadata.as_ref() {
+                        metadata.remove(&metadata_path).map_err(|_| {
+                            self.invalidate_revisions();
+                            Error::partial("FILE_METADATA_MAINTENANCE_FAILED")
+                        })?;
+                    }
+                }
+                Change::Metadata {
+                    path,
+                    patch,
+                    remove,
+                } => {
+                    self.open_path(path, OFlags::PATH)?;
+                    if !patch.is_empty() || !remove.is_empty() {
+                        let mut metadata = super::metadata::Metadata::open(&metadata_root, true)?
+                            .ok_or_else(Error::internal)?;
+                        metadata.patch(&metadata_path, patch, remove)?;
+                    }
+                }
+            }
+            Ok(())
+        })
     }
 }

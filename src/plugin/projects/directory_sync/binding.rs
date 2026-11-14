@@ -18,20 +18,23 @@ pub(super) fn bind(state: &State, identity: usize, input: Bind) -> Result<Value,
         .ok_or_else(Error::unsupported)?;
     sync.directory_head(&binding.sync_project_id, &binding.dataset_id)
         .map_err(sync_error)?;
-    for prior in catalog(state)?.bindings()? {
-        if prior.id == binding.id {
-            if same_binding(&prior, &binding) {
-                return Ok(json!({"binding":prior}));
-            }
-            return Err(Error::conflict("BINDING_CHANGED"));
-        }
-        if prior.alias == binding.alias && super::policy::overlaps(&prior.source, &binding.source) {
-            return Err(Error::conflict("TARGET_ALREADY_BOUND"));
-        }
-    }
-    catalog(state)?.save_binding(binding.clone())?;
+    let binding = catalog(state)?.register_binding(binding, validate_registered)?;
     Ok(json!({"binding":binding}))
 }
+fn validate_registered(prior: &Binding, binding: &Binding) -> Result<(), Error> {
+    if prior.id == binding.id {
+        return if same_binding(prior, binding) {
+            Ok(())
+        } else {
+            Err(Error::conflict("BINDING_CHANGED"))
+        };
+    }
+    if prior.alias == binding.alias && super::policy::overlaps(&prior.source, &binding.source) {
+        return Err(Error::conflict("TARGET_ALREADY_BOUND"));
+    }
+    Ok(())
+}
+
 fn create(state: &State, identity: usize, mut input: Bind) -> Result<Binding, Error> {
     let project = super::policy::project(state, identity, &input.project_id, input.revision)?;
     input.target = service::normalize(&input.target)?;

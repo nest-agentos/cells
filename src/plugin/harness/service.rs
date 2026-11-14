@@ -73,14 +73,20 @@ impl Harnesses {
         plugins: HarnessPlugins,
     ) -> Result<Self, String> {
         let receipts = Receipts::new()?;
-        for config in &configs { super::execution_state::recover_all(&config.home, &epoch)?; }
+        for config in &configs {
+            super::execution_state::recover_all(&config.home, &epoch)?;
+        }
         let profiles = configs
             .clone()
             .into_iter()
             .map(|config| {
                 let scope = receipts.scoped(json!(["installation", config.id]).to_string());
                 let context_id = super::context_identity::load(&config)?;
-                let executions = super::execution_state::ExecutionState::open(&config.home, &json!(["installation",config.id]).to_string(), &epoch)?;
+                let executions = super::execution_state::ExecutionState::open(
+                    &config.home,
+                    &json!(["installation", config.id]).to_string(),
+                    &epoch,
+                )?;
                 Ok((
                     config.id.clone(),
                     Arc::new(Profile {
@@ -361,8 +367,15 @@ impl Harnesses {
     ) -> Result<Arc<Profile>, Error> {
         let key = format!(
             "{}:{}:{}:{}:{}",
-            project.id, project.revision, config.id, read_only,
-            context.iter().map(|p|format!("{}@{}",p.id,p.revision)).collect::<Vec<_>>().join(",")
+            project.id,
+            project.revision,
+            config.id,
+            read_only,
+            context
+                .iter()
+                .map(|p| format!("{}@{}", p.id, p.revision))
+                .collect::<Vec<_>>()
+                .join(",")
         );
         let mut scoped = self.scoped.lock().await;
         if self.closed.load(Ordering::Acquire) {
@@ -377,14 +390,26 @@ impl Harnesses {
                 config.id.clone(),
                 project.mounts.iter().map(|m| m.alias.clone()).collect(),
             ));
-            let runtime = Arc::new(crate::projects::runtime::ProjectRuntime::new(
-                state, identity, project,
-            )?.with_context(context));
+            let runtime = Arc::new(
+                crate::projects::runtime::ProjectRuntime::new(state, identity, project)?
+                    .with_context(context),
+            );
             scoped.insert(
                 key.clone(),
                 Arc::new(Profile {
                     activity_scope,
-                    executions: super::execution_state::ExecutionState::open(&config.home, &json!(["project",runtime.project.owner,runtime.project.id,config.id]).to_string(), &self.epoch).map_err(|_| Error::unavailable())?,
+                    executions: super::execution_state::ExecutionState::open(
+                        &config.home,
+                        &json!([
+                            "project",
+                            runtime.project.owner,
+                            runtime.project.id,
+                            config.id
+                        ])
+                        .to_string(),
+                        &self.epoch,
+                    )
+                    .map_err(|_| Error::unavailable())?,
                     context_id: self.profiles[&config.id].context_id.clone(),
                     driver: DriverSlot::new(self.plugins.clone(), config, Some(runtime))
                         .map_err(|_| Error::unsupported())?,
@@ -395,20 +420,39 @@ impl Harnesses {
         }
         Ok(scoped[&key].clone())
     }
-    pub(crate) async fn admitted_project_turn(&self,state:&Arc<State>,identity:usize,args:Value)->Result<Option<String>,Error>{
-        let args=self.canonical_args(args)?;let(mut project,config,receipts)=self.project_context(state,identity,&args)?;
-        self.project_access(state,identity,&mut project,&args,false)?;
-        let context=crate::projects::context::for_harness(state,identity,&project,&args)?;
-        let profile=self.project_profile(state,identity,project,config,receipts,false,context).await?;
-        profile.executions.admitted_turn(string(&args,"requestId")?,string(&args,"sessionId")?)
+    pub(crate) async fn admitted_project_turn(
+        &self,
+        state: &Arc<State>,
+        identity: usize,
+        args: Value,
+    ) -> Result<Option<String>, Error> {
+        let args = self.canonical_args(args)?;
+        let (mut project, config, receipts) = self.project_context(state, identity, &args)?;
+        self.project_access(state, identity, &mut project, &args, false)?;
+        let context = crate::projects::context::for_harness(state, identity, &project, &args)?;
+        let profile = self
+            .project_profile(state, identity, project, config, receipts, false, context)
+            .await?;
+        profile
+            .executions
+            .admitted_turn(string(&args, "requestId")?, string(&args, "sessionId")?)
     }
-    pub(crate) fn is_closed(&self) -> bool {self.closed.load(Ordering::Acquire)}
-    pub(crate) async fn recovery_guard(&self, state: &Arc<State>, identity: usize, args: Value) -> Result<super::mutation_queue::MutationGuard, Error> {
-        let args=self.canonical_args(args)?;
-        let (mut project,config,receipts)=self.project_context(state,identity,&args)?;
-        self.project_access(state,identity,&mut project,&args,true)?;
-        let context=crate::projects::context::for_harness(state,identity,&project,&args)?;
-        let profile=self.project_profile(state,identity,project,config,receipts,false,context).await?;
+    pub(crate) fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+    pub(crate) async fn recovery_guard(
+        &self,
+        state: &Arc<State>,
+        identity: usize,
+        args: Value,
+    ) -> Result<super::mutation_queue::MutationGuard, Error> {
+        let args = self.canonical_args(args)?;
+        let (mut project, config, receipts) = self.project_context(state, identity, &args)?;
+        self.project_access(state, identity, &mut project, &args, true)?;
+        let context = crate::projects::context::for_harness(state, identity, &project, &args)?;
+        let profile = self
+            .project_profile(state, identity, project, config, receipts, false, context)
+            .await?;
         profile.mutations.try_recovery(&args)
     }
     pub async fn project_call(
@@ -427,7 +471,7 @@ impl Harnesses {
             return Ok(receipt);
         }
         self.project_access(state, identity, &mut project, &args, is_mutation(name))?;
-        let context=crate::projects::context::for_harness(state,identity,&project,&args)?;
+        let context = crate::projects::context::for_harness(state, identity, &project, &args)?;
         let profile = self
             .project_profile(
                 state,
@@ -477,12 +521,23 @@ impl Harnesses {
         args: &Value,
         referenced: bool,
     ) -> Result<Value, Error> {
-        let profiles = self.scoped.lock().await.values()
-            .filter(|profile| profile.receipts.same_scope(receipts)).cloned().collect::<Vec<_>>();
-        let drivers = profiles.iter().filter_map(|profile| profile.driver.peek()).collect();
+        let profiles = self
+            .scoped
+            .lock()
+            .await
+            .values()
+            .filter(|profile| profile.receipts.same_scope(receipts))
+            .cloned()
+            .collect::<Vec<_>>();
+        let drivers = profiles
+            .iter()
+            .filter_map(|profile| profile.driver.peek())
+            .collect();
         let id = string(args, "requestId")?;
         let receipt = reconcile_receipt(receipts, id, drivers).await?;
-        for profile in profiles { profile.executions.admitted(id, &receipt)?; }
+        for profile in profiles {
+            profile.executions.admitted(id, &receipt)?;
+        }
         Ok(self.project_receipt("harness_operation", receipt, referenced))
     }
 
@@ -496,7 +551,7 @@ impl Harnesses {
         let profile = if args.get("projectId").is_some() {
             let (mut project, config, receipts) = self.project_context(state, identity, &args)?;
             self.project_access(state, identity, &mut project, &args, false)?;
-            let context=crate::projects::context::for_harness(state,identity,&project,&args)?;
+            let context = crate::projects::context::for_harness(state, identity, &project, &args)?;
             self.project_profile(
                 state,
                 identity,
@@ -588,7 +643,10 @@ impl Profile {
             }
             Err(error) => Err(error),
         };
-        let result = result.and_then(|mut value| { self.executions.project(&mut value)?; Ok(value) });
+        let result = result.and_then(|mut value| {
+            self.executions.project(&mut value)?;
+            Ok(value)
+        });
         super::diagnostics::read_result(&context, &result, &args, started.elapsed());
         result
     }
@@ -614,7 +672,8 @@ impl Profile {
         }
     }
     async fn operation(&self, id: &str) -> Result<Value, Error> {
-        let receipt = reconcile_receipt(&self.receipts, id, self.driver.peek().into_iter().collect()).await?;
+        let receipt =
+            reconcile_receipt(&self.receipts, id, self.driver.peek().into_iter().collect()).await?;
         self.executions.admitted(id, &receipt)?;
         Ok(receipt)
     }
@@ -645,7 +704,11 @@ impl Profile {
     async fn commit(&self, id: &str, result: Result<Value, Error>, dispatched: bool) -> Value {
         let mut receipt = receipt(id, result, dispatched);
         if let Err(error) = self.executions.admitted(id, &receipt) {
-            crate::core::events::emit(crate::core::events::Level::Warn,"harness.execution.persist",json!({"operation":"harness.execution.persist","operationId":id,"stage":"admission","result":"failure","code":error.code}));
+            crate::core::events::emit(
+                crate::core::events::Level::Warn,
+                "harness.execution.persist",
+                json!({"operation":"harness.execution.persist","operationId":id,"stage":"admission","result":"failure","code":error.code}),
+            );
             receipt = json!({"outcome":"unknown","requestId":id,"code":error.code});
         }
         let receipt = self.receipts.finish(id, receipt).await.unwrap_or_else(
@@ -714,7 +777,20 @@ impl Profile {
         {
             None
         } else {
-            Some(self.mutations.acquire(name, args).await?)
+            let driver = self.driver.get()?;
+            let mut resources = driver.mutation_resources(name, args).await?;
+            resources.sort();
+            resources.dedup();
+            let serial = self.mutations.acquire(name, args, &resources).await?;
+            if matches!(name, "harness_delete" | "harness_archive") {
+                let mut current = driver.mutation_resources(name, args).await?;
+                current.sort();
+                current.dedup();
+                if current != resources {
+                    return Err(Error::conflict("HARNESS_MUTATION_SCOPE_CHANGED"));
+                }
+            }
+            Some(serial)
         };
         let mut args = args.clone();
         if let Some(descriptor) = descriptor {
@@ -1043,17 +1119,48 @@ mod tests {
     #[tokio::test]
     async fn node_activity_hides_other_principals_and_revoked_exports() {
         let storage = tempfile::tempdir().unwrap();
-        let harness=Harnesses::new(Vec::new(),"epoch".into()).unwrap();
-        harness.scoped.lock().await.insert("private".into(),Arc::new(Profile {
-            driver:DriverSlot::testing(Box::new(SlowDrain{entered:Arc::new(Notify::new()),release:Arc::new(Notify::new())})),
-            executions: super::super::execution_state::ExecutionState::open(storage.path(), "private", "test").unwrap(),context_id:"private".into(),receipts:harness.receipts.scoped("private".into()),mutations:MutationQueues::default(),
-            activity_scope:Some(("alice".into(),"codex".into(),vec!["docs".into()])),
-        }));
-        let client=|owner:&str,grants:Vec<String>|crate::auth::Client::new("fixture".into(),None,grants,vec![]).scoped(owner.into(),vec![],vec!["codex".into()]);
-        let visible=harness.node_activity(&client("alice",vec!["docs".into()])).await;
-        assert_eq!(visible["loadedRuntimes"],1);assert!(visible["activeSessions"].is_null());
-        assert_eq!(harness.node_activity(&client("bob",vec!["docs".into()])).await["loadedRuntimes"],0);
-        assert_eq!(harness.node_activity(&client("alice",vec![])).await["loadedRuntimes"],0);
+        let harness = Harnesses::new(Vec::new(), "epoch".into()).unwrap();
+        harness.scoped.lock().await.insert(
+            "private".into(),
+            Arc::new(Profile {
+                driver: DriverSlot::testing(Box::new(SlowDrain {
+                    entered: Arc::new(Notify::new()),
+                    release: Arc::new(Notify::new()),
+                })),
+                executions: super::super::execution_state::ExecutionState::open(
+                    storage.path(),
+                    "private",
+                    "test",
+                )
+                .unwrap(),
+                context_id: "private".into(),
+                receipts: harness.receipts.scoped("private".into()),
+                mutations: MutationQueues::default(),
+                activity_scope: Some(("alice".into(), "codex".into(), vec!["docs".into()])),
+            }),
+        );
+        let client = |owner: &str, grants: Vec<String>| {
+            crate::auth::Client::new("fixture".into(), None, grants, vec![]).scoped(
+                owner.into(),
+                vec![],
+                vec!["codex".into()],
+            )
+        };
+        let visible = harness
+            .node_activity(&client("alice", vec!["docs".into()]))
+            .await;
+        assert_eq!(visible["loadedRuntimes"], 1);
+        assert!(visible["activeSessions"].is_null());
+        assert_eq!(
+            harness
+                .node_activity(&client("bob", vec!["docs".into()]))
+                .await["loadedRuntimes"],
+            0
+        );
+        assert_eq!(
+            harness.node_activity(&client("alice", vec![])).await["loadedRuntimes"],
+            0
+        );
     }
 
     #[tokio::test]
@@ -1069,7 +1176,12 @@ mod tests {
                     release: release.clone(),
                 })),
                 context_id: "test-context".into(),
-                executions: super::super::execution_state::ExecutionState::open(storage.path(), "slow", "test").unwrap(),
+                executions: super::super::execution_state::ExecutionState::open(
+                    storage.path(),
+                    "slow",
+                    "test",
+                )
+                .unwrap(),
                 activity_scope: None,
                 receipts: harness.receipts.scoped("slow-test".into()),
                 mutations: MutationQueues::default(),

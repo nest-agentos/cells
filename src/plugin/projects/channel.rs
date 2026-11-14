@@ -7,17 +7,23 @@ use std::{path::Path, sync::Mutex};
 mod exchange;
 mod tools;
 pub(crate) use tools::definitions;
+mod bodies;
 mod client_state;
+mod client_stores;
 mod servers;
 
-pub struct Channels(Mutex<Connection>, tokio::sync::watch::Sender<u64>,pub(super) Mutex<Connection>,pub(super) tokio::sync::Mutex<()>,pub(super) Mutex<std::collections::HashSet<String>>, std::sync::RwLock<Option<String>>);
-impl Channels {
-    pub fn open(root: &Path) -> Result<Self, Error> {
-        let path = root.join("session-channels.sqlite");
-        use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new().create(true).append(true).mode(0o600).custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32).open(&path)?;
-        let db = Connection::open(path).map_err(storage)?;
-        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA max_page_count=65536;
+pub struct Channels(
+    Mutex<Connection>,
+    tokio::sync::watch::Sender<u64>,
+    pub(super) client_stores::ClientStores,
+    pub(super) crate::core::keyed_lock::KeyedLocks,
+    pub(super) Mutex<std::collections::HashSet<String>>,
+    std::sync::RwLock<Option<String>>,
+    bodies::Bodies,
+    crate::core::keyed_lock::SyncKeyedLocks,
+);
+fn channel_schema(db: &Connection) -> Result<(), Error> {
+    db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA max_page_count=65536;
             CREATE TABLE IF NOT EXISTS scopes(project TEXT, id TEXT, token TEXT UNIQUE, cwd TEXT, endpoint TEXT,
             snapshot TEXT, execution TEXT NOT NULL DEFAULT '{}', closed INTEGER NOT NULL DEFAULT 0, expires_at INTEGER NOT NULL, PRIMARY KEY(project,id));
             CREATE TABLE IF NOT EXISTS exchanges(seq INTEGER PRIMARY KEY AUTOINCREMENT,project TEXT,scope TEXT,id TEXT,request TEXT,response TEXT,UNIQUE(project,scope,id));
@@ -25,75 +31,234 @@ impl Channels {
             id TEXT, body TEXT, ack TEXT, UNIQUE(project,scope,id));
             CREATE TABLE IF NOT EXISTS agent_servers(owner TEXT,id TEXT,revision INTEGER,body TEXT,PRIMARY KEY(owner,id));
             CREATE TABLE IF NOT EXISTS publications(project TEXT,scope TEXT,id TEXT,origin TEXT NOT NULL,PRIMARY KEY(project,scope,id));
-            CREATE UNIQUE INDEX IF NOT EXISTS active_scope ON scopes(project,cwd) WHERE closed=0;").map_err(storage)?;
+            CREATE UNIQUE INDEX IF NOT EXISTS active_scope ON scopes(project,cwd) WHERE closed=0;").map_err(storage)
+}
+fn migrate_index(db: &Connection, legacy: &Path) -> Result<(), Error> {
+    db.execute_batch("CREATE TABLE IF NOT EXISTS migrated(complete INTEGER);")
+        .map_err(storage)?;
+    if !legacy.exists()
+        || db
+            .query_row("SELECT EXISTS(SELECT 1 FROM migrated)", [], |r| {
+                r.get::<_, bool>(0)
+            })
+            .map_err(storage)?
+    {
+        return Ok(());
+    }
+    db.execute(
+        "ATTACH DATABASE ?1 AS source",
+        [legacy.to_string_lossy().as_ref()],
+    )
+    .map_err(storage)?;
+    let result=db.execute_batch("BEGIN;INSERT OR IGNORE INTO scopes SELECT project,id,token,cwd,endpoint,'',execution,closed,expires_at FROM source.scopes;INSERT INTO migrated VALUES(1);COMMIT;").map_err(storage);
+    result.and(db.execute_batch("DETACH DATABASE source").map_err(storage))
+}
+impl Channels {
+    pub fn open(root: &Path) -> Result<Self, Error> {
+        let path = root.join("channel-index.sqlite");
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+            .open(&path)?;
+        let db = Connection::open(path).map_err(storage)?;
+        channel_schema(&db)?;
+        migrate_index(&db, &root.join("session-channels.sqlite"))?;
         db.execute("UPDATE scopes SET execution=json_set(execution,'$.status','unknown','$.recoveryReason','CELLS_RESTARTED') WHERE json_extract(execution,'$.status') IN ('running','submitting')",[]).map_err(storage)?;
-        Ok(Self(Mutex::new(db),tokio::sync::watch::channel(0).0,Mutex::new(client_state::open(root)?),tokio::sync::Mutex::new(()),Mutex::new(std::collections::HashSet::new()),std::sync::RwLock::new(None)))
+        Ok(Self(
+            Mutex::new(db),
+            tokio::sync::watch::channel(0).0,
+            client_stores::ClientStores::open(root)?,
+            Default::default(),
+            Mutex::new(std::collections::HashSet::new()),
+            std::sync::RwLock::new(None),
+            bodies::Bodies::open(root)?,
+            Default::default(),
+        ))
     }
-    pub fn set_endpoint(&self,endpoint:Option<String>)->Result<(),Error> {
-        *self.5.write().map_err(storage)?=endpoint;Ok(())
+    fn scope_lock<T>(
+        &self,
+        project: &str,
+        scope: &str,
+        work: impl FnOnce() -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let cwd: Option<String> = self
+            .0
+            .lock()
+            .map_err(storage)?
+            .query_row(
+                "SELECT cwd FROM scopes WHERE project=?1 AND id=?2",
+                params![project, scope],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        self.7.with(
+            &json!([project, cwd.unwrap_or_else(|| format!("scope:{scope}"))]).to_string(),
+            work,
+        )
     }
-    fn touch(&self) {self.1.send_modify(|revision|*revision=revision.wrapping_add(1));}
-    pub fn watch(&self) -> tokio::sync::watch::Receiver<u64> {self.1.subscribe()}
-    pub fn revision(&self, project:&str,scope:&str)->Result<String,Error> {
-        self.0.lock().map_err(storage)?.query_row("SELECT COALESCE((SELECT MAX(seq) FROM messages WHERE project=?1 AND scope=?2),0)+(SELECT COUNT(ack) FROM messages WHERE project=?1 AND scope=?2)+(SELECT COUNT(*)+COUNT(response) FROM exchanges WHERE project=?1 AND scope=?2),COALESCE(json_extract(execution,'$.revision'),0),closed FROM scopes WHERE project=?1 AND id=?2",params![project,scope],|r|Ok(format!("{}:{}:{}",r.get::<_,u64>(0)?,r.get::<_,u64>(1)?,r.get::<_,u64>(2)?))).optional().map_err(storage)?.ok_or_else(||Error::not_found("CHANNEL_SCOPE_UNKNOWN"))
+    fn session_lock<T>(
+        &self,
+        project: &str,
+        session: &str,
+        work: impl FnOnce() -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let cwd:Option<String>=self.0.lock().map_err(storage)?.query_row("SELECT cwd FROM scopes WHERE project=?1 AND json_extract(execution,'$.sessionId')=?2 AND closed=0 ORDER BY rowid DESC LIMIT 1",params![project,session],|r|r.get(0)).optional().map_err(storage)?;
+        self.7.with(
+            &json!([project, cwd.unwrap_or_else(|| format!("session:{session}"))]).to_string(),
+            work,
+        )
+    }
+    pub fn set_endpoint(&self, endpoint: Option<String>) -> Result<(), Error> {
+        *self.5.write().map_err(storage)? = endpoint;
+        Ok(())
+    }
+    fn touch(&self) {
+        self.1
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
+    }
+    pub fn watch(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.1.subscribe()
+    }
+    pub fn revision(&self, project: &str, scope: &str) -> Result<String, Error> {
+        self.scope_lock(project, scope, || self.revision_inner(project, scope))
+    }
+    fn revision_inner(&self, project: &str, scope: &str) -> Result<String, Error> {
+        let (revision,closed):(u64,bool)=self.0.lock().map_err(storage)?.query_row("SELECT COALESCE(json_extract(execution,'$.revision'),0),closed FROM scopes WHERE project=?1 AND id=?2",params![project,scope],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(storage)?.ok_or_else(||Error::not_found("CHANNEL_SCOPE_UNKNOWN"))?;
+        self.6.scope(project,scope,|db|{
+            let messages:u64=db.query_row("SELECT COALESCE(MAX(seq),0)+COUNT(ack) FROM messages WHERE project=?1 AND scope=?2",params![project,scope],|r|r.get(0)).map_err(storage)?;
+            let exchanges:u64=db.query_row("SELECT COUNT(*)+COUNT(response) FROM exchanges WHERE project=?1 AND scope=?2",params![project,scope],|r|r.get(0)).map_err(storage)?;
+            Ok(format!("{}:{revision}:{}",messages+exchanges,u8::from(closed)))
+        })
     }
     pub fn create(&self, project: &str, args: &Value) -> Result<Value, Error> {
+        self.7.with(&json!([project, args["cwd"]]).to_string(), || {
+            self.create_inner(project, args)
+        })
+    }
+    fn create_inner(&self, project: &str, args: &Value) -> Result<Value, Error> {
         let id = identifier(args, "scopeId")?;
-        let ttl=args.get("ttlMs").map(|v|v.as_i64().filter(|n|(60_000..=2_592_000_000).contains(n)).ok_or_else(Error::invalid)).transpose()?.unwrap_or(604_800_000);
-        let expires=chrono::Utc::now().timestamp_millis()+ttl;
+        let ttl = args
+            .get("ttlMs")
+            .map(|v| {
+                v.as_i64()
+                    .filter(|n| (60_000..=2_592_000_000).contains(n))
+                    .ok_or_else(Error::invalid)
+            })
+            .transpose()?
+            .unwrap_or(604_800_000);
+        let expires = chrono::Utc::now().timestamp_millis() + ttl;
         let snapshot = serde_json::to_string(&args["snapshot"]).map_err(storage)?;
-        if snapshot.len() > 2 * 1024 * 1024 || !args["snapshot"].is_object() { return Err(Error::too_large("CHANNEL_CONTEXT_LIMIT")); }
-        if args["snapshot"].as_object().unwrap().values().any(|v|v.to_string().len()>65536) {return Err(Error::too_large("CHANNEL_SECTION_LIMIT"));}
+        if snapshot.len() > 2 * 1024 * 1024 || !args["snapshot"].is_object() {
+            return Err(Error::too_large("CHANNEL_CONTEXT_LIMIT"));
+        }
+        if args["snapshot"]
+            .as_object()
+            .unwrap()
+            .values()
+            .any(|v| v.to_string().len() > 65536)
+        {
+            return Err(Error::too_large("CHANNEL_SECTION_LIMIT"));
+        }
         let cwd = args["cwd"].as_str().ok_or_else(Error::invalid)?;
         let endpoint = args.get("endpoint").and_then(Value::as_str).unwrap_or("");
-        if cwd.len() > 4096 || endpoint.len() > 2048 {return Err(Error::invalid());}
+        if cwd.len() > 4096 || endpoint.len() > 2048 {
+            return Err(Error::invalid());
+        }
+        self.6.put_snapshot(project, id, &snapshot)?;
+        use sha2::Digest;
+        let snapshot = format!("{:x}", sha2::Sha256::digest(snapshot.as_bytes()));
         let mut connection = self.0.lock().map_err(storage)?;
         let db = connection.transaction().map_err(storage)?;
-        let existing: Option<(String, String, String, bool)> = db.query_row("SELECT snapshot,cwd,endpoint,closed FROM scopes WHERE project=?1 AND id=?2", params![project,id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(storage)?;
+        let existing: Option<(String, String, String, bool)> = db
+            .query_row(
+                "SELECT snapshot,cwd,endpoint,closed FROM scopes WHERE project=?1 AND id=?2",
+                params![project, id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()
+            .map_err(storage)?;
         if let Some(previous) = existing {
-            if previous.3 {return Err(Error::conflict("CHANNEL_SCOPE_CLOSED"));}
-            if (previous.0,previous.1) != (snapshot, cwd.into()) { return Err(Error::conflict("CHANNEL_SCOPE_CHANGED")); }
+            if previous.3 {
+                return Err(Error::conflict("CHANNEL_SCOPE_CLOSED"));
+            }
+            if previous.1 != cwd {
+                return Err(Error::conflict("CHANNEL_SCOPE_CHANGED"));
+            }
         } else {
-            let execution = replace_scope(&db,project,cwd,args)?;
-            let mut bytes = [0u8; 32]; getrandom::getrandom(&mut bytes).map_err(storage)?;
+            let execution = replace_scope(&db, project, cwd, args)?;
+            let mut bytes = [0u8; 32];
+            getrandom::getrandom(&mut bytes).map_err(storage)?;
             let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
             db.execute("INSERT INTO scopes(project,id,token,cwd,endpoint,snapshot,execution,expires_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)", params![project,id,token,cwd,endpoint,snapshot,execution.to_string(),expires]).map_err(storage)?;
         }
-        db.commit().map_err(storage)?; self.touch();
+        db.commit().map_err(storage)?;
+        self.touch();
         Ok(json!({"scopeId":id,"accepted":true}))
     }
-    pub fn config(&self, project: &str, cwd: &str, owner:&str) -> Result<Option<Value>, Error> {
+    pub fn config(&self, project: &str, cwd: &str, owner: &str) -> Result<Option<Value>, Error> {
         let db = self.0.lock().map_err(storage)?;
         let rows: Vec<(String,String)> = db.prepare("SELECT token,endpoint FROM scopes WHERE project=?1 AND cwd=?2 AND closed=0 AND expires_at>unixepoch()*1000 ORDER BY rowid DESC LIMIT 2").map_err(storage)?
             .query_map(params![project,cwd], |r| Ok((r.get(0)?,r.get(1)?))).map_err(storage)?.collect::<Result<_,_>>().map_err(storage)?;
-        if rows.len() > 1 {return Err(Error::conflict("CHANNEL_BINDING_AMBIGUOUS"));}
-        let endpoint=self.5.read().map_err(storage)?.clone();
+        if rows.len() > 1 {
+            return Err(Error::conflict("CHANNEL_BINDING_AMBIGUOUS"));
+        }
+        let endpoint = self.5.read().map_err(storage)?.clone();
         let scoped=rows.first().map(|(token,endpoint_saved)| json!({"features.mcp_2026_07_28":true,"mcp_servers.cells_session":{"url":endpoint.as_ref().unwrap_or(endpoint_saved),"required":true,"default_tools_approval_mode":"approve","enabled_tools":["session_context","session_report","session_receipt","session_request","session_response"],"http_headers":{"Authorization":format!("Bearer {token}")}}}));
-        drop(db);self.agent_config(owner,scoped)
+        drop(db);
+        self.agent_config(owner, scoped)
     }
     /// A conversation outlives its task scope; it must never inherit another Session's capability.
-    pub fn session_config(&self, project:&str,cwd:&str,owner:&str,session:&str)->Result<Value,Error> {
-        match self.bind(project,cwd,session) {
-            Ok(())=>{
-                let mut config=self.config(project,cwd,owner)?.unwrap_or(json!({}));
+    pub fn session_config(
+        &self,
+        project: &str,
+        cwd: &str,
+        owner: &str,
+        session: &str,
+    ) -> Result<Value, Error> {
+        match self.bind(project, cwd, session) {
+            Ok(()) => {
+                let mut config = self.config(project, cwd, owner)?.unwrap_or(json!({}));
                 if config.get("mcp_servers.cells_session").is_none() {
-                    config["mcp_servers.cells_session"]=disabled_channel();
+                    config["mcp_servers.cells_session"] = disabled_channel();
                 }
                 Ok(config)
-            },
-            Err(error) if error.code=="CHANNEL_SESSION_CHANGED"=>{
-                let config=self.agent_config(owner,Some(json!({"mcp_servers.cells_session":disabled_channel()})))?.unwrap();
-                crate::core::events::emit(crate::core::events::Level::Info,"channel.session.detached",
-                    json!({"operationId":session,"projectId":project,"stage":"session-config","result":"success","code":"CHANNEL_SCOPE_REPLACED","elapsedMs":0}));
+            }
+            Err(error) if error.code == "CHANNEL_SESSION_CHANGED" => {
+                let config = self
+                    .agent_config(
+                        owner,
+                        Some(json!({"mcp_servers.cells_session":disabled_channel()})),
+                    )?
+                    .unwrap();
+                crate::core::events::emit(
+                    crate::core::events::Level::Info,
+                    "channel.session.detached",
+                    json!({"operationId":session,"projectId":project,"stage":"session-config","result":"success","code":"CHANNEL_SCOPE_REPLACED","elapsedMs":0}),
+                );
                 Ok(config)
-            },
-            Err(error)=>Err(error),
+            }
+            Err(error) => Err(error),
         }
     }
     pub fn agent(&self, token: &str, method: &str, args: &Value) -> Result<Value, Error> {
-        let mut db = self.0.lock().map_err(storage)?;
-        let tx = db.transaction().map_err(storage)?;
-        let (project, scope, snapshot): (String,String,String) = tx.query_row("SELECT project,id,snapshot FROM scopes WHERE token=?1 AND closed=0 AND expires_at>unixepoch()*1000", [token], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(storage)?.ok_or_else(Error::unauthenticated)?;
+        let (project,cwd):(String,String)=self.0.lock().map_err(storage)?.query_row("SELECT project,cwd FROM scopes WHERE token=?1 AND closed=0 AND expires_at>unixepoch()*1000",[token],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(storage)?.ok_or_else(Error::unauthenticated)?;
+        self.7.with(&json!([project, cwd]).to_string(), || {
+            self.agent_inner(token, method, args)
+        })
+    }
+    fn agent_inner(&self, token: &str, method: &str, args: &Value) -> Result<Value, Error> {
+        let (project, scope, execution): (String, String, String) = {
+            let db = self.0.lock().map_err(storage)?;
+            db.query_row("SELECT project,id,execution FROM scopes WHERE token=?1 AND closed=0 AND expires_at>unixepoch()*1000",[token],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(storage)?.ok_or_else(Error::unauthenticated)?
+        };
+        self.6.scope(&project,&scope,|db|{
+        let tx=db.transaction().map_err(storage)?;
+        tx.execute("INSERT INTO scopes(project,id,execution,expires_at) VALUES(?1,?2,?3,0) ON CONFLICT(project,id) DO UPDATE SET execution=excluded.execution",params![project,scope,execution]).map_err(storage)?;
+        let snapshot:String=tx.query_row("SELECT body FROM snapshots WHERE project=?1 AND scope=?2",params![project,scope],|r|r.get(0)).map_err(storage)?;
         let result = match method {
             "session_context" => {
                 let section = args["section"].as_str().unwrap_or("index");
@@ -113,26 +278,68 @@ impl Channels {
             }
             _ => return Err(Error::unsupported()),
         };
-        tx.commit().map_err(storage)?; if ["session_report","session_request"].contains(&method) {self.touch();} Ok(result)
+        tx.commit().map_err(storage)?; if ["session_report","session_request"].contains(&method) {self.touch();} Ok(result)})
     }
-    pub fn requests(&self,project:&str,scope:&str)->Result<Value,Error> {
-        exchange::list(&*self.0.lock().map_err(storage)?,project,scope)
+    pub fn requests(&self, project: &str, scope: &str) -> Result<Value, Error> {
+        self.scope_lock(project, scope, || self.requests_inner(project, scope))
     }
-    pub fn respond(&self,project:&str,scope:&str,args:&Value)->Result<Value,Error> {
-        let result=exchange::respond(&*self.0.lock().map_err(storage)?,project,scope,args)?;
-        self.touch();Ok(result)
+    fn requests_inner(&self, project: &str, scope: &str) -> Result<Value, Error> {
+        self.6
+            .scope(project, scope, |db| exchange::list(db, project, scope))
     }
-    pub fn current(&self,project:&str,cwd:&str)->Result<Value,Error> {
+    pub fn respond(&self, project: &str, scope: &str, args: &Value) -> Result<Value, Error> {
+        self.scope_lock(project, scope, || self.respond_inner(project, scope, args))
+    }
+    fn respond_inner(&self, project: &str, scope: &str, args: &Value) -> Result<Value, Error> {
+        let result = self.6.scope(project, scope, |db| {
+            exchange::respond(db, project, scope, args)
+        })?;
+        self.touch();
+        Ok(result)
+    }
+    pub fn current(&self, project: &str, cwd: &str) -> Result<Value, Error> {
         self.0.lock().map_err(storage)?.query_row("SELECT id,execution FROM scopes WHERE project=?1 AND cwd=?2 AND closed=0",params![project,cwd],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).optional().map_err(storage)?.map(|(id,execution)|Ok(json!({"scopeId":id,"execution":serde_json::from_str::<Value>(&execution).map_err(storage)?}))).unwrap_or_else(||Err(Error::not_found("CHANNEL_SCOPE_UNKNOWN")))
     }
-    pub fn acknowledge(&self,project:&str,scope:&str,args:&Value)->Result<Value,Error> {
-        let id=identifier(args,"id")?;let raw=args["ack"].to_string();
-        if raw.len()>65536 || !args["ack"].is_object() {return Err(Error::invalid());}
-        let mut connection=self.0.lock().map_err(storage)?;let db=connection.transaction().map_err(storage)?;
-        let previous:Option<Option<String>>=db.query_row("SELECT ack FROM messages WHERE project=?1 AND scope=?2 AND id=?3",params![project,scope,id],|r|r.get(0)).optional().map_err(storage)?;
-        match previous {None=>return Err(Error::not_found("CHANNEL_MESSAGE_UNKNOWN")),Some(Some(previous))=>{if previous!=raw{return Err(Error::conflict("CHANNEL_ACK_CHANGED"));}return Ok(json!({"id":id,"acknowledged":true}));},_=>()}
-        db.execute("UPDATE messages SET ack=?4 WHERE project=?1 AND scope=?2 AND id=?3",params![project,scope,id,raw]).map_err(storage)?;
-        db.commit().map_err(storage)?;self.touch();Ok(json!({"id":id,"acknowledged":true}))
+    pub fn acknowledge(&self, project: &str, scope: &str, args: &Value) -> Result<Value, Error> {
+        self.scope_lock(project, scope, || {
+            self.acknowledge_inner(project, scope, args)
+        })
+    }
+    fn acknowledge_inner(&self, project: &str, scope: &str, args: &Value) -> Result<Value, Error> {
+        let id = identifier(args, "id")?;
+        let raw = args["ack"].to_string();
+        if raw.len() > 65536 || !args["ack"].is_object() {
+            return Err(Error::invalid());
+        }
+        self.6.scope(project, scope, |connection| {
+            let db = connection.transaction().map_err(storage)?;
+            let previous: Option<Option<String>> = db
+                .query_row(
+                    "SELECT ack FROM messages WHERE project=?1 AND scope=?2 AND id=?3",
+                    params![project, scope, id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(storage)?;
+            match previous {
+                None => return Err(Error::not_found("CHANNEL_MESSAGE_UNKNOWN")),
+                Some(Some(previous)) => {
+                    if previous != raw {
+                        return Err(Error::conflict("CHANNEL_ACK_CHANGED"));
+                    }
+                    return Ok(json!({"id":id,"acknowledged":true}));
+                }
+                _ => (),
+            }
+            db.execute(
+                "UPDATE messages SET ack=?4 WHERE project=?1 AND scope=?2 AND id=?3",
+                params![project, scope, id, raw],
+            )
+            .map_err(storage)?;
+            db.commit().map_err(storage)?;
+            self.touch();
+            Ok(json!({"id":id,"acknowledged":true}))
+        })
     }
     pub fn token_project(&self, token: &str) -> Option<String> {
         self.0.lock().ok()?.query_row("SELECT project FROM scopes WHERE token=?1 AND closed=0 AND expires_at>unixepoch()*1000",[token],|r|r.get(0)).optional().ok()?
@@ -141,289 +348,798 @@ impl Channels {
         self.0.lock().ok().and_then(|db| db.query_row("SELECT EXISTS(SELECT 1 FROM scopes WHERE token=?1 AND closed=0 AND expires_at>unixepoch()*1000)",[token],|r|r.get::<_,bool>(0)).ok()).unwrap_or(false)
     }
     pub fn list(&self, project: &str, scope: &str) -> Result<Value, Error> {
-        let db = self.0.lock().map_err(storage)?;
+        self.scope_lock(project, scope, || self.list_inner(project, scope))
+    }
+    fn list_inner(&self, project: &str, scope: &str) -> Result<Value, Error> {
+        let execution: Option<String> = self
+            .0
+            .lock()
+            .map_err(storage)?
+            .query_row(
+                "SELECT execution FROM scopes WHERE project=?1 AND id=?2",
+                params![project, scope],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        self.6.scope(project,scope,|db|{
         let mut stmt = db.prepare("SELECT m.id,m.body,p.origin FROM messages m LEFT JOIN publications p ON p.project=m.project AND p.scope=m.scope AND p.id=m.id WHERE m.project=?1 AND m.scope=?2 ORDER BY m.seq LIMIT 200").map_err(storage)?;
         let rows = stmt.query_map(params![project,scope],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<String>>(2)?))).map_err(storage)?;
         let mut messages = Vec::new();
         for row in rows {let (id,body,origin) = row.map_err(storage)?; messages.push(json!({"id":id,"message":serde_json::from_str::<Value>(&body).map_err(storage)?,"origin":origin.map(|raw|serde_json::from_str::<Value>(&raw)).transpose().map_err(storage)?}));}
-        let execution:Option<String>=db.query_row("SELECT execution FROM scopes WHERE project=?1 AND id=?2",params![project,scope],|r|r.get(0)).optional().map_err(storage)?;
-        Ok(json!({"messages":messages,"execution":execution.and_then(|s|serde_json::from_str::<Value>(&s).ok())}))
+        Ok(json!({"messages":messages,"execution":execution.and_then(|s|serde_json::from_str::<Value>(&s).ok())}))})
     }
-    pub fn session_execution(&self,project:&str,session:&str)->Result<Option<Value>,Error> {
+    pub fn session_execution(&self, project: &str, session: &str) -> Result<Option<Value>, Error> {
         let raw:Option<String>=self.0.lock().map_err(storage)?.query_row("SELECT execution FROM scopes WHERE project=?1 AND json_extract(execution,'$.sessionId')=?2 AND closed=0",params![project,session],|r|r.get(0)).optional().map_err(storage)?;
-        raw.map(|s|serde_json::from_str(&s).map_err(storage)).transpose()
+        raw.map(|s| serde_json::from_str(&s).map_err(storage))
+            .transpose()
     }
-    pub fn bind(&self, project: &str, cwd: &str, session: &str) -> Result<(),Error> {
-        let value=json!({"sessionId":session,"status":"idle","revision":1});
-        let db=self.0.lock().map_err(storage)?;
+    pub fn bind(&self, project: &str, cwd: &str, session: &str) -> Result<(), Error> {
+        self.7.with(&json!([project, cwd]).to_string(), || {
+            self.bind_inner(project, cwd, session)
+        })
+    }
+    fn bind_inner(&self, project: &str, cwd: &str, session: &str) -> Result<(), Error> {
+        let value = json!({"sessionId":session,"status":"idle","revision":1});
+        let db = self.0.lock().map_err(storage)?;
         let existing:Option<Option<String>>=db.query_row("SELECT json_extract(execution,'$.sessionId') FROM scopes WHERE project=?1 AND cwd=?2 AND closed=0",params![project,cwd],|r|r.get(0)).optional().map_err(storage)?;
-        if existing.flatten().is_some_and(|id|id!=session) {return Err(Error::conflict("CHANNEL_SESSION_CHANGED"));}
+        if existing.flatten().is_some_and(|id| id != session) {
+            return Err(Error::conflict("CHANNEL_SESSION_CHANGED"));
+        }
         let changed=db.execute("UPDATE scopes SET execution=?3 WHERE project=?1 AND cwd=?2 AND closed=0 AND json_extract(execution,'$.sessionId') IS NULL",params![project,cwd,value.to_string()]).map_err(storage)?;
-        if changed>0 {self.touch();} Ok(())
+        if changed > 0 {
+            self.touch();
+        }
+        Ok(())
     }
-    pub fn project_context(&self,project:&str,cwd:Option<&str>,session:Option<&str>)->Result<Option<Value>,Error> {
-        let raw:Option<String>=self.0.lock().map_err(storage)?.query_row(
-            "SELECT json_extract(snapshot,'$.\"project-context\"') FROM scopes WHERE project=?1 AND json_type(snapshot,'$.\"project-context\"')='object' AND ((?3 IS NOT NULL AND json_extract(execution,'$.sessionId')=?3) OR (?3 IS NULL AND cwd=?2)) ORDER BY closed ASC,rowid DESC LIMIT 1",
-            params![project,cwd,session],|row|row.get(0)).optional().map_err(storage)?;
-        raw.map(|text|serde_json::from_str(&text).map_err(storage)).transpose()
+    pub fn project_context(
+        &self,
+        project: &str,
+        cwd: Option<&str>,
+        session: Option<&str>,
+    ) -> Result<Option<Value>, Error> {
+        let ids: Vec<String> = {
+            let db = self.0.lock().map_err(storage)?;
+            let mut statement=db.prepare("SELECT id FROM scopes WHERE project=?1 AND ((?3 IS NOT NULL AND json_extract(execution,'$.sessionId')=?3) OR (?3 IS NULL AND cwd=?2)) ORDER BY closed ASC,rowid DESC").map_err(storage)?;
+            let rows = statement
+                .query_map(params![project, cwd, session], |r| r.get(0))
+                .map_err(storage)?;
+            rows.collect::<Result<_, _>>().map_err(storage)?
+        };
+        for id in ids {
+            let snapshot = self.6.snapshot(project, &id)?;
+            if snapshot["project-context"].is_object() {
+                return Ok(Some(snapshot["project-context"].clone()));
+            }
+        }
+        Ok(None)
     }
-    pub fn prepare_turn(&self,project:&str,session:&str,operation:&str)->Result<(),Error> {
-        let Some(mut value)=self.session_execution(project,session)? else {return Ok(());};
-        if value["turnId"].is_string() {value["previousTurnId"]=value["turnId"].clone();} value["turnId"]=Value::Null;
-        value["operationId"]=json!(operation);value["status"]=json!("submitting");
-        value["revision"]=json!(value["revision"].as_u64().unwrap_or(0)+1);
+    pub fn prepare_turn(&self, project: &str, session: &str, operation: &str) -> Result<(), Error> {
+        self.session_lock(project, session, || {
+            self.prepare_turn_inner(project, session, operation)
+        })
+    }
+    fn prepare_turn_inner(
+        &self,
+        project: &str,
+        session: &str,
+        operation: &str,
+    ) -> Result<(), Error> {
+        let Some(mut value) = self.session_execution(project, session)? else {
+            return Ok(());
+        };
+        if value["turnId"].is_string() {
+            value["previousTurnId"] = value["turnId"].clone();
+        }
+        value["turnId"] = Value::Null;
+        value["operationId"] = json!(operation);
+        value["status"] = json!("submitting");
+        value["revision"] = json!(value["revision"].as_u64().unwrap_or(0) + 1);
         self.0.lock().map_err(storage)?.execute("UPDATE scopes SET execution=?3 WHERE project=?1 AND json_extract(execution,'$.sessionId')=?2 AND closed=0",params![project,session,value.to_string()]).map_err(storage)?;
-        self.touch();Ok(())
+        self.touch();
+        Ok(())
     }
-    pub fn submission_failed(&self,project:&str,session:&str,operation:&str,error:&Error)->Result<(),Error> {
-        let status=if matches!(error.code,"EIO"|"ETIMEDOUT"){"unknown"}else{"rejected"};
+    pub fn submission_failed(
+        &self,
+        project: &str,
+        session: &str,
+        operation: &str,
+        error: &Error,
+    ) -> Result<(), Error> {
+        self.session_lock(project, session, || {
+            self.submission_failed_inner(project, session, operation, error)
+        })
+    }
+    fn submission_failed_inner(
+        &self,
+        project: &str,
+        session: &str,
+        operation: &str,
+        error: &Error,
+    ) -> Result<(), Error> {
+        let status = if matches!(error.code, "EIO" | "ETIMEDOUT") {
+            "unknown"
+        } else {
+            "rejected"
+        };
         self.0.lock().map_err(storage)?.execute("UPDATE scopes SET execution=json_set(execution,'$.status',?4,'$.errorCode',?5,'$.revision',COALESCE(json_extract(execution,'$.revision'),0)+1) WHERE project=?1 AND json_extract(execution,'$.sessionId')=?2 AND json_extract(execution,'$.operationId')=?3 AND closed=0",params![project,session,operation,status,error.code]).map_err(storage)?;
-        self.touch();Ok(())
+        self.touch();
+        Ok(())
     }
-    pub fn observe(&self, project: &str, message: &Value) -> Result<(),Error> {
-        let session=message["params"]["threadId"].as_str().unwrap_or("");
-        let method=message["method"].as_str().unwrap_or("");
-        if !["turn/started","turn/completed","harness/disconnected"].contains(&method) {return Ok(());}
-        let mut db=self.0.lock().map_err(storage)?; let tx=db.transaction().map_err(storage)?;
+    pub fn observe(&self, project: &str, message: &Value) -> Result<(), Error> {
+        let session = message["params"]["threadId"].as_str().unwrap_or("");
+        self.session_lock(project, session, || self.observe_inner(project, message))
+    }
+    fn observe_inner(&self, project: &str, message: &Value) -> Result<(), Error> {
+        let session = message["params"]["threadId"].as_str().unwrap_or("");
+        let method = message["method"].as_str().unwrap_or("");
+        if !["turn/started", "turn/completed", "harness/disconnected"].contains(&method) {
+            return Ok(());
+        }
+        let mut db = self.0.lock().map_err(storage)?;
+        let tx = db.transaction().map_err(storage)?;
         let old:Option<(String,String)>=tx.query_row("SELECT id,execution FROM scopes WHERE project=?1 AND json_extract(execution,'$.sessionId')=?2 AND closed=0 ORDER BY rowid DESC LIMIT 1",params![project,session],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(storage)?;
-        if let Some((scope,raw))=old {
-            let mut value:Value=serde_json::from_str(&raw).map_err(storage)?;
-            let turn=&message["params"]["turn"];
-            if value["previousTurnId"].is_string() && value["previousTurnId"]==turn["id"] {return Ok(());}
-            if method=="turn/completed" && value["turnId"].is_string() && value["turnId"]!=turn["id"] {return Ok(());}
-            value["status"]=json!(if method=="turn/started" {"running"} else if method=="harness/disconnected" {"unknown"} else {turn["status"].as_str().unwrap_or("unknown")});
-            if turn["id"].is_string() {value["turnId"]=turn["id"].clone();}
-            value["revision"]=json!(value["revision"].as_u64().unwrap_or(0)+1);
-            value["observedAt"]=json!(chrono::Utc::now().timestamp_millis());
-            tx.execute("UPDATE scopes SET execution=?3 WHERE project=?1 AND id=?2",params![project,scope,value.to_string()]).map_err(storage)?;
+        if let Some((scope, raw)) = old {
+            let mut value: Value = serde_json::from_str(&raw).map_err(storage)?;
+            let turn = &message["params"]["turn"];
+            if value["previousTurnId"].is_string() && value["previousTurnId"] == turn["id"] {
+                return Ok(());
+            }
+            if method == "turn/completed"
+                && value["turnId"].is_string()
+                && value["turnId"] != turn["id"]
+            {
+                return Ok(());
+            }
+            value["status"] = json!(if method == "turn/started" {
+                "running"
+            } else if method == "harness/disconnected" {
+                "unknown"
+            } else {
+                turn["status"].as_str().unwrap_or("unknown")
+            });
+            if turn["id"].is_string() {
+                value["turnId"] = turn["id"].clone();
+            }
+            value["revision"] = json!(value["revision"].as_u64().unwrap_or(0) + 1);
+            value["observedAt"] = json!(chrono::Utc::now().timestamp_millis());
+            tx.execute(
+                "UPDATE scopes SET execution=?3 WHERE project=?1 AND id=?2",
+                params![project, scope, value.to_string()],
+            )
+            .map_err(storage)?;
         }
-        tx.commit().map_err(storage)?; self.touch(); Ok(())
+        tx.commit().map_err(storage)?;
+        self.touch();
+        Ok(())
     }
-    pub fn close_idle(&self, project:&str, scope:&str, args:&Value)->Result<Value,Error> {
-        let mut db=self.0.lock().map_err(storage)?;let tx=db.transaction().map_err(storage)?;
-        let row:Option<(String,bool)>=tx.query_row("SELECT execution,closed FROM scopes WHERE project=?1 AND id=?2",params![project,scope],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(storage)?;
-        let Some((raw,closed))=row else {return Err(Error::not_found("CHANNEL_SCOPE_UNKNOWN"));};
+    pub fn close_idle(&self, project: &str, scope: &str, args: &Value) -> Result<Value, Error> {
+        self.scope_lock(project, scope, || {
+            self.close_idle_inner(project, scope, args)
+        })
+    }
+    fn close_idle_inner(&self, project: &str, scope: &str, args: &Value) -> Result<Value, Error> {
+        let mut db = self.0.lock().map_err(storage)?;
+        let tx = db.transaction().map_err(storage)?;
+        let row: Option<(String, bool)> = tx
+            .query_row(
+                "SELECT execution,closed FROM scopes WHERE project=?1 AND id=?2",
+                params![project, scope],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(storage)?;
+        let Some((raw, closed)) = row else {
+            return Err(Error::not_found("CHANNEL_SCOPE_UNKNOWN"));
+        };
         if !closed {
-            let execution:Value=serde_json::from_str(&raw).map_err(storage)?;
-            if !["completed","failed","interrupted","cancelled","rejected","idle"].contains(&execution["status"].as_str().unwrap_or("")) {return Err(Error::busy());}
-            if args["expectedExecutionRevision"]!=execution["revision"] {return Err(Error::conflict("CHANNEL_EXECUTION_CHANGED"));}
-            tx.execute("UPDATE scopes SET closed=1 WHERE project=?1 AND id=?2",params![project,scope]).map_err(storage)?;
+            let execution: Value = serde_json::from_str(&raw).map_err(storage)?;
+            if ![
+                "completed",
+                "failed",
+                "interrupted",
+                "cancelled",
+                "rejected",
+                "idle",
+            ]
+            .contains(&execution["status"].as_str().unwrap_or(""))
+            {
+                return Err(Error::busy());
+            }
+            if args["expectedExecutionRevision"] != execution["revision"] {
+                return Err(Error::conflict("CHANNEL_EXECUTION_CHANGED"));
+            }
+            tx.execute(
+                "UPDATE scopes SET closed=1 WHERE project=?1 AND id=?2",
+                params![project, scope],
+            )
+            .map_err(storage)?;
         }
-        tx.commit().map_err(storage)?;self.touch();Ok(json!({"closed":true}))
+        tx.commit().map_err(storage)?;
+        self.touch();
+        Ok(json!({"closed":true}))
     }
     pub fn close(&self, project: &str, scope: &str) -> Result<Value, Error> {
-        self.0.lock().map_err(storage)?.execute("UPDATE scopes SET closed=1 WHERE project=?1 AND id=?2",params![project,scope]).map_err(storage)?;
-        self.touch(); Ok(json!({"closed":true}))
+        self.scope_lock(project, scope, || self.close_inner(project, scope))
+    }
+    fn close_inner(&self, project: &str, scope: &str) -> Result<Value, Error> {
+        self.0
+            .lock()
+            .map_err(storage)?
+            .execute(
+                "UPDATE scopes SET closed=1 WHERE project=?1 AND id=?2",
+                params![project, scope],
+            )
+            .map_err(storage)?;
+        self.touch();
+        Ok(json!({"closed":true}))
     }
 }
-fn disabled_channel()->Value {json!({"url":"http://127.0.0.1","enabled":false,"required":false,"enabled_tools":[]})}
-fn replace_scope(db:&rusqlite::Transaction,project:&str,cwd:&str,args:&Value)->Result<Value,Error> {
-    let active:Option<(String,String)>=db.query_row("SELECT id,execution FROM scopes WHERE project=?1 AND cwd=?2 AND closed=0",params![project,cwd],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(storage)?;
-    let Some((id,raw))=active else {
-        if args.get("previousScopeId").is_some() {return Err(Error::conflict("CHANNEL_PREDECESSOR_MISSING"));}
+fn disabled_channel() -> Value {
+    json!({"url":"http://127.0.0.1","enabled":false,"required":false,"enabled_tools":[]})
+}
+fn replace_scope(
+    db: &rusqlite::Transaction,
+    project: &str,
+    cwd: &str,
+    args: &Value,
+) -> Result<Value, Error> {
+    let active: Option<(String, String)> = db
+        .query_row(
+            "SELECT id,execution FROM scopes WHERE project=?1 AND cwd=?2 AND closed=0",
+            params![project, cwd],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(storage)?;
+    let Some((id, raw)) = active else {
+        if args.get("previousScopeId").is_some() {
+            return Err(Error::conflict("CHANNEL_PREDECESSOR_MISSING"));
+        }
         return Ok(json!({}));
     };
-    if args["previousScopeId"].as_str()!=Some(&id) {return Err(Error::conflict("CHANNEL_PREDECESSOR_CHANGED"));}
-    let execution:Value=serde_json::from_str(&raw).map_err(storage)?;
-    let unsubmitted=execution["status"]=="idle" && execution["operationId"].is_null() && execution["turnId"].is_null();
-    if !unsubmitted && !["completed","failed","interrupted","cancelled","rejected"].contains(&execution["status"].as_str().unwrap_or("")) {return Err(Error::busy());}
-    if !args["previousSessionId"].is_string() || args["previousSessionId"]!=execution["sessionId"] {return Err(Error::conflict("CHANNEL_SESSION_CHANGED"));}
-    db.execute("UPDATE scopes SET closed=1 WHERE project=?1 AND id=?2",params![project,id]).map_err(storage)?;
-    Ok(json!({"sessionId":args["sessionId"],"previousTurnId":if args["sessionId"]==execution["sessionId"] {execution["turnId"].clone()}else{Value::Null},"status":"idle","revision":1}))
+    if args["previousScopeId"].as_str() != Some(&id) {
+        return Err(Error::conflict("CHANNEL_PREDECESSOR_CHANGED"));
+    }
+    let execution: Value = serde_json::from_str(&raw).map_err(storage)?;
+    let unsubmitted = execution["status"] == "idle"
+        && execution["operationId"].is_null()
+        && execution["turnId"].is_null();
+    if !unsubmitted
+        && ![
+            "completed",
+            "failed",
+            "interrupted",
+            "cancelled",
+            "rejected",
+        ]
+        .contains(&execution["status"].as_str().unwrap_or(""))
+    {
+        return Err(Error::busy());
+    }
+    if !args["previousSessionId"].is_string() || args["previousSessionId"] != execution["sessionId"]
+    {
+        return Err(Error::conflict("CHANNEL_SESSION_CHANGED"));
+    }
+    db.execute(
+        "UPDATE scopes SET closed=1 WHERE project=?1 AND id=?2",
+        params![project, id],
+    )
+    .map_err(storage)?;
+    Ok(
+        json!({"sessionId":args["sessionId"],"previousTurnId":if args["sessionId"]==execution["sessionId"] {execution["turnId"].clone()}else{Value::Null},"status":"idle","revision":1}),
+    )
 }
 
-fn channel_status(db:&rusqlite::Transaction,project:&str,scope:&str)->Result<Value,Error> {
-    let mut stmt=db.prepare("SELECT id,body,ack FROM messages WHERE project=?1 AND scope=?2 ORDER BY seq LIMIT 200").map_err(storage)?;
-    let rows=stmt.query_map(params![project,scope],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,Option<String>>(2)?))).map_err(storage)?;
-    let mut messages=Vec::new();
-    for row in rows {let(id,raw,ack)=row.map_err(storage)?;let body:Value=serde_json::from_str(&raw).map_err(storage)?;
-        messages.push(json!({"id":id,"type":body["type"],"replyTo":body["replyTo"],"ack":ack.map(|v|serde_json::from_str::<Value>(&v)).transpose().map_err(storage)?}));}
+fn channel_status(db: &rusqlite::Transaction, project: &str, scope: &str) -> Result<Value, Error> {
+    let mut stmt = db
+        .prepare(
+            "SELECT id,body,ack FROM messages WHERE project=?1 AND scope=?2 ORDER BY seq LIMIT 200",
+        )
+        .map_err(storage)?;
+    let rows = stmt
+        .query_map(params![project, scope], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })
+        .map_err(storage)?;
+    let mut messages = Vec::new();
+    for row in rows {
+        let (id, raw, ack) = row.map_err(storage)?;
+        let body: Value = serde_json::from_str(&raw).map_err(storage)?;
+        messages.push(json!({"id":id,"type":body["type"],"replyTo":body["replyTo"],"ack":ack.map(|v|serde_json::from_str::<Value>(&v)).transpose().map_err(storage)?}));
+    }
     Ok(json!({"scopeId":scope,"messages":messages}))
 }
 
-fn publish(tx:&rusqlite::Transaction,project:&str,scope:&str,args:&Value)->Result<Value,Error> {
-                let id = identifier(args, "id")?; let message = &args["message"];
-                if !message.is_object() || message.as_object().unwrap().keys().any(|key|!["type","content","payload","replyTo"].contains(&key.as_str()))
-                    || !["progress","clarification","error","result","proposal","resolved"].contains(&message["type"].as_str().unwrap_or(""))
-                    || message["content"].as_str().is_none_or(|s|s.trim().is_empty()||s.chars().count()>8000)
-                    || message.get("replyTo").is_some_and(|v|v.as_str().is_none_or(|s|!crate::core::ids::is_identifier_within(s,128))) {return Err(Error::new(axum::http::StatusCode::BAD_REQUEST,"CHANNEL_MESSAGE_INVALID"));}
-                let body = serde_json::to_string(message).map_err(storage)?;
-                if !message.is_object() || body.len() > 64 * 1024 {return Err(Error::too_large("CHANNEL_MESSAGE_LIMIT"));}
-                let old: Option<String> = tx.query_row("SELECT body FROM messages WHERE project=?1 AND scope=?2 AND id=?3", params![project,scope,id], |r|r.get(0)).optional().map_err(storage)?;
-                if let Some(old) = old {if old != body {return Err(Error::conflict("CHANNEL_REQUEST_CHANGED"));}}
-                else {
-                    let count: u64 = tx.query_row("SELECT COUNT(*) FROM messages WHERE project=?1 AND scope=?2",params![project,scope],|r|r.get(0)).map_err(storage)?;
-                    let bytes:u64=tx.query_row("SELECT COALESCE(SUM(length(body)),0) FROM messages WHERE project=?1 AND scope=?2",params![project,scope],|r|r.get(0)).map_err(storage)?;
-                    if bytes+body.len() as u64>4*1024*1024 {return Err(Error::too_large("CHANNEL_MESSAGE_LIMIT"));}
-                    if count >= 200 {return Err(Error::too_many("CHANNEL_MESSAGE_LIMIT"));}
-                    tx.execute("INSERT INTO messages(project,scope,id,body) VALUES(?1,?2,?3,?4)",params![project,scope,id,body]).map_err(storage)?;
-                    let execution:String=tx.query_row("SELECT execution FROM scopes WHERE project=?1 AND id=?2",params![project,scope],|row|row.get(0)).map_err(storage)?;
-                    let execution:Value=serde_json::from_str(&execution).map_err(storage)?;
-                    let origin=json!({"sessionId":execution["sessionId"],"turnId":execution["turnId"],"operationId":execution["operationId"],"revision":execution["revision"]});
-                    tx.execute("INSERT INTO publications(project,scope,id,origin) VALUES(?1,?2,?3,?4)",params![project,scope,id,origin.to_string()]).map_err(storage)?;
-                }
-                Ok(json!({"id":id,"accepted":true,"scopeId":scope}))
+fn publish(
+    tx: &rusqlite::Transaction,
+    project: &str,
+    scope: &str,
+    args: &Value,
+) -> Result<Value, Error> {
+    let id = identifier(args, "id")?;
+    let message = &args["message"];
+    if !message.is_object()
+        || message
+            .as_object()
+            .unwrap()
+            .keys()
+            .any(|key| !["type", "content", "payload", "replyTo"].contains(&key.as_str()))
+        || ![
+            "progress",
+            "clarification",
+            "error",
+            "result",
+            "proposal",
+            "resolved",
+        ]
+        .contains(&message["type"].as_str().unwrap_or(""))
+        || message["content"]
+            .as_str()
+            .is_none_or(|s| s.trim().is_empty() || s.chars().count() > 8000)
+        || message.get("replyTo").is_some_and(|v| {
+            v.as_str()
+                .is_none_or(|s| !crate::core::ids::is_identifier_within(s, 128))
+        })
+    {
+        return Err(Error::new(
+            axum::http::StatusCode::BAD_REQUEST,
+            "CHANNEL_MESSAGE_INVALID",
+        ));
+    }
+    let body = serde_json::to_string(message).map_err(storage)?;
+    if !message.is_object() || body.len() > 64 * 1024 {
+        return Err(Error::too_large("CHANNEL_MESSAGE_LIMIT"));
+    }
+    let old: Option<String> = tx
+        .query_row(
+            "SELECT body FROM messages WHERE project=?1 AND scope=?2 AND id=?3",
+            params![project, scope, id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(storage)?;
+    if let Some(old) = old {
+        if old != body {
+            return Err(Error::conflict("CHANNEL_REQUEST_CHANGED"));
+        }
+    } else {
+        let count: u64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE project=?1 AND scope=?2",
+                params![project, scope],
+                |r| r.get(0),
+            )
+            .map_err(storage)?;
+        let bytes: u64 = tx
+            .query_row(
+                "SELECT COALESCE(SUM(length(body)),0) FROM messages WHERE project=?1 AND scope=?2",
+                params![project, scope],
+                |r| r.get(0),
+            )
+            .map_err(storage)?;
+        if bytes + body.len() as u64 > 4 * 1024 * 1024 {
+            return Err(Error::too_large("CHANNEL_MESSAGE_LIMIT"));
+        }
+        if count >= 200 {
+            return Err(Error::too_many("CHANNEL_MESSAGE_LIMIT"));
+        }
+        tx.execute(
+            "INSERT INTO messages(project,scope,id,body) VALUES(?1,?2,?3,?4)",
+            params![project, scope, id, body],
+        )
+        .map_err(storage)?;
+        let execution: String = tx
+            .query_row(
+                "SELECT execution FROM scopes WHERE project=?1 AND id=?2",
+                params![project, scope],
+                |row| row.get(0),
+            )
+            .map_err(storage)?;
+        let execution: Value = serde_json::from_str(&execution).map_err(storage)?;
+        let origin = json!({"sessionId":execution["sessionId"],"turnId":execution["turnId"],"operationId":execution["operationId"],"revision":execution["revision"]});
+        tx.execute(
+            "INSERT INTO publications(project,scope,id,origin) VALUES(?1,?2,?3,?4)",
+            params![project, scope, id, origin.to_string()],
+        )
+        .map_err(storage)?;
+    }
+    Ok(json!({"id":id,"accepted":true,"scopeId":scope}))
 }
 
-fn identifier<'a>(args: &'a Value, key: &str) -> Result<&'a str,Error> {
-    args[key].as_str().filter(|s|crate::core::ids::is_identifier_within(s,128)).ok_or_else(Error::invalid)
+fn identifier<'a>(args: &'a Value, key: &str) -> Result<&'a str, Error> {
+    args[key]
+        .as_str()
+        .filter(|s| crate::core::ids::is_identifier_within(s, 128))
+        .ok_or_else(Error::invalid)
 }
 #[track_caller]
 fn storage<T>(_: T) -> Error {
     let caller = std::panic::Location::caller();
-    crate::core::events::emit(crate::core::events::Level::Warn, "channel.storage.failed",
+    crate::core::events::emit(
+        crate::core::events::Level::Warn,
+        "channel.storage.failed",
         json!({"operation":"channel.storage","stage":"persist","result":"failure","code":"CHANNEL_STORAGE",
-        "errorType":std::any::type_name::<T>(),"source":caller.file(),"line":caller.line()}));
-    Error::new(axum::http::StatusCode::SERVICE_UNAVAILABLE,"CHANNEL_STORAGE")
+        "errorType":std::any::type_name::<T>(),"source":caller.file(),"line":caller.line()}),
+    );
+    Error::new(
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "CHANNEL_STORAGE",
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn args() -> Value {json!({"scopeId":"attempt-1","cwd":"/projects/p/work","endpoint":"http://localhost/v1/channel/mcp","snapshot":{"task":{"title":"test"}}})}
-    fn token(store:&Channels)->String {store.0.lock().unwrap().query_row("SELECT token FROM scopes",[],|r|r.get(0)).unwrap()}
+    fn args() -> Value {
+        json!({"scopeId":"attempt-1","cwd":"/projects/p/work","endpoint":"http://localhost/v1/channel/mcp","snapshot":{"task":{"title":"test"}}})
+    }
+    fn token(store: &Channels) -> String {
+        store
+            .0
+            .lock()
+            .unwrap()
+            .query_row("SELECT token FROM scopes", [], |r| r.get(0))
+            .unwrap()
+    }
     #[test]
     fn scoped_native_config_authorizes_only_the_bound_communication_tools() {
         let root = tempfile::tempdir().unwrap();
         let store = Channels::open(root.path()).unwrap();
         store.create("p", &args()).unwrap();
-        let config = store.config("p", "/projects/p/work", "owner").unwrap().unwrap();
+        let config = store
+            .config("p", "/projects/p/work", "owner")
+            .unwrap()
+            .unwrap();
         let server = &config["mcp_servers.cells_session"];
         assert_eq!(server["default_tools_approval_mode"], "approve");
-        assert_eq!(server["enabled_tools"], json!(["session_context","session_report","session_receipt","session_request","session_response"]));
+        assert_eq!(
+            server["enabled_tools"],
+            json!([
+                "session_context",
+                "session_report",
+                "session_receipt",
+                "session_request",
+                "session_response"
+            ])
+        );
         assert_eq!(server["required"], true);
         assert!(config.get("approval_policy").is_none());
     }
     #[test]
     fn immutable_scope_and_message_survive_restart() {
-        let root=tempfile::tempdir().unwrap();
-        let store=Channels::open(root.path()).unwrap();store.create("p",&args()).unwrap();
-        let token=token(&store); let message=json!({"id":"report-1","message":{"type":"result","content":"done"}});
-        store.agent(&token,"session_report",&message).unwrap();store.agent(&token,"session_report",&message).unwrap();
-        let changed=json!({"id":"report-1","message":{"type":"result","content":"changed"}});
-        assert_eq!(store.agent(&token,"session_report",&changed).unwrap_err().code,"CHANNEL_REQUEST_CHANGED");
-        drop(store);let store=Channels::open(root.path()).unwrap();
-        assert_eq!(store.agent(&token,"session_receipt",&json!({"id":"report-1"})).unwrap()["accepted"],true);
-        assert_eq!(store.list("p","attempt-1").unwrap()["messages"].as_array().unwrap().len(),1);
-        let mut changed=args();changed["snapshot"]["task"]=json!("other");
-        assert_eq!(store.create("p",&changed).unwrap_err().code,"CHANNEL_SCOPE_CHANGED");
+        let root = tempfile::tempdir().unwrap();
+        let store = Channels::open(root.path()).unwrap();
+        store.create("p", &args()).unwrap();
+        let token = token(&store);
+        let message = json!({"id":"report-1","message":{"type":"result","content":"done"}});
+        store.agent(&token, "session_report", &message).unwrap();
+        store.agent(&token, "session_report", &message).unwrap();
+        let changed = json!({"id":"report-1","message":{"type":"result","content":"changed"}});
+        assert_eq!(
+            store
+                .agent(&token, "session_report", &changed)
+                .unwrap_err()
+                .code,
+            "CHANNEL_REQUEST_CHANGED"
+        );
+        drop(store);
+        let store = Channels::open(root.path()).unwrap();
+        assert_eq!(
+            store
+                .agent(&token, "session_receipt", &json!({"id":"report-1"}))
+                .unwrap()["accepted"],
+            true
+        );
+        assert_eq!(
+            store.list("p", "attempt-1").unwrap()["messages"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let mut changed = args();
+        changed["snapshot"]["task"] = json!("other");
+        assert_eq!(
+            store.create("p", &changed).unwrap_err().code,
+            "CHANNEL_SCOPE_CHANGED"
+        );
     }
     #[test]
     fn scope_tokens_cannot_read_other_sections_and_close_revokes_access() {
-        let root=tempfile::tempdir().unwrap();let store=Channels::open(root.path()).unwrap();store.create("p",&args()).unwrap();
-        let token=token(&store);assert!(store.agent("foreign","session_context",&json!({})).is_err());
-        assert_eq!(store.agent(&token,"session_context",&json!({"section":"task"})).unwrap()["title"],"test");
-        assert!(store.agent(&token,"project_exec",&json!({})).is_err());
-        store.close("p","attempt-1").unwrap();assert!(!store.token_valid(&token));
+        let root = tempfile::tempdir().unwrap();
+        let store = Channels::open(root.path()).unwrap();
+        store.create("p", &args()).unwrap();
+        let token = token(&store);
+        assert!(store
+            .agent("foreign", "session_context", &json!({}))
+            .is_err());
+        assert_eq!(
+            store
+                .agent(&token, "session_context", &json!({"section":"task"}))
+                .unwrap()["title"],
+            "test"
+        );
+        assert!(store.agent(&token, "project_exec", &json!({})).is_err());
+        store.close("p", "attempt-1").unwrap();
+        assert!(!store.token_valid(&token));
     }
     #[test]
     fn idle_close_is_fenced_against_a_new_turn_and_retries_are_idempotent() {
-        let root=tempfile::tempdir().unwrap();let store=Channels::open(root.path()).unwrap();store.create("p",&args()).unwrap();
-        store.bind("p","/projects/p/work","s").unwrap();store.prepare_turn("p","s","op1").unwrap();
-        store.observe("p",&json!({"method":"turn/started","params":{"threadId":"s","turn":{"id":"t1"}}})).unwrap();
-        assert_eq!(store.close_idle("p","attempt-1",&json!({})).unwrap_err().code,"EBUSY");
+        let root = tempfile::tempdir().unwrap();
+        let store = Channels::open(root.path()).unwrap();
+        store.create("p", &args()).unwrap();
+        store.bind("p", "/projects/p/work", "s").unwrap();
+        store.prepare_turn("p", "s", "op1").unwrap();
+        store
+            .observe(
+                "p",
+                &json!({"method":"turn/started","params":{"threadId":"s","turn":{"id":"t1"}}}),
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .close_idle("p", "attempt-1", &json!({}))
+                .unwrap_err()
+                .code,
+            "EBUSY"
+        );
         store.observe("p",&json!({"method":"turn/completed","params":{"threadId":"s","turn":{"id":"t1","status":"completed"}}})).unwrap();
-        let revision=store.list("p","attempt-1").unwrap()["execution"]["revision"].clone();
-        assert_eq!(store.close_idle("p","attempt-1",&json!({"expectedExecutionRevision":0})).unwrap_err().code,"CHANNEL_EXECUTION_CHANGED");
-        let request=json!({"expectedExecutionRevision":revision});store.close_idle("p","attempt-1",&request).unwrap();
-        store.close_idle("p","attempt-1",&request).unwrap();assert!(!store.token_valid(&token(&store)));
+        let revision = store.list("p", "attempt-1").unwrap()["execution"]["revision"].clone();
+        assert_eq!(
+            store
+                .close_idle("p", "attempt-1", &json!({"expectedExecutionRevision":0}))
+                .unwrap_err()
+                .code,
+            "CHANNEL_EXECUTION_CHANGED"
+        );
+        let request = json!({"expectedExecutionRevision":revision});
+        store.close_idle("p", "attempt-1", &request).unwrap();
+        store.close_idle("p", "attempt-1", &request).unwrap();
+        assert!(!store.token_valid(&token(&store)));
     }
     #[test]
     fn publication_origin_survives_replay_and_restart_without_exposing_content_in_status() {
-        let root=tempfile::tempdir().unwrap();let store=Channels::open(root.path()).unwrap();store.create("p",&args()).unwrap();
-        let secret=token(&store);store.bind("p","/projects/p/work","s").unwrap();store.prepare_turn("p","s","op1").unwrap();
-        store.observe("p",&json!({"method":"turn/started","params":{"threadId":"s","turn":{"id":"t1"}}})).unwrap();
-        let report=json!({"id":"q","message":{"type":"clarification","content":"Private question"}});
-        store.agent(&secret,"session_report",&report).unwrap();
-        let original=store.list("p","attempt-1").unwrap()["messages"][0]["origin"].clone();
-        assert_eq!(original["sessionId"],"s");assert_eq!(original["turnId"],"t1");assert_eq!(original["operationId"],"op1");
-        store.prepare_turn("p","s","op2").unwrap();
-        store.observe("p",&json!({"method":"turn/started","params":{"threadId":"s","turn":{"id":"t2"}}})).unwrap();
-        store.agent(&secret,"session_report",&report).unwrap();
-        drop(store);let store=Channels::open(root.path()).unwrap();
-        assert_eq!(store.list("p","attempt-1").unwrap()["messages"][0]["origin"],original);
-        let status=store.agent(&secret,"session_context",&json!({"section":"channel-status"})).unwrap();
-        assert!(!status.to_string().contains("Private question"));assert!(status.to_string().contains("clarification"));
+        let root = tempfile::tempdir().unwrap();
+        let store = Channels::open(root.path()).unwrap();
+        store.create("p", &args()).unwrap();
+        let secret = token(&store);
+        store.bind("p", "/projects/p/work", "s").unwrap();
+        store.prepare_turn("p", "s", "op1").unwrap();
+        store
+            .observe(
+                "p",
+                &json!({"method":"turn/started","params":{"threadId":"s","turn":{"id":"t1"}}}),
+            )
+            .unwrap();
+        let report =
+            json!({"id":"q","message":{"type":"clarification","content":"Private question"}});
+        store.agent(&secret, "session_report", &report).unwrap();
+        let original = store.list("p", "attempt-1").unwrap()["messages"][0]["origin"].clone();
+        assert_eq!(original["sessionId"], "s");
+        assert_eq!(original["turnId"], "t1");
+        assert_eq!(original["operationId"], "op1");
+        store.prepare_turn("p", "s", "op2").unwrap();
+        store
+            .observe(
+                "p",
+                &json!({"method":"turn/started","params":{"threadId":"s","turn":{"id":"t2"}}}),
+            )
+            .unwrap();
+        store.agent(&secret, "session_report", &report).unwrap();
+        drop(store);
+        let store = Channels::open(root.path()).unwrap();
+        assert_eq!(
+            store.list("p", "attempt-1").unwrap()["messages"][0]["origin"],
+            original
+        );
+        let status = store
+            .agent(
+                &secret,
+                "session_context",
+                &json!({"section":"channel-status"}),
+            )
+            .unwrap();
+        assert!(!status.to_string().contains("Private question"));
+        assert!(status.to_string().contains("clarification"));
     }
     #[test]
     fn terminal_is_bound_to_the_exact_turn_and_running_restarts_unknown() {
-        let root=tempfile::tempdir().unwrap();let store=Channels::open(root.path()).unwrap();store.create("p",&args()).unwrap();
-        store.bind("p","/projects/p/work","s").unwrap();
-        store.observe("p",&json!({"method":"turn/started","params":{"threadId":"s","turn":{"id":"t"}}})).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let store = Channels::open(root.path()).unwrap();
+        store.create("p", &args()).unwrap();
+        store.bind("p", "/projects/p/work", "s").unwrap();
+        store
+            .observe(
+                "p",
+                &json!({"method":"turn/started","params":{"threadId":"s","turn":{"id":"t"}}}),
+            )
+            .unwrap();
         store.observe("p",&json!({"method":"turn/completed","params":{"threadId":"s","turn":{"id":"other","status":"completed"}}})).unwrap();
-        assert_eq!(store.list("p","attempt-1").unwrap()["execution"]["status"],"running");
-        drop(store);let store=Channels::open(root.path()).unwrap();
-        assert_eq!(store.list("p","attempt-1").unwrap()["execution"]["status"],"unknown");
+        assert_eq!(
+            store.list("p", "attempt-1").unwrap()["execution"]["status"],
+            "running"
+        );
+        drop(store);
+        let store = Channels::open(root.path()).unwrap();
+        assert_eq!(
+            store.list("p", "attempt-1").unwrap()["execution"]["status"],
+            "unknown"
+        );
     }
     #[test]
     fn scope_replacement_fences_the_session_and_revokes_the_previous_token() {
-        let root=tempfile::tempdir().unwrap();let store=Channels::open(root.path()).unwrap();store.create("p",&args()).unwrap();
-        let old_token=token(&store);store.bind("p","/projects/p/work","s").unwrap();
-        assert_eq!(store.bind("p","/projects/p/work","foreign").unwrap_err().code,"CHANNEL_SESSION_CHANGED");
-        store.prepare_turn("p","s","op").unwrap();
-        store.observe("p",&json!({"method":"turn/started","params":{"threadId":"s","turn":{"id":"t"}}})).unwrap();
-        let mut next=args();next["scopeId"]=json!("attempt-2");next["previousScopeId"]=json!("attempt-1");next["sessionId"]=json!("s");next["previousSessionId"]=json!("s");
-        assert_eq!(store.create("p",&next).unwrap_err().code,"EBUSY");
+        let root = tempfile::tempdir().unwrap();
+        let store = Channels::open(root.path()).unwrap();
+        store.create("p", &args()).unwrap();
+        let old_token = token(&store);
+        store.bind("p", "/projects/p/work", "s").unwrap();
+        assert_eq!(
+            store
+                .bind("p", "/projects/p/work", "foreign")
+                .unwrap_err()
+                .code,
+            "CHANNEL_SESSION_CHANGED"
+        );
+        store.prepare_turn("p", "s", "op").unwrap();
+        store
+            .observe(
+                "p",
+                &json!({"method":"turn/started","params":{"threadId":"s","turn":{"id":"t"}}}),
+            )
+            .unwrap();
+        let mut next = args();
+        next["scopeId"] = json!("attempt-2");
+        next["previousScopeId"] = json!("attempt-1");
+        next["sessionId"] = json!("s");
+        next["previousSessionId"] = json!("s");
+        assert_eq!(store.create("p", &next).unwrap_err().code, "EBUSY");
         store.observe("p",&json!({"method":"turn/completed","params":{"threadId":"s","turn":{"id":"t","status":"failed"}}})).unwrap();
-        next["previousSessionId"]=json!("foreign");assert_eq!(store.create("p",&next).unwrap_err().code,"CHANNEL_SESSION_CHANGED");
-        next["previousSessionId"]=json!("s");store.create("p",&next).unwrap();assert!(!store.token_valid(&old_token));
+        next["previousSessionId"] = json!("foreign");
+        assert_eq!(
+            store.create("p", &next).unwrap_err().code,
+            "CHANNEL_SESSION_CHANGED"
+        );
+        next["previousSessionId"] = json!("s");
+        store.create("p", &next).unwrap();
+        assert!(!store.token_valid(&old_token));
         store.observe("p",&json!({"method":"turn/completed","params":{"threadId":"s","turn":{"id":"t","status":"completed"}}})).unwrap();
-        assert_eq!(store.list("p","attempt-2").unwrap()["execution"]["status"],"idle");
+        assert_eq!(
+            store.list("p", "attempt-2").unwrap()["execution"]["status"],
+            "idle"
+        );
     }
     #[test]
     fn unsubmitted_idle_scope_can_be_replaced_but_a_pending_submission_cannot() {
-        let root=tempfile::tempdir().unwrap();let store=Channels::open(root.path()).unwrap();
-        store.create("p",&args()).unwrap();store.bind("p","/projects/p/work","s").unwrap();
-        let old=token(&store);
-        let mut next=args();next["scopeId"]=json!("next");next["previousScopeId"]=json!("attempt-1");next["previousSessionId"]=json!("s");next["sessionId"]=json!("s");
-        store.create("p",&next).unwrap();assert!(!store.token_valid(&old));
-        store.prepare_turn("p","s","pending").unwrap();
-        next["scopeId"]=json!("later");next["previousScopeId"]=json!("next");
-        assert_eq!(store.create("p",&next).unwrap_err().code,"EBUSY");
+        let root = tempfile::tempdir().unwrap();
+        let store = Channels::open(root.path()).unwrap();
+        store.create("p", &args()).unwrap();
+        store.bind("p", "/projects/p/work", "s").unwrap();
+        let old = token(&store);
+        let mut next = args();
+        next["scopeId"] = json!("next");
+        next["previousScopeId"] = json!("attempt-1");
+        next["previousSessionId"] = json!("s");
+        next["sessionId"] = json!("s");
+        store.create("p", &next).unwrap();
+        assert!(!store.token_valid(&old));
+        store.prepare_turn("p", "s", "pending").unwrap();
+        next["scopeId"] = json!("later");
+        next["previousScopeId"] = json!("next");
+        assert_eq!(store.create("p", &next).unwrap_err().code, "EBUSY");
     }
     #[test]
     fn terminal_scope_can_handoff_to_a_separate_hook_then_resume_the_original_session() {
-        let root=tempfile::tempdir().unwrap();let store=Channels::open(root.path()).unwrap();store.create("p",&args()).unwrap();
-        store.bind("p","/projects/p/work","original").unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let store = Channels::open(root.path()).unwrap();
+        store.create("p", &args()).unwrap();
+        store.bind("p", "/projects/p/work", "original").unwrap();
         store.observe("p",&json!({"method":"turn/completed","params":{"threadId":"original","turn":{"id":"t1","status":"completed"}}})).unwrap();
-        let mut hook=args();hook["scopeId"]=json!("hook");hook["previousScopeId"]=json!("attempt-1");hook["previousSessionId"]=json!("original");
-        store.create("p",&hook).unwrap();store.bind("p","/projects/p/work","hook-native").unwrap();
+        let mut hook = args();
+        hook["scopeId"] = json!("hook");
+        hook["previousScopeId"] = json!("attempt-1");
+        hook["previousSessionId"] = json!("original");
+        store.create("p", &hook).unwrap();
+        store.bind("p", "/projects/p/work", "hook-native").unwrap();
         store.observe("p",&json!({"method":"turn/completed","params":{"threadId":"hook-native","turn":{"id":"h1","status":"completed"}}})).unwrap();
-        let mut resumed=args();resumed["scopeId"]=json!("review");resumed["previousScopeId"]=json!("hook");resumed["previousSessionId"]=json!("hook-native");resumed["sessionId"]=json!("original");
-        store.create("p",&resumed).unwrap();assert_eq!(store.list("p","review").unwrap()["execution"]["sessionId"],"original");
-        assert_eq!(store.create("p",&args()).unwrap_err().code,"CHANNEL_SCOPE_CLOSED");
+        let mut resumed = args();
+        resumed["scopeId"] = json!("review");
+        resumed["previousScopeId"] = json!("hook");
+        resumed["previousSessionId"] = json!("hook-native");
+        resumed["sessionId"] = json!("original");
+        store.create("p", &resumed).unwrap();
+        assert_eq!(
+            store.list("p", "review").unwrap()["execution"]["sessionId"],
+            "original"
+        );
+        assert_eq!(
+            store.create("p", &args()).unwrap_err().code,
+            "CHANNEL_SCOPE_CLOSED"
+        );
     }
     #[test]
     fn old_conversation_detaches_without_inheriting_or_rebinding_a_successor_scope() {
-        let root=tempfile::tempdir().unwrap();let store=Channels::open(root.path()).unwrap();store.create("p",&args()).unwrap();
-        store.bind("p","/projects/p/work","original").unwrap();let old=token(&store);
+        let root = tempfile::tempdir().unwrap();
+        let store = Channels::open(root.path()).unwrap();
+        store.create("p", &args()).unwrap();
+        store.bind("p", "/projects/p/work", "original").unwrap();
+        let old = token(&store);
         store.observe("p",&json!({"method":"turn/completed","params":{"threadId":"original","turn":{"id":"t","status":"completed"}}})).unwrap();
-        let mut next=args();next["scopeId"]=json!("hook");next["previousScopeId"]=json!("attempt-1");next["previousSessionId"]=json!("original");
-        store.create("p",&next).unwrap();store.bind("p","/projects/p/work","hook-native").unwrap();
-        let before=store.current("p","/projects/p/work").unwrap();
+        let mut next = args();
+        next["scopeId"] = json!("hook");
+        next["previousScopeId"] = json!("attempt-1");
+        next["previousSessionId"] = json!("original");
+        store.create("p", &next).unwrap();
+        store.bind("p", "/projects/p/work", "hook-native").unwrap();
+        let before = store.current("p", "/projects/p/work").unwrap();
         store.server_save("owner",&json!({"id":"custom","name":"Custom","url":"https://example.test/mcp","revision":0,"enabled":true,"tools":["read"]})).unwrap();
-        let config=store.session_config("p","/projects/p/work","owner","original").unwrap();
-        assert_eq!(config["mcp_servers.cells_session"],disabled_channel());
-        assert!(config.get("mcp_servers.custom").is_some());assert!(!config.to_string().contains("Bearer"));
-        assert_eq!(store.current("p","/projects/p/work").unwrap(),before);assert!(!store.token_valid(&old));
-        assert!(store.session_config("p","/projects/p/work","owner","hook-native").unwrap()["mcp_servers.cells_session"]["http_headers"].is_object());
-        store.close("p","hook").unwrap();
-        assert_eq!(store.session_config("p","/projects/p/work","owner","original").unwrap()["mcp_servers.cells_session"],disabled_channel());
+        let config = store
+            .session_config("p", "/projects/p/work", "owner", "original")
+            .unwrap();
+        assert_eq!(config["mcp_servers.cells_session"], disabled_channel());
+        assert!(config.get("mcp_servers.custom").is_some());
+        assert!(!config.to_string().contains("Bearer"));
+        assert_eq!(store.current("p", "/projects/p/work").unwrap(), before);
+        assert!(!store.token_valid(&old));
+        assert!(store
+            .session_config("p", "/projects/p/work", "owner", "hook-native")
+            .unwrap()["mcp_servers.cells_session"]["http_headers"]
+            .is_object());
+        store.close("p", "hook").unwrap();
+        assert_eq!(
+            store
+                .session_config("p", "/projects/p/work", "owner", "original")
+                .unwrap()["mcp_servers.cells_session"],
+            disabled_channel()
+        );
     }
     #[test]
     fn context_requests_and_host_acknowledgments_are_durable_and_immutable() {
-        let root=tempfile::tempdir().unwrap();let store=Channels::open(root.path()).unwrap();store.create("p",&args()).unwrap();let secret=token(&store);
-        let query=json!({"id":"q","method":"context.read","params":{}});
-        assert_eq!(store.agent(&secret,"session_request",&query).unwrap()["status"],"pending");
-        let requests=store.requests("p","attempt-1").unwrap();let digest=&requests["requests"][0]["requestDigest"];
-        let response=json!({"id":"q","requestDigest":digest,"status":"ok","payload":{"revision":1},"error":null});
-        store.respond("p","attempt-1",&response).unwrap();
-        let mut changed=response.clone();changed["payload"]=json!({"revision":2});assert_eq!(store.respond("p","attempt-1",&changed).unwrap_err().code,"CHANNEL_RESPONSE_CHANGED");
-        store.agent(&secret,"session_report",&json!({"id":"m","message":{"type":"proposal","content":"Proposal"}})).unwrap();
-        let ack=json!({"id":"m","ack":{"status":"accepted"}});store.acknowledge("p","attempt-1",&ack).unwrap();
-        drop(store);let store=Channels::open(root.path()).unwrap();
-        assert_eq!(store.agent(&secret,"session_response",&json!({"id":"q"})).unwrap()["payload"]["revision"],1);
-        assert_eq!(store.agent(&secret,"session_receipt",&json!({"id":"m"})).unwrap()["ack"]["status"],"accepted");
+        let root = tempfile::tempdir().unwrap();
+        let store = Channels::open(root.path()).unwrap();
+        store.create("p", &args()).unwrap();
+        let secret = token(&store);
+        let query = json!({"id":"q","method":"context.read","params":{}});
+        assert_eq!(
+            store.agent(&secret, "session_request", &query).unwrap()["status"],
+            "pending"
+        );
+        let requests = store.requests("p", "attempt-1").unwrap();
+        let digest = &requests["requests"][0]["requestDigest"];
+        let response = json!({"id":"q","requestDigest":digest,"status":"ok","payload":{"revision":1},"error":null});
+        store.respond("p", "attempt-1", &response).unwrap();
+        let mut changed = response.clone();
+        changed["payload"] = json!({"revision":2});
+        assert_eq!(
+            store.respond("p", "attempt-1", &changed).unwrap_err().code,
+            "CHANNEL_RESPONSE_CHANGED"
+        );
+        store
+            .agent(
+                &secret,
+                "session_report",
+                &json!({"id":"m","message":{"type":"proposal","content":"Proposal"}}),
+            )
+            .unwrap();
+        let ack = json!({"id":"m","ack":{"status":"accepted"}});
+        store.acknowledge("p", "attempt-1", &ack).unwrap();
+        drop(store);
+        let store = Channels::open(root.path()).unwrap();
+        assert_eq!(
+            store
+                .agent(&secret, "session_response", &json!({"id":"q"}))
+                .unwrap()["payload"]["revision"],
+            1
+        );
+        assert_eq!(
+            store
+                .agent(&secret, "session_receipt", &json!({"id":"m"}))
+                .unwrap()["ack"]["status"],
+            "accepted"
+        );
     }
-
 }

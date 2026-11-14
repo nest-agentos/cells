@@ -8,13 +8,17 @@ pub mod cursor;
 pub mod error;
 pub mod events;
 pub mod gate;
-mod gate_owner;
 mod gate_admission;
+mod gate_owner;
 pub(crate) mod gate_read;
 pub mod ids;
+pub(crate) mod keyed_lock;
+pub(crate) mod keyed_gates;
 pub mod log_file;
 pub mod node_status;
+pub(crate) mod path_locks;
 pub mod search;
+pub(crate) mod sqlite_shards;
 pub mod workers;
 
 pub mod auth;

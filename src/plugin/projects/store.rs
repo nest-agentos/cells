@@ -61,6 +61,17 @@ impl Store {
             .cloned()
             .collect())
     }
+    pub fn register_binding(&self,binding:super::directory_sync::model::Binding,
+        validate:impl Fn(&super::directory_sync::model::Binding,&super::directory_sync::model::Binding)->Result<(),Error>,
+    )->Result<super::directory_sync::model::Binding,Error>{
+        let mut image=self.image.lock().map_err(|_|Error::internal())?;
+        if self.poisoned.load(std::sync::atomic::Ordering::Acquire){return Err(Error::internal());}
+        for prior in image.bindings.values(){validate(prior,&binding)?;}
+        if let Some(prior)=image.bindings.get(&binding.id){return Ok(prior.clone());}
+        if image.bindings.len()>=128{return Err(Error::too_many("BINDING_LIMIT"));}
+        let mut next=image.clone();next.bindings.insert(binding.id.clone(),binding.clone());
+        self.persist(&next)?;*image=next;Ok(binding)
+    }
     pub fn save_binding(
         &self,
         binding: super::directory_sync::model::Binding,
@@ -168,6 +179,7 @@ impl Store {
         if self.poisoned.load(std::sync::atomic::Ordering::Acquire) {
             return Err(Error::internal());
         }
+        if image.projects.values().any(|old|old.id!=project.id&&old.owner==project.owner&&old.alias==project.alias&&old.path==project.path){return Err(Error::conflict("PROJECT_DIRECTORY_ALREADY_REGISTERED"));}
         let previous = image.projects.get(&project.id);
         if image.bindings.values().any(|b| {
             b.project_id == project.id && b.plan.as_ref().is_some_and(|p| p.state == "applying")

@@ -34,6 +34,8 @@ pub async fn search(state: &Arc<State>, identity: usize, args: Value) -> Result<
     let query = KeywordQuery::new(query);
     let scope = scope_rules(directory);
     let project = authorized(state, identity, &args)?;
+    let _project=state.services.require::<super::ProjectService>()?.lifecycle(&project.id).shared()?;
+    let project=authorized(state,identity,&args)?;
     let mut request = service::request(
         state,
         &project,
@@ -64,7 +66,7 @@ pub async fn search(state: &Arc<State>, identity: usize, args: Value) -> Result<
         state
             .services
             .require::<crate::process::Execution>()?
-            .lock_handle()?,
+            .root_handle()?,
         None,
     )?;
     let result = tokio::time::timeout(

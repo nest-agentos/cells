@@ -10,6 +10,8 @@ pub(in crate::plugin::projects) fn take_ownership(
     channels: &Channels,
     binding: &Binding,
 ) -> Result<(), Error> {
+    harness_recovery::store::load(channels, binding)?;
+    channels.2.bind(binding)?;
     if owns(channels, binding)? {
         return Ok(());
     }
@@ -23,7 +25,7 @@ pub(in crate::plugin::projects) fn take_ownership(
         .remove("instructionQueue")
         .unwrap();
     queue["owner"] = json!("cells");
-    let mut db = channels.2.lock().map_err(storage)?;
+    channels.2.with(&binding.project_id,&binding.owner,&binding.namespace,|db|{
     let tx = db.transaction().map_err(storage)?;
     let existing:Option<String>=tx.query_row("SELECT body FROM harness_queue_sessions WHERE project=?1 AND owner=?2 AND profile=?3 AND session=?4",params![binding.project_id,binding.owner,binding.profile_id,binding.session_id],|r|r.get(0)).optional().map_err(storage)?;
     if let Some(existing) = existing {
@@ -57,10 +59,11 @@ pub(in crate::plugin::projects) fn take_ownership(
     )
     .map_err(storage)?;
     tx.commit().map_err(storage)
+})
 }
 
 pub(super) fn owns(channels: &Channels, binding: &Binding) -> Result<bool, Error> {
-    channels.2.lock().map_err(storage)?.query_row("SELECT EXISTS(SELECT 1 FROM owned_harness_queues WHERE project=?1 AND owner=?2 AND namespace=?3)",params![binding.project_id,binding.owner,binding.namespace],|r|r.get(0)).map_err(storage)
+    channels.2.with(&binding.project_id,&binding.owner,&binding.namespace,|db|db.query_row("SELECT EXISTS(SELECT 1 FROM owned_harness_queues WHERE project=?1 AND owner=?2 AND namespace=?3)",params![binding.project_id,binding.owner,binding.namespace],|r|r.get(0)).map_err(storage))
 }
 fn fingerprint(binding: &Binding, args: &Value) -> String {
     format!(
@@ -73,8 +76,12 @@ pub(super) fn receipt(
     binding: &Binding,
     args: &Value,
 ) -> Result<Option<Value>, Error> {
-    let db = channels.2.lock().map_err(storage)?;
-    let row: Option<(String, String)> = db
+    channels.2.with(
+        &binding.project_id,
+        &binding.owner,
+        &binding.namespace,
+        |db| {
+            let row: Option<(String, String)> = db
         .query_row(
             "SELECT fingerprint,result FROM harness_queue_commands WHERE owner=?1 AND operation=?2",
             params![binding.owner, args["operationId"].as_str()],
@@ -82,13 +89,15 @@ pub(super) fn receipt(
         )
         .optional()
         .map_err(storage)?;
-    row.map(|(prior, result)| {
-        if prior != fingerprint(binding, args) {
-            return Err(Error::conflict("HARNESS_QUEUE_OPERATION_CHANGED"));
-        }
-        serde_json::from_str(&result).map_err(storage)
-    })
-    .transpose()
+            row.map(|(prior, result)| {
+                if prior != fingerprint(binding, args) {
+                    return Err(Error::conflict("HARNESS_QUEUE_OPERATION_CHANGED"));
+                }
+                serde_json::from_str(&result).map_err(storage)
+            })
+            .transpose()
+        },
+    )
 }
 pub(super) fn commit(
     channels: &Channels,
@@ -97,20 +106,26 @@ pub(super) fn commit(
     before: &str,
     record: &Value,
 ) -> Result<(), Error> {
-    let mut db = channels.2.lock().map_err(storage)?;
-    let tx = db.transaction().map_err(storage)?;
-    harness_recovery::store::replace(&tx, binding, before, record)?;
-    tx.execute(
-        "INSERT INTO harness_queue_commands VALUES(?1,?2,?3,?4)",
-        params![
-            binding.owner,
-            args["operationId"].as_str(),
-            fingerprint(binding, args),
-            json!({"revision":record["instructionQueue"]["revision"]}).to_string()
-        ],
+    channels.2.with(
+        &binding.project_id,
+        &binding.owner,
+        &binding.namespace,
+        |db| {
+            let tx = db.transaction().map_err(storage)?;
+            harness_recovery::store::replace(&tx, binding, before, record)?;
+            tx.execute(
+                "INSERT INTO harness_queue_commands VALUES(?1,?2,?3,?4)",
+                params![
+                    binding.owner,
+                    args["operationId"].as_str(),
+                    fingerprint(binding, args),
+                    json!({"revision":record["instructionQueue"]["revision"]}).to_string()
+                ],
+            )
+            .map_err(storage)?;
+            tx.commit().map_err(storage)
+        },
     )
-    .map_err(storage)?;
-    tx.commit().map_err(storage)
 }
 pub(super) fn save(
     channels: &Channels,
@@ -118,10 +133,16 @@ pub(super) fn save(
     before: &str,
     record: &Value,
 ) -> Result<(), Error> {
-    let mut db = channels.2.lock().map_err(storage)?;
-    let tx = db.transaction().map_err(storage)?;
-    harness_recovery::store::replace(&tx, binding, before, record)?;
-    tx.commit().map_err(storage)
+    channels.2.with(
+        &binding.project_id,
+        &binding.owner,
+        &binding.namespace,
+        |db| {
+            let tx = db.transaction().map_err(storage)?;
+            harness_recovery::store::replace(&tx, binding, before, record)?;
+            tx.commit().map_err(storage)
+        },
+    )
 }
 pub(super) fn protect(
     db: &rusqlite::Connection,

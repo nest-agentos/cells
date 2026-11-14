@@ -4,12 +4,12 @@
 use cells::fs::{Export, Exports};
 
 #[test]
-fn exclusive_open_holds_the_lock_and_a_second_open_fails() {
+fn writable_exports_do_not_exclusively_lock_the_directory() {
     let root = tempfile::tempdir().unwrap();
-    let export = Export::exclusive(root.path()).unwrap();
+    let export = Export::open_writable(root.path()).unwrap();
     assert!(export.writable());
-    assert!(Export::exclusive(root.path()).is_err());
-    // A read-only capability is still possible while the writer holds the lock.
+    assert!(Export::open_writable(root.path()).is_ok());
+    // Read and independent write capabilities can coexist.
     assert!(Export::open(root.path()).is_ok());
 }
 
@@ -18,13 +18,13 @@ fn restart_retires_validators_without_scanning_unregistered_uploads() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("note"), "content").unwrap();
     let old = {
-        let export = Export::exclusive(root.path()).unwrap();
+        let export = Export::open_writable(root.path()).unwrap();
         export.stat("note").unwrap().unwrap().revision
     };
     std::fs::write(root.path().join(".itookit-upload-abandoned"), "incomplete").unwrap();
     // An outside entry with a reserved name must not block startup.
     std::fs::create_dir(root.path().join(".itookit-upload-directory")).unwrap();
-    let export = Export::exclusive(root.path()).unwrap();
+    let export = Export::open_writable(root.path()).unwrap();
     assert_ne!(export.stat("note").unwrap().unwrap().revision, old);
     assert!(root.path().join(".itookit-upload-abandoned").exists());
     assert!(root.path().join(".itookit-upload-directory").exists());
@@ -48,7 +48,7 @@ fn reserved_names_are_hidden_from_listings() {
 fn the_registry_lists_aliases_and_can_invalidate_all_revisions() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("note"), "content").unwrap();
-    let writable = Export::exclusive(root.path()).unwrap();
+    let writable = Export::open_writable(root.path()).unwrap();
     let reference = root.path().join("reference");
     std::fs::create_dir(&reference).unwrap();
     let exports = Exports::new(
@@ -91,7 +91,7 @@ fn file_metadata_is_lazy_remote_durable_and_mount_independent() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("nested")).unwrap();
     std::fs::write(root.path().join("nested/note.md"), "Original").unwrap();
-    let export = Export::exclusive(root.path()).unwrap();
+    let export = Export::open_writable(root.path()).unwrap();
     let before = export.stat("nested/note.md").unwrap().unwrap().revision;
     export
         .list("", &tokio_util::sync::CancellationToken::new())
@@ -171,7 +171,7 @@ fn file_metadata_is_lazy_remote_durable_and_mount_independent() {
         .contains_key("a"));
     drop(other);
     drop(export);
-    let reopened = Export::exclusive(root.path()).unwrap();
+    let reopened = Export::open_writable(root.path()).unwrap();
     assert_eq!(
         reopened
             .stat("moved/note.md")
@@ -231,4 +231,161 @@ fn entry_projection_never_opens_unneeded_metadata() {
         1
     );
     assert!(export.stat("note.md").is_err());
+}
+
+#[test]
+fn metadata_payloads_are_per_file_and_cross_export_patches_do_not_lose_fields() {
+    use cells::fs::mutation::Change;
+    use serde_json::json;
+    let root = tempfile::tempdir().unwrap();
+    for name in ["a", "b"] {
+        std::fs::write(root.path().join(name), "content").unwrap();
+    }
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+    std::thread::scope(|scope| {
+        let mut workers = Vec::new();
+        for index in 0..8 {
+            let path = root.path();
+            let barrier = barrier.clone();
+            workers.push(scope.spawn(move || {
+                let export = Export::open_writable(path).unwrap();
+                barrier.wait();
+                export
+                    .apply(
+                        &Change::Metadata {
+                            path: "a".into(),
+                            patch: json!({format!("field{index}"):index})
+                                .as_object()
+                                .unwrap()
+                                .clone(),
+                            remove: vec![],
+                        },
+                        || Ok(()),
+                    )
+                    .unwrap();
+            }));
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+    });
+    let export = Export::open_writable(root.path()).unwrap();
+    assert_eq!(export.stat("a").unwrap().unwrap().metadata.len(), 8);
+    export
+        .apply(
+            &Change::Metadata {
+                path: "b".into(),
+                patch: json!({"other":true}).as_object().unwrap().clone(),
+                remove: vec![],
+            },
+            || Ok(()),
+        )
+        .unwrap();
+    let db = rusqlite::Connection::open(root.path().join(".nestos/meta.sqlite")).unwrap();
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM file_metadata WHERE data='{}'",
+            [],
+            |r| r.get::<_, u64>(0)
+        )
+        .unwrap(),
+        2
+    );
+    let mut ids = db.prepare("SELECT identity FROM file_metadata").unwrap();
+    let ids = ids
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    for id in ids {
+        assert!(root
+            .path()
+            .join(format!(".nestos/metadata-{id}.sqlite"))
+            .exists());
+    }
+}
+
+#[test]
+fn simultaneous_conditional_replacements_across_exports_have_one_winner() {
+    use cells::fs::upload;
+    use std::io::Write;
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("note"), "before").unwrap();
+    let first = Export::open_writable(root.path()).unwrap();
+    let second = Export::open_writable(root.path()).unwrap();
+    let a = first.stat("note").unwrap().unwrap().revision.unwrap();
+    let b = second.stat("note").unwrap().unwrap().revision.unwrap();
+    let x = first.stage("note").unwrap();
+    x.writer().unwrap().write_all(b"first").unwrap();
+    let y = second.stage("note").unwrap();
+    y.writer().unwrap().write_all(b"second").unwrap();
+    let barrier = std::sync::Barrier::new(2);
+    let outcomes = std::thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            barrier.wait();
+            upload::commit(&first, "note", x, Some(&a), || Ok(())).is_ok()
+        });
+        barrier.wait();
+        let other = upload::commit(&second, "note", y, Some(&b), || Ok(())).is_ok();
+        (worker.join().unwrap(), other)
+    });
+    assert_ne!(outcomes.0, outcomes.1);
+    let content = std::fs::read(root.path().join("note")).unwrap();
+    assert!(content == b"first" || content == b"second");
+}
+
+#[test]
+fn established_file_properties_do_not_write_the_shared_directory_index() {
+    use cells::fs::mutation::Change;
+    use serde_json::json;
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("note"), "content").unwrap();
+    let export = Export::open_writable(root.path()).unwrap();
+    let change = |value| Change::Metadata {
+        path: "note".into(),
+        patch: json!({"value":value}).as_object().unwrap().clone(),
+        remove: vec![],
+    };
+    export.apply(&change(1), || Ok(())).unwrap();
+    let db = rusqlite::Connection::open(root.path().join(".nestos/meta.sqlite")).unwrap();
+    db.execute_batch("BEGIN IMMEDIATE;").unwrap();
+    std::thread::scope(|scope| {
+        let (done, finished) = std::sync::mpsc::channel();
+        let export = &export;
+        let worker = scope.spawn(move || done.send(export.apply(&change(2), || Ok(()))).unwrap());
+        let result = finished.recv_timeout(std::time::Duration::from_secs(1));
+        db.execute_batch("ROLLBACK;").unwrap();
+        worker.join().unwrap();
+        result.unwrap().unwrap();
+    });
+    assert_eq!(export.stat("note").unwrap().unwrap().metadata["value"], 2);
+}
+
+#[test]
+fn a_published_validator_can_be_used_for_the_next_write_without_refresh() {
+    use cells::fs::upload;
+    use std::io::Write;
+    let root = tempfile::tempdir().unwrap();
+    let export = Export::open_writable(root.path()).unwrap();
+    let upload = export.stage("note").unwrap();
+    upload.writer().unwrap().write_all(b"first").unwrap();
+    let first = upload::commit(&export, "note", upload, None, || Ok(())).unwrap();
+    assert_eq!(
+        first.revision,
+        export.stat("note").unwrap().unwrap().revision
+    );
+    let upload = export.stage("note").unwrap();
+    upload.writer().unwrap().write_all(b"second").unwrap();
+    let second = upload::commit(
+        &export,
+        "note",
+        upload,
+        first.revision.as_deref(),
+        || Ok(()),
+    )
+    .unwrap();
+    assert_eq!(
+        second.revision,
+        export.stat("note").unwrap().unwrap().revision
+    );
 }

@@ -114,6 +114,7 @@ pub struct ProjectRuntime {
     pub project: Project,
     identity: usize,
     active: Activities,
+    lifecycle: crate::core::gate::FileGate,
     isolation: super::model::Isolation,
     cwd: String,
     context: Vec<Project>,
@@ -122,8 +123,9 @@ impl ProjectRuntime {
     pub fn new(state: &Arc<State>, identity: usize, project: Project) -> Result<Self,Error> {
         let isolation=state.services.get::<super::ProjectService>().map(|s|s.isolation).unwrap_or_default();
         let cwd=if isolation==super::model::Isolation::None {super::native::root(state,&project)?}else{format!("/projects/{}",project.id)};
+        let lifecycle=state.services.require::<super::ProjectService>()?.lifecycle(&project.id);
         Ok(Self {
-            state: Arc::downgrade(state),
+            lifecycle,state: Arc::downgrade(state),
             identity,
             project,
             active: Activities::default(),isolation,cwd,context:Vec::new(),
@@ -240,7 +242,7 @@ impl ProjectRuntime {
             None => state
                 .services
                 .require::<crate::process::Execution>()?
-                .lock_handle()?,
+                .root_handle()?,
         };
         let service = state.services.get::<crate::projects::ProjectService>().ok_or_else(Error::unsupported)?;
         let selected = super::execution::resolve(&service.execution_profiles, &self.project.owner, &self.project.execution)?;
@@ -300,10 +302,13 @@ impl ProjectRuntime {
     }
     pub async fn begin(&self, thread: &str, operation: &str) -> Result<(), Error> {
         let state = self.state()?;
-        let handoff=state.files.admit_activity(operation,3000).await?;
+        let mut permit=state.files.activity_for(Some(thread),Some(operation))?;
+        let projects=state.services.require::<super::ProjectService>()?;
+        for id in std::iter::once(&self.project.id).chain(self.context.iter().map(|p|&p.id)){
+            permit=permit.with_resource(projects.lifecycle(id).activity_for(Some(thread),Some(operation))?);
+        }
         self.state()?;
-        self.active.begin(&state.files, thread, operation)?;
-        drop(handoff);
+        self.active.begin_with_permit(permit,thread,operation)?;
         if let Err(error)=state.services.require::<super::ProjectService>()?.channels.prepare_turn(&self.project.id,thread,operation) {
             self.reject(thread,operation);return Err(error);
         }
@@ -342,7 +347,7 @@ impl ProjectRuntime {
         if permit.is_some() {
             self.invalidate();
         }
-        // Invalidate revision caches before the last permit reopens the file APIs.
+        // Retire validators before releasing the operation's lifecycle ownership.
         drop(permit);
     }
     pub fn event(&self, message: &Value) {
@@ -363,12 +368,12 @@ impl ProjectRuntime {
             }
         }
         if message["method"] == "turn/completed" {
-            if let (Some(thread), Some(turn), Some(state)) = (
+            if let (Some(thread), Some(turn), Some(_state)) = (
                 message["params"]["threadId"].as_str(),
                 message["params"]["turn"]["id"].as_str(),
                 self.state.upgrade(),
             ) {
-                self.retire(self.active.completed(&state.files, thread, turn));
+                self.retire(self.active.completed(&self.lifecycle, thread, turn));
             }
         }
     }
@@ -388,8 +393,11 @@ impl ProjectRuntime {
         if affected {
             if clean {
                 self.invalidate();
-            } else if let Some(state) = self.state.upgrade() {
-                state.files.poison();
+            } else if self.state.upgrade().is_some() {
+                self.lifecycle.poison();
+                if let Some(state)=self.state.upgrade(){if let Some(service)=state.services.get::<super::ProjectService>(){
+                    for project in &self.context{service.lifecycle(&project.id).poison();}
+                }}
             }
         }
         drop(permits);

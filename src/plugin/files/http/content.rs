@@ -1,8 +1,8 @@
 //! `GET /v1/fs/:alias/content` — streaming read with byte-range support.
 //!
-//! The read guard on the file gate is held for the whole response body, so a
-//! supervised command cannot start while bytes are streaming; native turns may
-//! change content concurrently, so this endpoint does not promise a snapshot.
+//! The stream retains node shutdown ownership and the originating project's
+//! directory fence. Unrelated commands and projects continue concurrently.
+
 
 use crate::{
     app::State,
@@ -44,9 +44,9 @@ async fn content_once(
         access::authorize_path(&state, &headers, &alias, &query.path, false, false)?;
     let gate = state.files.read_only()?;
     let deadline = access::deadline(&headers)?;
-    let (file, revision) = state
+    let (file, revision, gate, _project_guard) = state
         .workers
-        .run_ungated(deadline, move |_| export.read(&query.path))
+        .run_ungated(deadline, move |_| {let result=export.read(&query.path);result.map(|(file,revision)|(file,revision,gate,_project_guard))})
         .await?;
 
     // A read-only export has no validator, so a client-supplied `If-Match`
@@ -81,9 +81,9 @@ async fn content_once(
 
     let mut file = tokio::fs::File::from_std(file);
     file.seek(std::io::SeekFrom::Start(window.start)).await?;
-    // The gate guard travels with the stream so the export stays read-locked.
+    // Retain lifecycle ownership until the body is consumed or dropped.
     let stream = futures_util::stream::try_unfold(
-        (file, window.length, gate),
+        (file, window.length, (gate,_project_guard)),
         move |(mut file, remaining, gate)| async move {
             if remaining == 0 {
                 return Ok::<_, std::io::Error>(None);

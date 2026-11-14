@@ -21,7 +21,10 @@ pub struct ProjectService {
     pub(super) store: Store,
     pub launcher: Arc<dyn super::runtime::ProjectLauncher>,
     pub isolation: super::model::Isolation,
-    admission: Mutex<()>,
+    reserved_ids: Mutex<std::collections::HashSet<String>>,
+    registrations: crate::core::keyed_lock::SyncKeyedLocks,
+    lifecycles: crate::core::keyed_gates::KeyedGates,
+    pub(super) sync_bindings: crate::core::keyed_lock::KeyedLocks,
     owners: Vec<String>,
     pub execution_profiles: Vec<super::execution::ExecutionProfile>,
 }
@@ -72,11 +75,13 @@ impl ProjectService {
                 super::model::Isolation::Bubblewrap=>Arc::new(super::runtime::Bubblewrap {network:config.network}),
                 super::model::Isolation::None=>Arc::new(super::native::Native),
             },
-            admission: Mutex::new(()),
+            reserved_ids: Default::default(),registrations: Default::default(),
+            lifecycles: Default::default(),sync_bindings:Default::default(),
             execution_profiles: config.execution_profiles.clone(),
             owners: crate::config::authorization::identity_ids(deployment),
         })
     }
+    pub fn lifecycle(&self,id:&str)->crate::core::gate::FileGate{self.lifecycles.get(id)}
     pub fn authorize_channel(&self, state: &State, token: &str) -> bool {
         let Some(id)=self.channels.token_project(token) else {return false;};
         let Ok(projects)=self.store.all() else {return false;};
@@ -123,9 +128,15 @@ impl ProjectService {
         }
         let started = std::time::Instant::now();
         let mut audit = RegistrationAudit::new();
-        let _serial = self.admission.lock().map_err(|_| Error::internal())?;
-        audit.acquired(started.elapsed().as_millis());
-        let result = state.files.check().and_then(|_| self.register_inner(state, identity, &mut input, &mut audit));
+        let result=(||{
+            let _node=state.files.shared()?;
+            input.path=normalize(&input.path)?;
+            let key=serde_json::json!([self.owner(identity)?,input.alias,input.path]).to_string();
+            self.registrations.with(&key,||{
+                audit.acquired(started.elapsed().as_millis());
+                self.register_inner(state,identity,&mut input,&mut audit)
+            })
+        })();
         audit.complete(&result);
         result
     }
@@ -136,12 +147,13 @@ impl ProjectService {
             .into_iter()
             .find(|p| p.alias == input.alias && p.path == input.path)
         {
+            let _project=self.lifecycle(&project.id).shared()?;
             authorize(state, identity, &project)?;
             audit.stage("metadata-scope", Some(&project.id));
             maintain_metadata(state, identity, &project)?;
             return Ok(project);
         }
-        let mut project = self.new_registration(state, identity, input)?;
+        let (mut project,_claim) = self.new_registration(state, identity, input)?;
         self.ensure_registration_directory(state, identity, &project, input.create_directory, audit)?;
         audit.stage("directory-pin", Some(&project.id));
         capture(state, &mut project)?;
@@ -151,10 +163,10 @@ impl ProjectService {
         audit.stage("catalog-persist", Some(&project.id));
         self.store.save(project, None)
     }
-    fn new_registration(&self, state: &State, identity: usize, input: &Register) -> Result<Project, Error> {
-        let existing = self.store.used_ids()?;
-        let id = super::identity::allocate(&input.name, existing.iter().map(String::as_str), input.id.as_deref())?;
-        Ok(Project {
+    fn new_registration<'a>(&'a self, state: &State, identity: usize, input: &Register) -> Result<(Project,super::identity::Claim<'a>), Error> {
+        let claim=super::identity::reserve(&self.reserved_ids,||self.store.used_ids(),&input.name,input.id.as_deref())?;
+        let id=claim.id.clone();
+        Ok((Project {
             id,
             name: input.name.clone(),
             alias: input.alias.clone(),
@@ -166,7 +178,7 @@ impl ProjectService {
             root_identity: String::new(),
             mount_identities: vec![],
             execution: Default::default(),
-        })
+        },claim))
     }
     fn ensure_registration_directory(&self, state: &State, identity: usize, project: &Project, create: bool, audit: &mut RegistrationAudit) -> Result<(), Error> {
         audit.stage("directory-validation", Some(&project.id));
@@ -187,7 +199,6 @@ impl ProjectService {
     }
     pub fn set_environment(&self, state: &State, identity: usize, id: &str, revision: u64,
         environment: super::execution::ProjectEnvironment) -> Result<Project, Error> {
-        let _serial = self.admission.lock().map_err(|_| Error::internal())?;
         let mut project = self.get(identity, id)?;
         authorize(state, identity, &project)?;
         if project.revision != revision { return Err(Error::conflict("PROJECT_REVISION_CHANGED")); }
@@ -211,7 +222,6 @@ impl ProjectService {
         name: String,
         mounts: Vec<Mount>,
     ) -> Result<Project, Error> {
-        let _serial = self.admission.lock().map_err(|_| Error::internal())?;
         let mut project = self.get(identity, id)?;
         if project.revision != revision {
             return Err(Error::conflict("PROJECT_REVISION_CHANGED"));
@@ -234,7 +244,15 @@ impl ProjectService {
         access: &str,
         directory: Option<&Value>,
     ) -> Result<Project, Error> {
-        let _serial = self.admission.lock().map_err(|_| Error::internal())?;
+        let previous=self.get(identity,id)?;
+        let (alias,path)=match directory{
+            Some(value)=>(value["alias"].as_str().ok_or_else(Error::invalid)?,normalize(value["path"].as_str().ok_or_else(Error::invalid)?)?),
+            None=>(previous.alias.as_str(),previous.path.clone()),
+        };
+        let key=serde_json::json!([previous.owner,alias,path]).to_string();
+        self.registrations.with(&key,||self.remount_inner(state,identity,id,revision,access,directory))
+    }
+    fn remount_inner(&self,state:&State,identity:usize,id:&str,revision:u64,access:&str,directory:Option<&Value>)->Result<Project,Error>{
         let mut project = self.get(identity, id)?;
         if project.revision != revision {
             return Err(Error::conflict("PROJECT_REVISION_CHANGED"));

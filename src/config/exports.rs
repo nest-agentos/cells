@@ -101,7 +101,7 @@ pub(crate) fn alias(config: &ExportConfig, index: usize) -> Result<String, Strin
 fn open(config: &ExportConfig, index: usize, root: &Path) -> Result<Export, String> {
     let opened = match config.access {
         Access::Ro => Export::open(root),
-        Access::Rw => Export::exclusive(root),
+        Access::Rw => Export::open_writable(root),
     };
     opened.map_err(|error| {
         format!(

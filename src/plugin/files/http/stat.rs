@@ -59,6 +59,7 @@ async fn stat_once(
     state
         .workers
         .read(&state.files, deadline, move |token| {
+            let _project_guards = _project_guards;
             let mut results = Vec::with_capacity(input.paths.len());
             for path in input.paths {
                 if token.is_cancelled() {

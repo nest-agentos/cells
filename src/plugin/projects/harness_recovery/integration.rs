@@ -4,8 +4,14 @@ use crate::harness::{config::ProfileConfig, HarnessDriver, HarnessPlugin, Harnes
 use crate::projects::runtime::ProjectRuntime;
 use futures_util::future::BoxFuture;
 use std::sync::atomic::{AtomicUsize, Ordering};
-struct Plugin(Arc<AtomicUsize>);
-struct Driver(Arc<AtomicUsize>);
+#[derive(Default)]
+struct ReadBarrier {
+    blocked: std::sync::atomic::AtomicBool,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+struct Plugin(Arc<AtomicUsize>, Option<Arc<ReadBarrier>>);
+struct Driver(Arc<AtomicUsize>, Option<Arc<ReadBarrier>>);
 impl HarnessPlugin for Plugin {
     fn kind(&self) -> &'static str {
         "recovery-fixture"
@@ -18,7 +24,7 @@ impl HarnessPlugin for Plugin {
         _: ProfileConfig,
         _: Option<Arc<ProjectRuntime>>,
     ) -> Result<Box<dyn HarnessDriver>, String> {
-        Ok(Box::new(Driver(self.0.clone())))
+        Ok(Box::new(Driver(self.0.clone(), self.1.clone())))
     }
 }
 impl HarnessDriver for Driver {
@@ -27,6 +33,15 @@ impl HarnessDriver for Driver {
     }
     fn read<'a>(&'a self, _: &'a str, args: Value) -> BoxFuture<'a, Result<Value, Error>> {
         Box::pin(async move {
+            if args["sessionId"] == "native" {
+                if let Some(barrier) = &self.1 {
+                    let released = barrier.release.notified();
+                    barrier.entered.notify_one();
+                    if barrier.blocked.load(Ordering::SeqCst) {
+                        released.await;
+                    }
+                }
+            }
             let now = chrono::Utc::now().timestamp_millis();
             Ok(
                 json!({"session":{"id":args["sessionId"],"title":"Fixture","cwd":null,"updatedAt":null,"resumable":true,"status":"notLoaded","loaded":false,"owned":false,
@@ -47,8 +62,15 @@ impl HarnessDriver for Driver {
     }
 }
 fn state(config: &crate::config::Config, count: Arc<AtomicUsize>) -> Arc<State> {
+    state_with_barrier(config, count, None)
+}
+fn state_with_barrier(
+    config: &crate::config::Config,
+    count: Arc<AtomicUsize>,
+    barrier: Option<Arc<ReadBarrier>>,
+) -> Arc<State> {
     let mut plugins = HarnessPlugins::default();
-    plugins.register(Arc::new(Plugin(count))).unwrap();
+    plugins.register(Arc::new(Plugin(count, barrier))).unwrap();
     State::from_config_with_plugins(config, plugins).unwrap()
 }
 async fn fixture() -> (
@@ -177,6 +199,105 @@ async fn cells_startup_recovers_registered_execution_without_any_nestos_request(
     assert_eq!(record["instructionQueue"]["paused"], false);
     assert_eq!(count.load(Ordering::SeqCst), 1);
     state.event_stop.cancel();
+    state
+        .services
+        .require::<crate::harness::Harnesses>()
+        .unwrap()
+        .close()
+        .await;
+}
+
+#[tokio::test]
+async fn slow_native_recovery_does_not_block_another_session_or_same_session_queue_reads() {
+    let (_root, config, previous, count, binding) = fixture().await;
+    previous
+        .services
+        .require::<crate::harness::Harnesses>()
+        .unwrap()
+        .close()
+        .await;
+    drop(previous);
+    let barrier = Arc::new(ReadBarrier::default());
+    barrier.blocked.store(true, Ordering::SeqCst);
+    let state = state_with_barrier(&config, count, Some(barrier.clone()));
+    crate::process::enable(&state).await.unwrap();
+    let mut other = binding.clone();
+    other.session_id = "other".into();
+    other.namespace = "b".repeat(64);
+    let mut record = super::tests::record();
+    record["sessionId"] = json!("other");
+    let channels = &state
+        .services
+        .require::<super::super::ProjectService>()
+        .unwrap()
+        .channels;
+    super::tests::write(channels, &other, &record);
+    let waiting = {
+        let state = state.clone();
+        let args = request(&binding, "slow");
+        tokio::spawn(async move { call(&state, 0, args).await })
+    };
+    barrier.entered.notified().await;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        call(&state, 0, request(&other, "independent")),
+    )
+    .await;
+    assert!(result.unwrap().is_ok());
+    let mut read = request(&binding, "read");
+    read["action"] = json!("read");
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        super::super::harness_queue::call(&state, 0, read)
+    )
+    .await
+    .unwrap()
+    .is_ok());
+    barrier.blocked.store(false, Ordering::SeqCst);
+    barrier.release.notify_waiters();
+    assert!(waiting.await.unwrap().is_ok());
+    state
+        .services
+        .require::<crate::harness::Harnesses>()
+        .unwrap()
+        .close()
+        .await;
+}
+
+#[tokio::test]
+async fn channel_observers_do_not_consume_filesystem_watch_capacity() {
+    use futures_util::StreamExt;
+    let (_root, _config, state, _count, binding) = fixture().await;
+    let service = state
+        .services
+        .require::<super::super::ProjectService>()
+        .unwrap();
+    let all = service
+        .watch_slots
+        .clone()
+        .try_acquire_many_owned(16)
+        .unwrap();
+    service
+        .channels
+        .create(
+            &binding.project_id,
+            &json!({"scopeId":"scope","cwd":"/work","snapshot":{}}),
+        )
+        .unwrap();
+    let args =
+        json!({"projectId":binding.project_id,"revision":binding.revision,"channelId":"scope"});
+    let mut observers = Vec::new();
+    for _ in 0..20 {
+        let mut stream =
+            super::super::channel_subscription::subscribe(state.clone(), 0, args.clone())
+                .await
+                .unwrap();
+        assert!(stream.next().await.unwrap().is_ok());
+        observers.push(stream);
+    }
+    assert_eq!(service.watch_slots.available_permits(), 0);
+    drop((observers, all));
+    assert_eq!(service.watch_slots.available_permits(), 16);
     state
         .services
         .require::<crate::harness::Harnesses>()

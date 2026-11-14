@@ -12,6 +12,7 @@ pub struct FileGate {
     pub(super) owners: super::gate_owner::Owners,
     inner: Arc<RwLock<()>>,
     poisoned: Arc<AtomicBool>,
+    scope: Option<String>,
 }
 
 /// Only topology changes and shutdown require exclusive lifecycle ownership.
@@ -26,19 +27,63 @@ pub struct ExclusivePermit {
 pub struct ExecutionPermit {
     owner: super::gate_owner::OwnerGuard,
     _guard: OwnedRwLockReadGuard<()>,
+    resource: Option<Box<ExecutionPermit>>,
+    poisoned: Arc<AtomicBool>,
 }
 impl ExecutionPermit {
+    pub fn with_resource(mut self, resource: ExecutionPermit) -> Self {
+        let resource = if let Some(previous) = self.resource.take() {
+            resource.with_resource(*previous)
+        } else {
+            resource
+        };
+        self.resource = Some(Box::new(resource));
+        self
+    }
+    pub fn poison(&self) {
+        if let Some(resource) = &self.resource {
+            resource.poison();
+        } else {
+            self.poisoned.store(true, Ordering::Release);
+        }
+    }
+
     pub fn process_started(&self, pid: Option<u32>) {
         self.owner.process_started(pid);
+        if let Some(resource) = &self.resource {
+            resource.process_started(pid);
+        }
     }
 }
 #[derive(Debug)]
 pub struct ActivityPermit {
     _owner: super::gate_owner::OwnerGuard,
     _guard: OwnedRwLockReadGuard<()>,
+    resource: Option<Box<ActivityPermit>>,
+}
+
+impl ActivityPermit {
+    pub fn with_resource(mut self, resource: ActivityPermit) -> Self {
+        let resource = if let Some(previous) = self.resource.take() {
+            resource.with_resource(*previous)
+        } else {
+            resource
+        };
+        self.resource = Some(Box::new(resource));
+        self
+    }
 }
 
 impl FileGate {
+    pub(crate) fn named(scope: &str) -> Self {
+        Self {
+            scope: Some(scope.into()),
+            ..Self::default()
+        }
+    }
+    pub(crate) fn idle(&self) -> bool {
+        Arc::strong_count(&self.inner) == 1 && !self.is_poisoned()
+    }
     pub fn new() -> Self {
         Self::default()
     }
@@ -70,6 +115,8 @@ impl FileGate {
         Ok(ExecutionPermit {
             owner: self.owners.enter("command", Some(operation)),
             _guard: guard,
+            resource: None,
+            poisoned: self.poisoned.clone(),
         })
     }
     pub async fn command(
@@ -101,6 +148,7 @@ impl FileGate {
         Ok(ActivityPermit {
             _owner: owner,
             _guard: guard,
+            resource: None,
         })
     }
     /// Unknown process ownership still prevents unsafe new admissions.
@@ -119,7 +167,7 @@ impl FileGate {
     fn busy(&self, stage: &'static str) -> Error {
         let mut fields = self.owners.fields();
         fields.as_object_mut().unwrap().extend(serde_json::json!({"operation":"file.lifecycle.admit",
-            "stage":stage,"result":"failure","code":"EBUSY","outcome":"not-committed","durationMs":0}).as_object().unwrap().clone());
+            "stage":stage,"resourceId":self.scope,"result":"failure","code":"EBUSY","outcome":"not-committed","durationMs":0}).as_object().unwrap().clone());
         crate::core::events::emit(
             crate::core::events::Level::Warn,
             "file.gate.conflict",

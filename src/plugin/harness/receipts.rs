@@ -1,12 +1,14 @@
 //! Epoch-scoped receipts outlive runtime replacement and spill to private disk.
 use crate::core::error::Error;
+use crate::core::sqlite_shards::SqliteShards;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub(super) struct Receipts {
-    database: Mutex<Connection>,
+    database: SqliteShards,
+    _directory: tempfile::TempDir,
     active: Arc<Semaphore>,
 }
 #[derive(Clone)]
@@ -20,19 +22,12 @@ pub(super) enum Reservation {
 }
 impl Receipts {
     pub fn new() -> Result<Arc<Self>, String> {
-        // An unnamed SQLite database spills to a private temporary file and is
-        // removed on close, including process death. A new process has a new epoch.
-        let database = Connection::open("").map_err(|_| "Harness receipt storage unavailable")?;
-        database
-            .execute_batch(
-                "PRAGMA page_size=4096; PRAGMA max_page_count=65536;
-             PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA cache_size=-2048;
-             CREATE TABLE receipts (scope TEXT NOT NULL, id TEXT NOT NULL,
-             fingerprint TEXT NOT NULL, receipt TEXT NOT NULL, PRIMARY KEY(scope,id));",
-            )
+        let directory = tempfile::tempdir().map_err(|_| "Harness receipt directory unavailable")?;
+        let database = SqliteShards::new(directory.path().to_path_buf(), receipt_schema)
             .map_err(|_| "Harness receipt storage unavailable")?;
         Ok(Arc::new(Self {
-            database: Mutex::new(database),
+            database,
+            _directory: directory,
             active: Arc::new(Semaphore::new(1024)),
         }))
     }
@@ -49,24 +44,29 @@ impl ReceiptScope {
     }
     pub async fn existing(&self, id: &str, fingerprint: String) -> Result<Option<Value>, Error> {
         let id = identifier(id)?;
-        self.access(move |db, scope, _| matching(db, scope, &id, &fingerprint))
-            .await
+        self.access(id.clone(), move |db, scope, _| {
+            matching(db, scope, &id, &fingerprint)
+        })
+        .await
     }
     async fn access<T: Send + 'static>(
         &self,
+        id: String,
         action: impl FnOnce(&Connection, &str, &Arc<Semaphore>) -> Result<T, Error> + Send + 'static,
     ) -> Result<T, Error> {
         let scope = self.clone();
         tokio::task::spawn_blocking(move || {
-            let database = scope.store.database.lock().map_err(|_| storage_error())?;
-            action(&database, &scope.key, &scope.store.active)
+            let resource = json!([scope.key, id]).to_string();
+            scope.store.database.with(&resource, |database| {
+                action(database, &scope.key, &scope.store.active)
+            })
         })
         .await
         .map_err(|_| storage_error())?
     }
     pub async fn reserve(&self, id: &str, fingerprint: String) -> Result<Reservation, Error> {
         let id = identifier(id)?;
-        self.access(move |db, scope, active| {
+        self.access(id.clone(), move |db, scope, active| {
             if let Some(receipt) = matching(db, scope, &id, &fingerprint)? {
                 return Ok(Reservation::Existing(receipt));
             }
@@ -87,7 +87,7 @@ impl ReceiptScope {
     }
     pub async fn operation(&self, id: &str) -> Result<Value, Error> {
         let id = identifier(id)?;
-        self.access(move |db, scope, _| {
+        self.access(id.clone(), move |db, scope, _| {
             if let Some((_, receipt)) = lookup(db, scope, &id)? { return Ok(receipt); }
             // Fence an unseen request before confirming that it never started.
             let receipt = json!({"outcome":"not-committed","requestId":id,"code":"HARNESS_REQUEST_NOT_STARTED"});
@@ -117,7 +117,7 @@ impl ReceiptScope {
     }
     async fn read_output(&self, args: Value, epoch: String) -> Result<Value, Error> {
         let id = identifier(args["requestId"].as_str().ok_or_else(Error::invalid)?)?;
-        self.access(move |db, scope, _| {
+        self.access(id.clone(), move |db, scope, _| {
             let (_, receipt) =
                 lookup(db, scope, &id)?.ok_or_else(super::command_outputs::missing)?;
             super::command_outputs::chunk(receipt, &args, &epoch)
@@ -126,7 +126,7 @@ impl ReceiptScope {
     }
     pub async fn finish(&self, id: &str, receipt: Value) -> Result<Value, Error> {
         let id = identifier(id)?;
-        self.access(move |db, scope, _| {
+        self.access(id.clone(), move |db, scope, _| {
             let (_, current) = lookup(db, scope, &id)?.ok_or_else(storage_error)?;
             // Native reconciliation and the original worker may finish concurrently.
             // A late timeout must not overwrite an already confirmed receipt.
@@ -300,12 +300,17 @@ mod tests {
         let scope = store.scoped("project".into());
         let _reservation = scope.reserve("id", "body".into()).await.unwrap();
         {
-            let database = store.database.lock().unwrap();
-            let pages: u64 = database
-                .query_row("PRAGMA page_count", [], |row| row.get(0))
-                .unwrap();
-            database
-                .execute_batch(&format!("PRAGMA max_page_count={pages}"))
+            store
+                .database
+                .with(&json!(["project", "id"]).to_string(), |database| {
+                    let pages: u64 = database
+                        .query_row("PRAGMA page_count", [], |row| row.get(0))
+                        .unwrap();
+                    database
+                        .execute_batch(&format!("PRAGMA max_page_count={pages}"))
+                        .unwrap();
+                    Ok(())
+                })
                 .unwrap();
         }
         assert_eq!(
@@ -326,4 +331,9 @@ mod tests {
             Reservation::Existing(_)
         ));
     }
+}
+
+fn receipt_schema(database: &Connection) -> Result<(), Error> {
+    database.execute_batch("PRAGMA max_page_count=65536; PRAGMA cache_size=-2048;
+        CREATE TABLE IF NOT EXISTS receipts(scope TEXT NOT NULL,id TEXT NOT NULL,fingerprint TEXT NOT NULL,receipt TEXT NOT NULL,PRIMARY KEY(scope,id));").map_err(|_|storage_error())
 }

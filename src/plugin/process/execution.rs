@@ -1,13 +1,7 @@
-//! Execution admission: whether commands may start, under which epoch, and the
-//! descriptor that keeps the export fenced for the lifetime of the process.
-//!
-//! The epoch changes on every restart, so a handle from a previous run can
-//! never be replayed. [`Execution::lock_handle`] returns the descriptor that
-//! the launcher retains with `--sync-fd`: it keeps the advisory lock alive even
-//! if this daemon dies while a command is still running.
+//! Process admission and restart epochs; the retained root is an access capability.
+//! Export directories carry no advisory ownership lock.
 
 use crate::{core::error::Error, process::model::Registry, process::sandbox};
-use rustix::fs::FlockOperation;
 use std::{
     fs::File,
     sync::{
@@ -20,7 +14,7 @@ pub struct Execution {
     registry: Registry,
     epoch: String,
     ready: AtomicBool,
-    lock: Mutex<Option<File>>,
+    root: Mutex<Option<File>>,
 }
 
 impl Execution {
@@ -29,7 +23,7 @@ impl Execution {
             registry: Registry::default(),
             epoch,
             ready: AtomicBool::new(false),
-            lock: Mutex::new(None),
+            root: Mutex::new(None),
         }
     }
 
@@ -57,14 +51,14 @@ impl Execution {
         &self.registry
     }
 
-    /// Retain `lock` for the process lifetime.
-    pub fn retain_lock(&self, lock: File) {
-        *self.lock() = Some(lock);
+    /// Retain the root capability for read-only launch plans.
+    pub fn retain_root(&self, root: File) {
+        *self.root() = Some(root);
     }
 
-    /// A duplicate of the retained descriptor, sharing the advisory lock.
-    pub fn lock_handle(&self) -> Result<File, Error> {
-        self.lock()
+    /// Duplicate the retained directory capability.
+    pub fn root_handle(&self) -> Result<File, Error> {
+        self.root()
             .as_ref()
             .ok_or_else(Error::invalid)?
             .try_clone()
@@ -76,8 +70,8 @@ impl Execution {
         self.registry.cancel_all();
     }
 
-    fn lock(&self) -> MutexGuard<'_, Option<File>> {
-        self.lock
+    fn root(&self) -> MutexGuard<'_, Option<File>> {
+        self.root
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -94,18 +88,24 @@ pub async fn enable(state: &crate::app::State) -> Result<(), String> {
         .ok_or("Execution requires an export")?;
     let lock = export
         .try_clone_root()
-        .map_err(|_| "Cannot retain execution lock")?;
-    rustix::fs::flock(&lock, FlockOperation::NonBlockingLockExclusive)
-        .map_err(|_| "Another execution server still owns this export")?;
+        .map_err(|_| "Cannot retain execution capability")?;
     if crate::projects::native::enabled(state) {
-        let result=tokio::process::Command::new("/bin/true").kill_on_drop(true).status().await.map_err(|_|"Native execution unavailable")?;
-        if !result.success(){return Err("Native execution probe failed".into());}
-    }else{sandbox::probe().await?;}
+        let result = tokio::process::Command::new("/bin/true")
+            .kill_on_drop(true)
+            .status()
+            .await
+            .map_err(|_| "Native execution unavailable")?;
+        if !result.success() {
+            return Err("Native execution probe failed".into());
+        }
+    } else {
+        sandbox::probe().await?;
+    }
     state
         .services
         .get::<crate::process::Execution>()
         .ok_or("Process service is not configured")?
-        .retain_lock(lock);
+        .retain_root(lock);
     state
         .services
         .get::<crate::process::Execution>()

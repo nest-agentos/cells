@@ -8,7 +8,7 @@ use tower::ServiceExt;
 async fn metadata_uses_authenticated_mutations_and_normal_stat_reads() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("note.md"), "Text").unwrap();
-    let app = app_export(Export::exclusive(root.path()).unwrap());
+    let app = app_export(Export::open_writable(root.path()).unwrap());
     let response = app.clone().oneshot(mutate_request("meta", &json!({"action":"metadata","path":"note.md","metadata":{"_custom":{"anchor":"a"}},"removeKeys":[]}).to_string())).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(body_json(response).await["outcome"], "committed");
@@ -68,7 +68,7 @@ async fn legacy_metadata_lists_readonly_and_migrates_identity_on_write() {
     let database = rusqlite::Connection::open(&path).unwrap();
     database.execute_batch("CREATE TABLE file_metadata(path TEXT PRIMARY KEY,data TEXT NOT NULL); INSERT INTO file_metadata VALUES('note.md','{\"title\":\"preserved\"}'); PRAGMA application_id=1296321876; PRAGMA user_version=1;").unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-    let app = app_export(Export::exclusive(root.path()).unwrap());
+    let app = app_export(Export::open_writable(root.path()).unwrap());
     let response = app.clone().oneshot(request("/v1/fs/docs/entries?path=").body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body = body_json(response).await;

@@ -40,7 +40,7 @@ fn derives_alias_from_path_and_defaults_to_read_only() {
 }
 
 #[test]
-fn read_write_access_implies_exclusive_writes() {
+fn read_write_access_does_not_lock_the_export_directory() {
     let _guard = lock();
     let (_root, path) = fixture();
     let state = load(&format!(
@@ -49,7 +49,7 @@ fn read_write_access_implies_exclusive_writes() {
     .unwrap();
     assert!(state.auth.clients()[0].may_write("x1"));
     assert!(state.exports.get("x1").unwrap().writable());
-    assert!(cells::fs::Export::exclusive(std::path::Path::new(&path)).is_err());
+    assert!(cells::fs::Export::open_writable(std::path::Path::new(&path)).is_ok());
 }
 
 #[test]

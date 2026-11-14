@@ -20,6 +20,32 @@ pub async fn call(
     name: &str,
     args: Value,
 ) -> Result<Value, Error> {
+    authorize_sync(state, identity)?;
+    let activity = state
+        .services
+        .get::<crate::sync::SyncService>()
+        .ok_or_else(Error::unsupported)?
+        .activity()
+        .map_err(sync_error)?;
+    let gate = state.files.shared()?;
+    let service = state.services.require::<super::ProjectService>()?;
+    let binding = admit_binding(state, service, name, &args).await?;
+    let project_id = operation_project(state, identity, name, &args)?;
+    service.get(identity, &project_id)?;
+    let project = service.lifecycle(&project_id).shared()?;
+    let state = state.clone();
+    let name = name.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let _activity = activity;
+        let _gate = gate;
+        let _project = project;
+        let _binding = binding;
+        dispatch(&state, identity, &name, args)
+    })
+    .await
+    .map_err(|_| Error::internal())?
+}
+fn authorize_sync(state: &State, identity: usize) -> Result<(), Error> {
     let client = state.auth.try_client(identity)?;
     if !state
         .services
@@ -28,23 +54,62 @@ pub async fn call(
     {
         return Err(Error::forbidden("EACCES"));
     }
-    let activity = state
-        .services
-        .get::<crate::sync::SyncService>()
-        .ok_or_else(Error::unsupported)?
-        .activity()
-        .map_err(sync_error)?;
-    let gate = state.files.exclusive()?;
-    let state = state.clone();
-    let name = name.to_owned();
-    tokio::task::spawn_blocking(move || {
-        let _activity = activity;
-        let _gate = gate;
-        dispatch(&state, identity, &name, args)
-    })
-    .await
-    .map_err(|_| Error::internal())?
+    Ok(())
 }
+
+async fn admit_binding(
+    state: &State,
+    service: &super::ProjectService,
+    name: &str,
+    args: &Value,
+) -> Result<Option<tokio::sync::OwnedMutexGuard<()>>, Error> {
+    if matches!(name, "project_sync_directories" | "project_sync_status") {
+        return Ok(None);
+    }
+    let id = args["bindingId"]
+        .as_str()
+        .filter(|id| crate::core::ids::is_identifier_within(id, 128))
+        .ok_or_else(Error::invalid)?;
+    let started = tokio::time::Instant::now();
+    let result = service
+        .sync_bindings
+        .acquire(
+            id,
+            started + std::time::Duration::from_secs(30),
+            &state.event_stop,
+        )
+        .await;
+    if result.is_err() || started.elapsed().as_millis() >= 20 {
+        crate::core::events::emit(
+            crate::core::events::Level::Warn,
+            "project.sync.admission",
+            json!({"operation":"project.directory-sync","operationId":id,"stage":"binding-admission","result":if result.is_ok(){"acquired"}else{"failure"},"code":result.as_ref().err().map(|e|e.code),"waitMs":started.elapsed().as_millis()}),
+        );
+    }
+    result.map(Some)
+}
+
+fn operation_project(
+    state: &State,
+    identity: usize,
+    name: &str,
+    args: &Value,
+) -> Result<String, Error> {
+    if matches!(name, "project_sync_directories" | "project_sync_bind") {
+        return args["projectId"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(Error::invalid);
+    }
+    let id = args["bindingId"].as_str().ok_or_else(Error::invalid)?;
+    catalog(state)?
+        .bindings()?
+        .into_iter()
+        .find(|b| b.id == id && b.owner == state.auth.client(identity).id())
+        .map(|b| b.project_id)
+        .ok_or_else(|| Error::not_found("BINDING_UNKNOWN"))
+}
+
 fn dispatch(state: &State, identity: usize, name: &str, args: Value) -> Result<Value, Error> {
     if name == "project_sync_directories" {
         return directories(state, identity, &args);

@@ -74,7 +74,7 @@ async fn ranges_are_resolved_ignored_or_rejected_explicitly() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("bytes"), b"0123456789").unwrap();
     // Range behaviour is exercised on a writable export so validators exist.
-    let server = app_export(Export::exclusive(root.path()).unwrap());
+    let server = app_export(Export::open_writable(root.path()).unwrap());
     let response = server
         .clone()
         .oneshot(

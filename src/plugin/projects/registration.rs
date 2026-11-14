@@ -16,7 +16,7 @@ impl RegistrationAudit {
     }
     pub(super) fn acquired(&self, wait_ms: u128) {
         crate::core::events::emit(crate::core::events::Level::Info,"project.registration.admitted",serde_json::json!({
-            "operation":"projects.register","stage":"catalog-admission","result":"success","lockScope":"project-catalog",
+            "operation":"projects.register","stage":"catalog-admission","result":"success","lockScope":"registration-directory",
             "waitMs":wait_ms,"durationMs":self.started.elapsed().as_millis()}));
     }
     pub(super) fn complete(&mut self, result: &Result<Project, Error>) {
@@ -24,7 +24,7 @@ impl RegistrationAudit {
         crate::core::events::emit(if result.is_ok(){crate::core::events::Level::Info}else{crate::core::events::Level::Warn},
             "project.registration.completed",serde_json::json!({"operation":"projects.register","stage":self.stage,
                 "result":if result.is_ok(){"success"}else{"failure"},"code":result.as_ref().err().map(|error|error.code),
-                "projectId":self.project,"lockScope":"project-catalog","durationMs":self.started.elapsed().as_millis()}));
+                "projectId":self.project,"lockScope":"registration-directory","durationMs":self.started.elapsed().as_millis()}));
     }
 }
 impl Drop for RegistrationAudit {

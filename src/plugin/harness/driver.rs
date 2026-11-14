@@ -18,6 +18,20 @@ pub trait HarnessDriver: Send + Sync {
         Box::pin(async { Err(Error::unsupported()) })
     }
     fn descriptor(&self) -> Value;
+    /// Native subtree management must name every affected session before admission.
+    fn mutation_resources<'a>(
+        &'a self,
+        _name: &'a str,
+        args: &'a Value,
+    ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
+        Box::pin(async move {
+            Ok(args["sessionId"]
+                .as_str()
+                .into_iter()
+                .map(str::to_owned)
+                .collect())
+        })
+    }
     fn read<'a>(&'a self, name: &'a str, args: Value) -> BoxFuture<'a, Result<Value, Error>>;
     fn execute<'a>(&'a self, name: &'a str, args: &'a Value)
         -> BoxFuture<'a, Result<Value, Error>>;
@@ -28,9 +42,11 @@ pub trait HarnessDriver: Send + Sync {
         args: &'a Value,
     ) -> BoxFuture<'a, NativeExecution> {
         Box::pin(async move {
-            match self.execute(name,args).await {
-                Err(error) if error.code=="NATIVE_WORKSPACE_BUSY"=>NativeExecution::NotStarted(error),
-                result=>NativeExecution::Dispatched(result),
+            match self.execute(name, args).await {
+                Err(error) if error.code == "NATIVE_WORKSPACE_BUSY" => {
+                    NativeExecution::NotStarted(error)
+                }
+                result => NativeExecution::Dispatched(result),
             }
         })
     }

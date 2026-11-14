@@ -76,8 +76,8 @@ pub async fn call(
         }
         "project_set_execution" => {
             let started = std::time::Instant::now();
-            let _gate = state.files.exclusive()?;
             let id = text(&args, "projectId")?;
+            let (_node,_gate)=control(state,identity,service,id)?;
             let environment = serde_json::from_value(args["execution"].clone()).map_err(|_| Error::invalid())?;
             let result = service.set_environment(state, identity, id,
                 args["revision"].as_u64().ok_or_else(Error::invalid)?, environment);
@@ -108,8 +108,8 @@ pub async fn call(
         "project_configure" => configure(state, identity, service, args).await,
         "project_remount" => remount(state, identity, service, args).await,
         "project_forget" => {
-            let _gate = state.files.exclusive()?;
             let id = text(&args, "projectId")?;
+            let (_node,_gate)=control(state,identity,service,id)?;
             service.forget(
                 identity,
                 id,
@@ -131,6 +131,13 @@ pub(super) fn valid_channel_endpoint(value: &str) -> bool {
         && endpoint.username().is_empty() && endpoint.password().is_none()
         && endpoint.query().is_none() && endpoint.fragment().is_none())
 }
+fn control(state:&State,identity:usize,service:&ProjectService,id:&str)->Result<(tokio::sync::OwnedRwLockReadGuard<()>,crate::core::gate::ExclusivePermit),Error>{
+    let node=state.files.shared()?;
+    service.get(identity,id)?;
+    let project=service.lifecycle(id).exclusive()?;
+    Ok((node,project))
+}
+
 fn text<'a>(args: &'a Value, key: &str) -> Result<&'a str, Error> {
     args[key]
         .as_str()
@@ -144,8 +151,8 @@ async fn remount(
     service: &ProjectService,
     args: Value,
 ) -> Result<Value, Error> {
-    let _gate = state.files.exclusive()?;
     let id = text(&args, "projectId")?;
+    let (_node,_gate)=control(state,identity,service,id)?;
     let started=std::time::Instant::now();
     let result = service.remount(
         state,
@@ -169,8 +176,8 @@ async fn configure(
     service: &ProjectService,
     args: Value,
 ) -> Result<Value, Error> {
-    let _gate = state.files.exclusive()?;
     let id = text(&args, "projectId")?;
+    let (_node,_gate)=control(state,identity,service,id)?;
     let revision = args["revision"].as_u64().ok_or_else(Error::invalid)?;
     let current = service.get(identity, id)?;
     authorize(state, identity, &current)?;

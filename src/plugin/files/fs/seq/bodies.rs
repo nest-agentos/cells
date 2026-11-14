@@ -96,22 +96,24 @@ fn ensure_directory(
     path: &str,
     checkpoint: &impl Fn() -> Result<(), Error>,
 ) -> Result<(), Error> {
-    let _revisions = export
-        .lock_revisions()
-        .ok_or_else(|| Error::forbidden("EROFS"))?;
-    checkpoint()?;
-    let (parent, name) = export.parent(path)?;
-    match rustix::fs::mkdirat(
-        &parent,
-        name.as_str(),
-        rustix::fs::Mode::from_bits_truncate(0o700),
-    ) {
-        Ok(()) => parent.sync_all()?,
-        Err(rustix::io::Errno::EXIST) => {
-            export.open_dir(path)?;
-        }
-        Err(error) => return Err(error.into()),
+    if !export.writable() {
+        return Err(Error::forbidden("EROFS"));
     }
-    // Creating a new sibling directory does not change the database inode or its validator.
-    Ok(())
+    export.path_locks.with(&[(path, true)], || {
+        checkpoint()?;
+        let (parent, name) = export.parent(path)?;
+        match rustix::fs::mkdirat(
+            &parent,
+            name.as_str(),
+            rustix::fs::Mode::from_bits_truncate(0o700),
+        ) {
+            Ok(()) => parent.sync_all()?,
+            Err(rustix::io::Errno::EXIST) => {
+                export.open_dir(path)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+        // Creating a new sibling directory does not change the database inode or its validator.
+        Ok(())
+    })
 }

@@ -31,7 +31,7 @@ pub(super) const SOURCE_KINDS: &[&str] = &[
 ];
 
 pub struct Codex {
-    channel_configs: Mutex<std::collections::BTreeMap<String,String>>,
+    channel_configs: Mutex<std::collections::BTreeMap<String, String>>,
     selections: Mutex<std::collections::BTreeMap<String, Value>>,
     config: ProfileConfig,
     runtime: Option<Arc<crate::projects::runtime::ProjectRuntime>>,
@@ -94,7 +94,8 @@ impl Codex {
             "harness_session_read" => self.history(&bridge, &args).await,
             "harness_session_usage" => self.usage(&bridge, &args).await,
             "harness_session_info" => {
-                self.reconcile_channel(&bridge,string(&args,"sessionId")?).await?;
+                self.reconcile_channel(&bridge, string(&args, "sessionId")?)
+                    .await?;
                 let thread = self.summary(&bridge, string(&args, "sessionId")?).await?;
                 let mut session = self.session(&thread);
                 session["writerLock"] =
@@ -241,24 +242,55 @@ impl Codex {
     }
     async fn create(&self, bridge: &Bridge, args: &Value) -> Result<Value, Error> {
         let workspace = self.workspace(string(args, "workspaceId")?)?;
-        let directory=crate::harness::session_channel::directory(self.runtime.as_deref(),&workspace.path,args)?;
+        let directory = crate::harness::session_channel::directory(
+            self.runtime.as_deref(),
+            &workspace.path,
+            args,
+        )?;
         let mut params = json!({"cwd":directory,"approvalPolicy":"on-request","sandbox":if self.runtime.is_some(){"danger-full-access"}else{"workspace-write"},"historyMode":"legacy"});
         if let Some(runtime) = &self.runtime {
             let state = runtime.state()?;
-            if let Some(config) = state.services.require::<crate::projects::ProjectService>()?.channels.config(&runtime.project.id,&directory,&runtime.project.owner)? {
+            if let Some(config) = state
+                .services
+                .require::<crate::projects::ProjectService>()?
+                .channels
+                .config(&runtime.project.id, &directory, &runtime.project.owner)?
+            {
                 params["config"] = config;
             }
         }
-        let result = bridge.persistent_call("thread/start",params.clone()).await?;
-        if let Some(runtime)=&self.runtime {
-            runtime.state()?.services.require::<crate::projects::ProjectService>()?.channels.bind(&runtime.project.id,&directory,string(&result["thread"],"id")?).map_err(|_| Error::new(axum::http::StatusCode::SERVICE_UNAVAILABLE,"HARNESS_RECEIPT_STORAGE"))?;
+        let result = bridge
+            .persistent_call("thread/start", params.clone())
+            .await?;
+        if let Some(runtime) = &self.runtime {
+            runtime
+                .state()?
+                .services
+                .require::<crate::projects::ProjectService>()?
+                .channels
+                .bind(
+                    &runtime.project.id,
+                    &directory,
+                    string(&result["thread"], "id")?,
+                )
+                .map_err(|_| {
+                    Error::new(
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        "HARNESS_RECEIPT_STORAGE",
+                    )
+                })?;
         }
         self.owned.lock().await.insert(
             string(&result["thread"], "id")
                 .map_err(|_| Error::internal())?
                 .into(),
         );
-        if let Some(config)=params.get("config") {self.channel_configs.lock().await.insert(string(&result["thread"],"id")?.into(),config.to_string());}
+        if let Some(config) = params.get("config") {
+            self.channel_configs
+                .lock()
+                .await
+                .insert(string(&result["thread"], "id")?.into(), config.to_string());
+        }
         self.remember_model(&result).await;
         Ok(json!({"session":self.session(&result["thread"])}))
     }
@@ -283,56 +315,133 @@ impl Codex {
             .map(|runtime| runtime.resolve_cwd(cwd))
             .transpose()?;
         let cwd = translated.as_deref().unwrap_or(cwd);
-        let mut params=json!({"threadId":id,"cwd":cwd,"excludeTurns":true,"approvalPolicy":"on-request","sandbox":if self.runtime.is_some(){"danger-full-access"}else{"workspace-write"}});
-        if let Some(runtime)=&self.runtime {
-            params["config"]=runtime.state()?.services.require::<crate::projects::ProjectService>()?.channels.session_config(&runtime.project.id,cwd,&runtime.project.owner,id)?;
+        let mut params = json!({"threadId":id,"cwd":cwd,"excludeTurns":true,"approvalPolicy":"on-request","sandbox":if self.runtime.is_some(){"danger-full-access"}else{"workspace-write"}});
+        if let Some(runtime) = &self.runtime {
+            params["config"] = runtime
+                .state()?
+                .services
+                .require::<crate::projects::ProjectService>()?
+                .channels
+                .session_config(&runtime.project.id, cwd, &runtime.project.owner, id)?;
         }
-        let fingerprint=params.get("config").map(Value::to_string);
-        let result=bridge.persistent_call("thread/resume",params).await?;
-        if let Some(fingerprint)=fingerprint {self.channel_configs.lock().await.insert(id.into(),fingerprint);}
+        let fingerprint = params.get("config").map(Value::to_string);
+        let result = bridge.persistent_call("thread/resume", params).await?;
+        if let Some(fingerprint) = fingerprint {
+            self.channel_configs
+                .lock()
+                .await
+                .insert(id.into(), fingerprint);
+        }
         self.owned.lock().await.insert(id.into());
         self.remember_model(&result).await;
         Ok(json!({"session":self.session(&result["thread"])}))
     }
-    async fn refresh_channel(&self, bridge:&Bridge,id:&str)->Result<(),Error> {
-        let Some(runtime)=&self.runtime else {return Ok(());};
-        let thread=self.summary(bridge,id).await?;
-        let cwd=runtime.resolve_cwd(string(&thread,"cwd")?)?;
-        let state=runtime.state()?;
-        let service=state.services.require::<crate::projects::ProjectService>()?;
-        let config=service.channels.session_config(&runtime.project.id,&cwd,&runtime.project.owner,id)?;
-        let fingerprint=config.to_string();
-        if self.channel_configs.lock().await.get(id)==Some(&fingerprint) {return Ok(());}
-        if thread["status"]["type"]=="active" {return Err(Error::busy());}
-        self.unload_channel(bridge,id).await?;
-        bridge.persistent_call("thread/resume",json!({"threadId":id,"cwd":cwd,"excludeTurns":true,"config":config})).await?;
-        self.channel_configs.lock().await.insert(id.into(),fingerprint);
+    async fn refresh_channel(&self, bridge: &Bridge, id: &str) -> Result<(), Error> {
+        let Some(runtime) = &self.runtime else {
+            return Ok(());
+        };
+        let thread = self.summary(bridge, id).await?;
+        let cwd = runtime.resolve_cwd(string(&thread, "cwd")?)?;
+        let state = runtime.state()?;
+        let service = state
+            .services
+            .require::<crate::projects::ProjectService>()?;
+        let config = service.channels.session_config(
+            &runtime.project.id,
+            &cwd,
+            &runtime.project.owner,
+            id,
+        )?;
+        let fingerprint = config.to_string();
+        if self.channel_configs.lock().await.get(id) == Some(&fingerprint) {
+            return Ok(());
+        }
+        if thread["status"]["type"] == "active" {
+            return Err(Error::busy());
+        }
+        self.unload_channel(bridge, id).await?;
+        bridge
+            .persistent_call(
+                "thread/resume",
+                json!({"threadId":id,"cwd":cwd,"excludeTurns":true,"config":config}),
+            )
+            .await?;
+        self.channel_configs
+            .lock()
+            .await
+            .insert(id.into(), fingerprint);
         Ok(())
     }
-    async fn reconcile_channel(&self,bridge:&Bridge,id:&str)->Result<(),Error> {
-        let Some(runtime)=&self.runtime else {return Ok(());};
-        let state=runtime.state()?;let service=state.services.require::<crate::projects::ProjectService>()?;
-        let Some(execution)=service.channels.session_execution(&runtime.project.id,id)? else {return Ok(());};
-        if execution["status"]!="unknown" {return Ok(());}
-        let Some(turn)=execution["turnId"].as_str() else {return Ok(());};
-        let page=bridge.call("thread/turns/list",json!({"threadId":id,"limit":100,"sortDirection":"desc","itemsView":"notLoaded"})).await?;
-        if let Some(record)=page["data"].as_array().and_then(|rows|rows.iter().find(|row|row["id"]==turn)) {
-            if ["completed","failed","interrupted","cancelled"].contains(&record["status"].as_str().unwrap_or("")) {
-                service.channels.observe(&runtime.project.id,&json!({"method":"turn/completed","params":{"threadId":id,"turn":record}}))?;
+    async fn reconcile_channel(&self, bridge: &Bridge, id: &str) -> Result<(), Error> {
+        let Some(runtime) = &self.runtime else {
+            return Ok(());
+        };
+        let state = runtime.state()?;
+        let service = state
+            .services
+            .require::<crate::projects::ProjectService>()?;
+        let Some(execution) = service
+            .channels
+            .session_execution(&runtime.project.id, id)?
+        else {
+            return Ok(());
+        };
+        if execution["status"] != "unknown" {
+            return Ok(());
+        }
+        let Some(turn) = execution["turnId"].as_str() else {
+            return Ok(());
+        };
+        let page = bridge
+            .call(
+                "thread/turns/list",
+                json!({"threadId":id,"limit":100,"sortDirection":"desc","itemsView":"notLoaded"}),
+            )
+            .await?;
+        if let Some(record) = page["data"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| row["id"] == turn))
+        {
+            if ["completed", "failed", "interrupted", "cancelled"]
+                .contains(&record["status"].as_str().unwrap_or(""))
+            {
+                service.channels.observe(
+                    &runtime.project.id,
+                    &json!({"method":"turn/completed","params":{"threadId":id,"turn":record}}),
+                )?;
             }
         }
         Ok(())
     }
-    async fn unload_channel(&self,bridge:&Bridge,id:&str)->Result<(),Error> {
-        let (after,mut changed)={let events=bridge.events.lock().unwrap();(events.position()["after"].as_u64().unwrap_or(0),events.watch())};
-        let result=bridge.persistent_call("thread/unsubscribe",json!({"threadId":id})).await?;
-        if result["status"]=="notLoaded" {return Ok(());}
-        tokio::time::timeout(std::time::Duration::from_secs(5),async {
+    async fn unload_channel(&self, bridge: &Bridge, id: &str) -> Result<(), Error> {
+        let (after, mut changed) = {
+            let events = bridge.events.lock().unwrap();
+            (
+                events.position()["after"].as_u64().unwrap_or(0),
+                events.watch(),
+            )
+        };
+        let result = bridge
+            .persistent_call("thread/unsubscribe", json!({"threadId":id}))
+            .await?;
+        if result["status"] == "notLoaded" {
+            return Ok(());
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                if bridge.events.lock().unwrap().closed_since(id,after) {return Ok(());}
-                changed.changed().await.map_err(|_|Error::unavailable())?;
+                if bridge.events.lock().unwrap().closed_since(id, after) {
+                    return Ok(());
+                }
+                changed.changed().await.map_err(|_| Error::unavailable())?;
             }
-        }).await.map_err(|_|Error::new(axum::http::StatusCode::GATEWAY_TIMEOUT,"CHANNEL_UNLOAD_TIMEOUT"))?
+        })
+        .await
+        .map_err(|_| {
+            Error::new(
+                axum::http::StatusCode::GATEWAY_TIMEOUT,
+                "CHANNEL_UNLOAD_TIMEOUT",
+            )
+        })?
     }
     pub(super) async fn require_owned(&self, id: &str) -> Result<(), Error> {
         if !self.owned.lock().await.contains(id) {
@@ -378,7 +487,7 @@ impl Codex {
         let started = std::time::Instant::now();
         let id = string(args, "sessionId")?;
         self.require_owned(id).await?;
-        self.refresh_channel(bridge,id).await?;
+        self.refresh_channel(bridge, id).await?;
         let params = self.turn_params(bridge, args, input).await?;
         let operation = string(args, "requestId")?;
         crate::core::events::emit(
@@ -539,7 +648,7 @@ impl Codex {
             }
         }
         thread["turns"] = page["turns"].clone();
-        restore_history_head(&mut thread,args);
+        restore_history_head(&mut thread, args);
         let mut session = self.session(&thread);
         if let Some(revision) = revision {
             session["historyRevision"] = json!(revision);
@@ -553,9 +662,12 @@ impl Codex {
             json!({"session":session,"turns":page["turns"],"nextCursor":page["nextCursor"]});
         if page["recovery"].is_object() {
             result["recovery"] = page["recovery"].clone();
-            eprintln!("{}", json!({"operation":"harness.history.read", "operationId":id,
+            eprintln!(
+                "{}",
+                json!({"operation":"harness.history.read", "operationId":id,
                 "stage":"rollout_parse", "result":"partial", "code":"HARNESS_HISTORY_CORRUPT_RECORDS",
-                "durationMs":started.elapsed().as_millis(), "recovery":page["recovery"]}));
+                "durationMs":started.elapsed().as_millis(), "recovery":page["recovery"]})
+            );
         }
         if page["eventCursor"].is_object() {
             result["eventCursor"] = page["eventCursor"].clone();
@@ -746,6 +858,35 @@ fn validate_response(request: &Value, result: Value) -> Result<(), Error> {
 }
 
 impl HarnessDriver for Codex {
+    fn mutation_resources<'a>(
+        &'a self,
+        name: &'a str,
+        args: &'a Value,
+    ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
+        Box::pin(async move {
+            let mut ids = args["sessionId"]
+                .as_str()
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            if matches!(name, "harness_delete" | "harness_archive") {
+                let bridge = self.bridge().await?;
+                let id = string(args, "sessionId")?;
+                for archived in [false, true] {
+                    ids.extend(
+                        self.management_descendants(
+                            &bridge,
+                            id,
+                            archived,
+                            name == "harness_delete",
+                        )
+                        .await?,
+                    );
+                }
+            }
+            Ok(ids)
+        })
+    }
     fn active_sessions(&self) -> Option<usize> {
         let bridge = self.bridge.try_lock().ok()?;
         Some(match bridge.as_ref() {
@@ -843,11 +984,24 @@ fn log_history_terminals(args: &Value, page: &Value, started: std::time::Instant
 }
 
 fn restore_history_head(thread: &mut Value, args: &Value) {
-    if args["cursor"].is_string() || thread["lastTurnId"].is_string() || thread["status"]["type"]=="active" {return;}
-    let latest=thread["turns"].as_array().and_then(|turns|turns.last());
-    let Some(turn)=latest.filter(|turn|turn["id"].is_string() && matches!(turn["status"].as_str(),Some("completed"|"failed"|"interrupted"|"cancelled"))) else {return;};
-    thread["lastTurnId"]=turn["id"].clone();
-    thread["lastTurnResult"]=last_turn_result(thread);
+    if args["cursor"].is_string()
+        || thread["lastTurnId"].is_string()
+        || thread["status"]["type"] == "active"
+    {
+        return;
+    }
+    let latest = thread["turns"].as_array().and_then(|turns| turns.last());
+    let Some(turn) = latest.filter(|turn| {
+        turn["id"].is_string()
+            && matches!(
+                turn["status"].as_str(),
+                Some("completed" | "failed" | "interrupted" | "cancelled")
+            )
+    }) else {
+        return;
+    };
+    thread["lastTurnId"] = turn["id"].clone();
+    thread["lastTurnResult"] = last_turn_result(thread);
 }
 
 fn last_turn_result(thread: &Value) -> Value {
@@ -935,11 +1089,21 @@ mod persisted_head_tests {
     use super::*;
     #[test]
     fn cold_history_restores_the_head_without_using_older_pages_or_unfinished_turns() {
-        let original=json!({"status":{"type":"notLoaded"},"turns":[{"id":"old","status":"completed"},{"id":"last","status":"failed"}]});
-        let mut thread=original.clone();restore_history_head(&mut thread,&json!({}));
-        assert_eq!(thread["lastTurnId"],"last");assert_eq!(thread["lastTurnResult"],"failed");
-        let mut older=original.clone();restore_history_head(&mut older,&json!({"cursor":"older"}));assert!(older["lastTurnId"].is_null());
-        let mut active=original.clone();active["status"]["type"]=json!("active");restore_history_head(&mut active,&json!({}));assert!(active["lastTurnId"].is_null());
-        let mut pending=original;pending["turns"][1]["status"]=json!("inProgress");restore_history_head(&mut pending,&json!({}));assert!(pending["lastTurnId"].is_null());
+        let original = json!({"status":{"type":"notLoaded"},"turns":[{"id":"old","status":"completed"},{"id":"last","status":"failed"}]});
+        let mut thread = original.clone();
+        restore_history_head(&mut thread, &json!({}));
+        assert_eq!(thread["lastTurnId"], "last");
+        assert_eq!(thread["lastTurnResult"], "failed");
+        let mut older = original.clone();
+        restore_history_head(&mut older, &json!({"cursor":"older"}));
+        assert!(older["lastTurnId"].is_null());
+        let mut active = original.clone();
+        active["status"]["type"] = json!("active");
+        restore_history_head(&mut active, &json!({}));
+        assert!(active["lastTurnId"].is_null());
+        let mut pending = original;
+        pending["turns"][1]["status"] = json!("inProgress");
+        restore_history_head(&mut pending, &json!({}));
+        assert!(pending["lastTurnId"].is_null());
     }
 }

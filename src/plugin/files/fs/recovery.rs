@@ -1,4 +1,4 @@
-//! Recover only journaled uploads under the export's exclusive writer lock.
+//! Recover only journaled uploads whose own live lease has been released.
 use crate::{
     core::{
         error::Error,
@@ -19,6 +19,10 @@ pub(crate) fn clean_uploads(export: &Export) -> Result<(), Error> {
         }
         for upload in batch {
             cursor = upload.id;
+            let Some(_lease) = journal.recovery_lease(&upload)? else {
+                retained += 1;
+                continue;
+            };
             let cleaned = export
                 .open_dir(&upload.parent)
                 .ok()

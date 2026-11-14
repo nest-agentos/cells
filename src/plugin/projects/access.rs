@@ -12,13 +12,15 @@ pub fn project_path(
     let Some(id) = headers.get("x-fsagent-project") else {
         return Ok(None);
     };
-    let guard = if write {
-        state.files.shared()?
-    } else {
-        state.files.read_only()?
-    };
     let id = id.to_str().map_err(|_| Error::invalid())?;
     let project = load_project(state, headers, id)?;
+    let service = state.services.require::<super::ProjectService>()?;
+    let guard = service.lifecycle(id).shared()?;
+    // Only the revision needs a second read after admission; avoid repeating filesystem authorization.
+    let identity = crate::http::access::identity(state, headers)?;
+    if service.get(identity, id)?.revision != project.revision {
+        return Err(Error::conflict("PROJECT_REVISION_CHANGED"));
+    }
     if write
         && headers
             .get("x-fsagent-project-readonly")

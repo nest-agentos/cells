@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 pub(super) mod decision;
 pub(super) mod encoding;
+pub(in crate::plugin::projects) mod locks;
 pub(super) mod startup;
 pub(super) mod store;
 pub(crate) use startup::maintain;
@@ -40,9 +41,14 @@ async fn execute(state: &Arc<State>, identity: usize, args: &Value) -> Result<Va
         return Err(Error::invalid());
     }
     let binding = authorize(state, identity, args)?;
+    let _operation = if args["action"] == "recover" {
+        Some(locks::recovery_lock(state, &binding).await?)
+    } else {
+        None
+    };
     let channels = &state.services.require::<super::ProjectService>()?.channels;
-    let _guard = channels.3.lock().await;
-    let (raw, record) = store::load(channels, &binding)?;
+    let guard = locks::session_lock(state, &binding, "recovery.prepare").await?;
+    let (_, record) = store::load(channels, &binding)?;
     store::register(channels, &binding)?;
     if args["action"] == "register" {
         if args["queueOwner"] == "cells" {
@@ -52,6 +58,7 @@ async fn execute(state: &Arc<State>, identity: usize, args: &Value) -> Result<Va
         return Ok(json!({"registered":true}));
     }
     if args["action"] == "inspect" {
+        drop(guard);
         return Ok(
             json!({"session":inspect(state,identity,&binding).await?,"queue":record["instructionQueue"]}),
         );
@@ -64,12 +71,14 @@ async fn execute(state: &Arc<State>, identity: usize, args: &Value) -> Result<Va
         return Err(Error::invalid());
     }
     if let Some(mut result) = store::prior(channels, &binding, args)? {
+        drop(guard);
         result["duplicate"] = json!(true);
         result["session"] = inspect(state, identity, &binding).await?;
         result["queue"] = record["instructionQueue"].clone();
         return Ok(result);
     }
     store::reserve(channels, &binding, args)?;
+    drop(guard);
     let _native_guard = state
         .services
         .require::<crate::harness::Harnesses>()?
@@ -77,6 +86,9 @@ async fn execute(state: &Arc<State>, identity: usize, args: &Value) -> Result<Va
         .await?;
     let history = history(state, identity, &binding).await?;
     let latest = inspect(state, identity, &binding).await?;
+    let _guard = locks::session_lock(state, &binding, "recovery.commit").await?;
+    authorize(state, identity, args)?;
+    let (raw, record) = store::load(channels, &binding)?;
     let (record, outcome) = decision::recover(record, &latest, &history, args, false)?;
     let mut result = store::commit(channels, &binding, args, &raw, &record, outcome)?;
     result["duplicate"] = json!(false);
