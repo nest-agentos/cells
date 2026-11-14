@@ -1,10 +1,9 @@
-//! Command supervision: spawn, bound, reap, then reopen the file APIs.
+//! Command supervision: spawn, bound and reap while retaining lifecycle ownership.
 //!
-//! The runner owns the exclusive file gate from the moment admission succeeds
-//! until the command has been reaped, the output drained and every revision
-//! invalidated. If ownership of the process becomes uncertain, the gate is
-//! poisoned rather than released — file APIs must stay closed, but the lock is
-//! not leaked.
+//! Independent file operations and native turns continue during execution.
+//! Topology changes and shutdown wait until the command is reaped and revisions
+//! are invalidated. Unknown process ownership closes admission instead of
+//! claiming cleanup succeeded.
 
 use crate::{
     app::State,
@@ -30,7 +29,7 @@ pub async fn run(
     state: Arc<State>,
     mut prepared: Prepared,
     process: Arc<Process>,
-    gate: crate::core::gate::ExclusivePermit,
+    gate: crate::core::gate::ExecutionPermit,
     timeout_ms: u64,
     identity: usize,
     request_id: String,

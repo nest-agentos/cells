@@ -1,7 +1,7 @@
 //! Process API operations: admission policy around the registry and launcher.
 //!
 //! The HTTP handlers only extract the identity and the body; everything about
-//! epochs, duplicate request ids, capacity and the single-command guarantee is
+//! epochs, duplicate request ids, capacity and per-request execution identity are
 //! decided here.
 
 use crate::{
@@ -27,7 +27,7 @@ pub fn start(state: &Arc<State>, identity: usize, request: Request) -> Result<St
     })
 }
 
-/// Wait fairly for short readers before admitting a new command; duplicates never replay.
+/// Admit an independent command; duplicate request identities never replay.
 pub async fn start_command(state: &Arc<State>, identity: usize, request: Request) -> Result<Status, Error> {
     let id = request.request_id.clone();
     let kind=command_kind(&request.command);let read_only=request.read_only;let argument_count=request.args.len();
@@ -41,7 +41,7 @@ pub async fn start_command(state: &Arc<State>, identity: usize, request: Request
     }.await;
     result.inspect_err(|error: &Error| crate::core::events::emit(crate::core::events::Level::Warn,
         "process.rejected", serde_json::json!({"operation":"process.start","operationId":id,"requestId":id,"identity":identity,"code":error.code,
-            "stage":"admission","result":"failure","executionStarted":false,"commandKind":kind,"argumentCount":argument_count,"requestedReadOnly":read_only,"gateMode":"exclusive"})))
+            "stage":"admission","result":"failure","executionStarted":false,"commandKind":kind,"argumentCount":argument_count,"requestedReadOnly":read_only,"gateMode":"shared"})))
 }
 
 fn authorize_request(state: &Arc<State>, identity: usize, request: &Request) -> Result<(), Error> {
@@ -63,15 +63,15 @@ fn start_authorized(
     state: &Arc<State>,
     identity: usize,
     request: Request,
-    permit: Option<crate::core::gate::ExclusivePermit>,
+    permit: Option<crate::core::gate::ExecutionPermit>,
 ) -> Result<Status, Error> {
     authorize_request(state, identity, &request)?;
     let process =
         state.services.require::<crate::process::Execution>()?
             .registry()
             .get_or_create(identity, &request.request_id, || {
-                // The command owns every export until it has been reaped.
-                let gate = match permit {Some(permit) => permit, None => state.files.exclusive()?};
+                // Track command lifetime without blocking unrelated file or native work.
+                let gate = match permit {Some(permit) => permit, None => state.files.command_now(&request.request_id)?};
                 let plan = policy::plan(state, identity, &request)?;
                 let lock = match plan.writer() {
                     Some(export) => export.try_clone_root()?,
@@ -95,7 +95,7 @@ fn start_authorized(
                         "operationId":request.request_id,"identity":identity,"projectId":request.project_id,
                         "mountCount":plan.mounts.len(),"timeoutMs":plan.timeout_ms,
                         "requestedReadOnly":request.read_only,"readOnlyEnforced":request.read_only&&!crate::projects::native::enabled(state),
-                        "gateMode":"exclusive","commandKind":command_kind(&request.command),"argumentCount":request.args.len()}));
+                        "gateMode":"shared","commandKind":command_kind(&request.command),"argumentCount":request.args.len()}));
                 // The registered task, not the HTTP waiter, owns spawn and cleanup.
                 tokio::spawn(crate::core::trace::scope(crate::core::trace::current(), runner::run(
                     state.clone(),

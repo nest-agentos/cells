@@ -24,6 +24,7 @@ async fn file_request(
                     "Bearer isolated-concurrency-secret-0123456789",
                 )
                 .header("content-type", "application/json")
+                .header("x-operation-id", "independent-file-operation")
                 .header("x-fsagent-project", project["projectId"].as_str().unwrap())
                 .header(
                     "x-fsagent-project-revision",
@@ -214,7 +215,7 @@ async fn failed_configuration_preserves_receipts_and_never_repeats_a_native_crea
 }
 
 #[tokio::test]
-async fn project_turns_overlap_keep_independent_receipts_and_protect_files_until_the_last_completion(
+async fn project_turns_allow_independent_file_writes_and_keep_exact_turn_receipts(
 ) {
     let (_root, state, base) = fixture().await;
     let a = create(&state, &base, "create-a").await;
@@ -273,12 +274,13 @@ async fn project_turns_overlap_keep_independent_receipts_and_protect_files_until
         &state,
         "POST",
         "/v1/fs/work/mutate",
-        json!({"action":"remove","path":"note.md"}),
+        json!({"action":"mkdir","path":"independent-directory"}),
         &base,
     )
     .await;
-    assert_eq!(status, axum::http::StatusCode::CONFLICT);
-    assert!(state.files.shared().is_err());
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert!(work.join("independent-directory").is_dir());
+    assert!(state.files.shared().is_ok());
     assert!(state.files.exclusive().is_err());
     assert_eq!(
         call(
@@ -293,7 +295,7 @@ async fn project_turns_overlap_keep_independent_receipts_and_protect_files_until
         "EBUSY"
     );
     interrupt(&state, &base, "interrupt-a", &a, &first["result"]["turnId"]).await;
-    assert!(state.files.shared().is_err());
+    assert!(state.files.shared().is_ok());
     let b_state = invoke(
         &state,
         &base,
@@ -390,7 +392,7 @@ async fn another_session_starts_while_the_first_is_waiting_for_approval_before_i
     let first = first.await.unwrap();
     assert_eq!(first["outcome"], "committed");
     interrupt(&state, &base, "interrupt-a", &a, &first["result"]["turnId"]).await;
-    assert!(state.files.shared().is_err());
+    assert!(state.files.shared().is_ok());
     interrupt(
         &state,
         &base,
@@ -431,7 +433,7 @@ async fn a_terminal_event_before_the_start_reply_releases_the_correct_turn() {
     )
     .await;
     assert_eq!(next["outcome"], "committed");
-    assert!(state.files.shared().is_err());
+    assert!(state.files.shared().is_ok());
     state
         .services
         .require::<cells::harness::Harnesses>()

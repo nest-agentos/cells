@@ -148,7 +148,7 @@ async fn mutate(
 ) -> Result<(StatusCode, Json<Value>), Error> {
     let started = std::time::Instant::now();
     let deadline = access::deadline(&headers)?;
-    let gate = state.files.shared()?;
+    let gate = state.files.shared().map_err(|error| Error {outcome: Some("not-committed"), ..error})?;
     let operation_id = access::operation_id(&headers)?.to_owned();
     let operation = state
         .services

@@ -38,7 +38,7 @@ impl Activities {
                 trace:{let mut fields=crate::core::trace::current();fields.insert("operationId".into(),operation.into());fields},
                 turn: None,
                 completed: HashSet::new(),
-                _permit: gate.activity()?,
+                _permit: gate.activity_for(Some(session), Some(operation))?,
             },
         );
         Ok(())
@@ -122,7 +122,7 @@ mod tests {
         assert!(gate.shared().is_ok());
     }
     #[test]
-    fn every_retirement_path_retains_exclusion_until_revision_invalidation_can_finish() {
+    fn every_retirement_path_retains_lifecycle_until_revision_invalidation_can_finish() {
         for path in ["bind", "completed", "reject", "stopped"] {
             let gate = FileGate::new();
             let active = Activities::default();
@@ -146,7 +146,8 @@ mod tests {
                 _ => active.stopped(None, true).1,
             };
             assert_eq!(retired.len(), 1);
-            assert!(gate.shared().is_err());
+            assert!(gate.shared().is_ok());
+        assert!(gate.exclusive().is_err());
             assert!(gate.exclusive().is_err());
             drop(retired);
             assert!(gate.shared().is_ok());
@@ -166,13 +167,15 @@ mod tests {
         );
         assert!(active.completed(&gate, "a", "foreign").is_none());
         assert!(active.completed(&gate, "a", "turn-a").is_some());
-        assert!(gate.shared().is_err());
+        assert!(gate.shared().is_ok());
+        assert!(gate.exclusive().is_err());
         active.begin(&gate, "a", "next").unwrap();
         drop(active.bind("a", "next", "turn-next"));
         assert!(active.completed(&gate, "a", "turn-a").is_none());
         assert!(active.reject("a", "op-a").is_none());
         assert!(active.completed(&gate, "b", "turn-b").is_some());
-        assert!(gate.shared().is_err());
+        assert!(gate.shared().is_ok());
+        assert!(gate.exclusive().is_err());
         assert!(active.completed(&gate, "a", "turn-next").is_some());
         assert!(gate.shared().is_ok());
     }
@@ -183,14 +186,16 @@ mod tests {
         active.begin(&gate, "a", "operation").unwrap();
         drop(active.completed(&gate, "a", "stale"));
         drop(active.completed(&gate, "a", "actual"));
-        assert!(gate.shared().is_err());
+        assert!(gate.shared().is_ok());
+        assert!(gate.exclusive().is_err());
         assert!(active.bind("a", "old-operation", "actual").is_none());
         assert!(active.bind("a", "operation", "actual").is_some());
         assert!(gate.shared().is_ok());
         active.begin(&gate, "a", "second").unwrap();
         drop(active.completed(&gate, "a", "actual"));
         assert!(active.bind("a", "second", "new-turn").is_none());
-        assert!(gate.shared().is_err());
+        assert!(gate.shared().is_ok());
+        assert!(gate.exclusive().is_err());
         drop(active.completed(&gate, "a", "new-turn"));
         assert!(gate.shared().is_ok());
     }
@@ -202,9 +207,11 @@ mod tests {
         active.begin(&gate, "b", "op-b").unwrap();
         assert!(!active.stopped(Some("foreign"), true).0);
         assert!(active.stopped(Some("a"), true).0);
-        assert!(gate.shared().is_err());
+        assert!(gate.shared().is_ok());
+        assert!(gate.exclusive().is_err());
         assert!(active.stopped(Some("b"), false).0);
-        assert!(gate.shared().is_err());
+        assert!(gate.shared().is_ok());
+        assert!(gate.exclusive().is_err());
         assert!(active.stopped(None, true).0);
         assert!(gate.shared().is_ok());
     }

@@ -72,7 +72,7 @@ pub async fn replace(
     let _project_guard =
         access::authorize_path(&state, &headers, &alias, &query.path, true, false)?;
     let condition = WriteCondition::from_headers(&headers)?;
-    let gate = state.files.shared()?;
+    let gate = state.files.shared().map_err(|error| Error {outcome: Some("not-committed"), ..error})?;
     let (identity, export) = access::writable_export(&state, &headers, &alias)?;
     let operation = state
         .services
@@ -226,7 +226,7 @@ pub async fn mutate(
         }
         Change::parse(&command.action, command.path, command.to)?
     };
-    let gate = state.files.shared()?;
+    let gate = state.files.shared().map_err(|error| Error {outcome: Some("not-committed"), ..error})?;
     let (identity, export) = access::writable_export(&state, &headers, &alias)?;
     let operation = state
         .services

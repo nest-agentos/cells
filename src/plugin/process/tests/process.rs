@@ -87,25 +87,19 @@ path = "{}"
         .unwrap()
         .unwrap()
         .revision;
-    // Cancellation while waiting creates a tombstone before any process is admitted.
+    // Cancellation before admission still creates a durable tombstone.
     let mut cancelled_request = request.clone();
     cancelled_request["requestId"] = json!("cancel-before-admission");
     cancelled_request["args"] = json!(["-c", "echo unexpected > cancelled-command"]);
-    let reader = state.files.read_only().unwrap();
-    let mut cancelled = Box::pin(send(&app, "POST", "/v1/processes", cancelled_request));
-    tokio::select! {biased; _ = &mut cancelled => panic!("reader still held"), _ = tokio::task::yield_now() => {}}
     let cancel_path = format!("/v1/processes/{epoch}/cancel-before-admission/cancel");
     assert_eq!(send(&app, "POST", &cancel_path, Value::Null).await.1["state"], "cancelled");
-    drop(reader);
-    assert_eq!(cancelled.await.1["state"], "cancelled");
+    assert_eq!(send(&app, "POST", "/v1/processes", cancelled_request).await.1["state"], "cancelled");
     assert!(!project.join("cancelled-command").exists());
-    // Readers may finish before admission; the queued command must not be replayed.
+    // Independent observational reads do not delay command admission.
     let reader = state.files.read_only().unwrap();
-    let mut queued = Box::pin(send(&app, "POST", "/v1/processes", request.clone()));
-    tokio::select! {biased; _ = &mut queued => panic!("reader still held"), _ = tokio::task::yield_now() => {}}
-    assert!(state.files.read_only().is_err());
+    assert_eq!(send(&app, "POST", "/v1/processes", request.clone()).await.0,StatusCode::OK);
+    assert!(state.files.read_only().is_ok());
     drop(reader);
-    assert_eq!(queued.await.0, StatusCode::OK);
     assert_eq!(
         send(&app, "POST", "/v1/processes", request.clone()).await.0,
         StatusCode::OK
@@ -143,17 +137,7 @@ path = "{}"
         send(&app, "POST", "/v1/processes", long).await.0,
         StatusCode::OK
     );
-    assert_eq!(
-        send(
-            &app,
-            "POST",
-            "/v1/fs/project/stat",
-            json!({"paths":["note"]})
-        )
-        .await
-        .1["code"],
-        "EBUSY"
-    );
+    assert_eq!(send(&app,"POST","/v1/fs/project/stat",json!({"paths":["note"]})).await.0,StatusCode::OK);
     let path = format!("/v1/processes/{epoch}/long");
     send(&app, "POST", &(path.clone() + "/cancel"), Value::Null).await;
     assert_eq!(terminal(&app, &path).await["state"], "cancelled");

@@ -39,8 +39,8 @@ impl Workers {
 
     /// Run `work` on the blocking pool while holding a shared file gate.
     ///
-    /// The gate is acquired before the worker slot, so a command's exclusive
-    /// guard is never queued behind a slot that can never be released.
+    /// Lifecycle ownership is acquired before the worker slot so topology changes
+    /// and shutdown cannot release the resources of queued, accepted work.
     pub async fn run<T: Send + 'static>(
         &self,
         gate: &FileGate,

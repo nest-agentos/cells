@@ -332,11 +332,13 @@ async fn replacement_does_not_silently_retarget_projects_and_launcher_contains_o
     assert!(!args.contains(&"--share-net".into()));
     runtime.begin("thread", "operation").await.unwrap();
     runtime.bind_turn("thread", "operation", "turn");
-    assert!(state.files.shared().is_err());
+    assert!(state.files.shared().is_ok());
+    assert!(state.files.exclusive().is_err());
     runtime.event(
         &json!({"method":"turn/completed","params":{"threadId":"other","turn":{"id":"turn"}}}),
     );
-    assert!(state.files.shared().is_err());
+    assert!(state.files.shared().is_ok());
+    assert!(state.files.exclusive().is_err());
     runtime.event(
         &json!({"method":"turn/completed","params":{"threadId":"thread","turn":{"id":"turn"}}}),
     );
@@ -466,7 +468,8 @@ async fn native_project_bash_and_codex_share_directory_grants() {
             .await
             .unwrap();
         assert_eq!(turn["outcome"], "committed");
-        assert!(state.files.shared().is_err());
+        assert!(state.files.shared().is_ok());
+    assert!(state.files.exclusive().is_err());
         assert_eq!(
             call(
                 &state,
@@ -878,7 +881,7 @@ async fn remount_does_not_create_two_registered_project_identities_for_one_new_b
 }
 
 #[tokio::test]
-async fn project_stat_retries_a_real_short_command_with_one_http_request() {
+async fn project_stat_reads_existing_files_without_waiting_for_an_unrelated_command() {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
     let root = tempfile::tempdir().unwrap();
@@ -887,10 +890,11 @@ async fn project_stat_retries_a_real_short_command_with_one_http_request() {
     let state = State::from_config(&config).unwrap();
     cells::process::enable(&state).await.unwrap();
     let project = register(&state, "group/existing", false).await;
+    std::fs::write(root.path().join("exports/group/existing/retry-note"),"original").unwrap();
     let epoch = state.services.require::<cells::process::Execution>().unwrap().epoch().to_owned();
     call(&state, 0, "project_exec", json!({"projectId":project["id"],"revision":project["revision"],
         "epoch":epoch,"requestId":"short-stat-conflict","command":"/bin/sh",
-        "args":["-c","sleep 0.029; printf ready > retry-note"],"timeoutMs":2000})).await.unwrap();
+        "args":["-c","sleep 0.2; printf ready > other-note"],"timeoutMs":2000})).await.unwrap();
     let started = std::time::Instant::now();
     let response = cells::router(state.clone(), &[]).unwrap().oneshot(axum::http::Request::builder()
         .method("POST").uri("/v1/fs/home/stat").header("authorization", "Bearer project-test-secret-0123456789")
@@ -901,8 +905,13 @@ async fn project_stat_retries_a_real_short_command_with_one_http_request() {
     assert_eq!(response.status(), axum::http::StatusCode::OK);
     let data: Value = serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(data["results"][0]["stat"]["kind"], "file");
-    assert_eq!(cells::process::status(&state, 0, &epoch, "short-stat-conflict").unwrap().state, "exited");
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    let deadline=tokio::time::Instant::now()+std::time::Duration::from_secs(3);
+    loop {
+        if cells::process::status(&state,0,&epoch,"short-stat-conflict").unwrap().state=="exited"{break;}
+        assert!(tokio::time::Instant::now()<deadline);tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(std::fs::read_to_string(root.path().join("exports/group/existing/retry-note")).unwrap(),"original");
     eprintln!("stat contention: elapsedMs={}, logicalApiCalls=1, httpRequests=1", started.elapsed().as_millis());
 }
 
@@ -915,7 +924,8 @@ async fn registration_uses_catalog_and_metadata_transactions_while_native_turns_
     let runtime = ProjectRuntime::new(&state, 0, project).unwrap();
     runtime.begin("active-session", "native-operation").await.unwrap();
     runtime.bind_turn("active-session", "native-operation", "active-turn");
-    assert!(state.files.shared().is_err());
+    assert!(state.files.shared().is_ok());
+    assert!(state.files.exclusive().is_err());
     assert_eq!(register(&state, "group/existing", false).await, original);
     let new = register(&state, "group/independent", true).await;
     assert_ne!(new["id"], original["id"]);

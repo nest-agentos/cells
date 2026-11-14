@@ -1,181 +1,135 @@
-//! Separate observational reads from mutation admission.
-//!
-//! Native turns exclude file mutations, but allow directory and content reads.
-//! Supervised commands retain full exclusion. Unknown process ownership poisons
-//! both gates; shutdown drains both classes of in-flight file work.
-
+//! Track in-flight work for topology changes and shutdown, not file/execution exclusion.
+//! File versions, atomic replacement and SeqFile transactions own data consistency.
 use crate::core::error::Error;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+    Arc,
 };
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
-/// Cloneable handle to the process-wide file/process gate.
 #[derive(Clone, Default)]
 pub struct FileGate {
     pub(super) owners: super::gate_owner::Owners,
-    pub(super) native_admission: Arc<tokio::sync::Mutex<()>>,
-    pub(super) inner: Arc<RwLock<()>>,
-    readers: Arc<RwLock<()>>,
+    inner: Arc<RwLock<()>>,
     poisoned: Arc<AtomicBool>,
-    activity: Arc<Mutex<Activity>>,
 }
 
-#[derive(Default, Debug)]
-struct Activity {
-    count: usize,
-    guard: Option<OwnedRwLockWriteGuard<()>>,
-}
-
-/// Full exclusion for supervised commands and project topology changes.
+/// Only topology changes and shutdown require exclusive lifecycle ownership.
 #[derive(Debug)]
 pub struct ExclusivePermit {
-    // Clear ownership before releasing the locks to avoid clearing a new owner.
     _owner: Option<super::gate_owner::OwnerGuard>,
-    _mutations: OwnedRwLockWriteGuard<()>,
-    _readers: OwnedRwLockWriteGuard<()>,
+    _guard: OwnedRwLockWriteGuard<()>,
 }
 
-/// Native executions share mutation exclusion while observational reads continue.
+/// Commands share lifecycle ownership with file work and native turns.
 #[derive(Debug)]
-pub struct ActivityPermit(Arc<Mutex<Activity>>);
-impl ExclusivePermit {
+pub struct ExecutionPermit {
+    owner: super::gate_owner::OwnerGuard,
+    _guard: OwnedRwLockReadGuard<()>,
+}
+impl ExecutionPermit {
     pub fn process_started(&self, pid: Option<u32>) {
-        if let Some(owner) = &self._owner { owner.process_started(pid); }
+        self.owner.process_started(pid);
     }
 }
-impl Drop for ActivityPermit {
-    fn drop(&mut self) {
-        let mut activity = self.0.lock().unwrap();
-        activity.count -= 1;
-        if activity.count == 0 {
-            activity.guard = None;
-        }
-    }
+#[derive(Debug)]
+pub struct ActivityPermit {
+    _owner: super::gate_owner::OwnerGuard,
+    _guard: OwnedRwLockReadGuard<()>,
 }
 
 impl FileGate {
     pub fn new() -> Self {
         Self::default()
     }
-
-    /// Observational reads may overlap native turns; they are not snapshots.
     pub fn read_only(&self) -> Result<OwnedRwLockReadGuard<()>, Error> {
-        self.check()?;
-        self.readers
-            .clone()
-            .try_read_owned()
-            .map_err(|_| self.busy("read"))
+        self.shared()
     }
-
-    /// File mutations must remain excluded from native execution.
+    /// Shared admission drains before topology changes without excluding other work.
     pub fn shared(&self) -> Result<OwnedRwLockReadGuard<()>, Error> {
         self.check()?;
         self.inner
             .clone()
             .try_read_owned()
-            .map_err(|_| self.busy("mutation"))
+            .map_err(|_| self.busy("lifecycle-admission"))
     }
-
-    /// Commands and topology changes exclude reads and file mutations.
     pub fn exclusive(&self) -> Result<ExclusivePermit, Error> {
         self.check()?;
-        let mutations = self
+        let guard = self
             .inner
             .clone()
             .try_write_owned()
-            .map_err(|_| self.busy("exclusive"))?;
-        let owner = self.owners.enter("exclusive", None);
-        let readers = self
-            .readers
-            .clone()
-            .try_write_owned()
-            .map_err(|_| self.busy("exclusive-readers"))?;
+            .map_err(|_| self.busy("topology"))?;
         Ok(ExclusivePermit {
-            _owner: Some(owner),
-            _mutations: mutations,
-            _readers: readers,
+            _owner: Some(self.owners.enter("topology", None)),
+            _guard: guard,
         })
     }
-
-    /// Queue behind short observational reads without waiting for native execution.
-    pub async fn command(&self, request_id: &str, budget_ms: u64) -> Result<ExclusivePermit, Error> {
-        self.check()?;
-        let mutations = self.inner.clone().try_write_owned().map_err(|_| self.busy("exclusive"))?;
-        let owner = self.owners.enter("command", Some(request_id));
-        let started = std::time::Instant::now();
-        let result = tokio::time::timeout(std::time::Duration::from_millis(budget_ms.min(3000)),
-            self.readers.clone().write_owned()).await;
-        crate::core::events::emit(crate::core::events::Level::Info, "file.gate.command", serde_json::json!({
-            "operation":"file.gate.acquire", "operationId":request_id, "stage":"exclusive-readers",
-            "result":if result.is_ok(){"success"}else{"failure"}, "code":if result.is_ok(){None}else{Some("PROCESS_READERS_BUSY")},
-            "durationMs":started.elapsed().as_millis()}));
-        let readers = result.map_err(|_| Error::conflict("PROCESS_READERS_BUSY"))?;
-        self.check()?;
-        Ok(ExclusivePermit {_owner: Some(owner), _mutations: mutations, _readers: readers})
+    pub fn command_now(&self, operation: &str) -> Result<ExecutionPermit, Error> {
+        let guard = self.shared()?;
+        Ok(ExecutionPermit {
+            owner: self.owners.enter("command", Some(operation)),
+            _guard: guard,
+        })
     }
-
-    /// Admit a native turn while excluding file mutations and supervised commands.
+    pub async fn command(
+        &self,
+        operation: &str,
+        _budget_ms: u64,
+    ) -> Result<ExecutionPermit, Error> {
+        let result = self.command_now(operation);
+        crate::core::events::emit(
+            crate::core::events::Level::Info,
+            "file.gate.command",
+            serde_json::json!({
+            "operation":"file.lifecycle.admit","operationId":operation,"stage":"command","gateMode":"shared",
+            "result":if result.is_ok(){"success"}else{"failure"},"code":result.as_ref().err().map(|error|error.code),"durationMs":0}),
+        );
+        result
+    }
     pub fn activity(&self) -> Result<ActivityPermit, Error> {
-        let mut activity = self.activity.lock().map_err(|_| Error::internal())?;
-        self.check()?;
-        if activity.count == 0 {
-            activity.guard = Some(
-                self.inner
-                    .clone()
-                    .try_write_owned()
-                    .map_err(|_| self.busy("native-admission"))?,
-            );
-        }
-        activity.count += 1;
-        Ok(ActivityPermit(self.activity.clone()))
+        self.activity_for(None, None)
     }
-
-    pub(super) fn join_activity(&self)->Result<Option<ActivityPermit>,Error> {
-        self.check()?;let mut activity=self.activity.lock().map_err(|_|Error::internal())?;
-        if activity.count==0{return Ok(None);}
-        activity.count+=1;Ok(Some(ActivityPermit(self.activity.clone())))
+    pub fn activity_for(
+        &self,
+        session: Option<&str>,
+        operation: Option<&str>,
+    ) -> Result<ActivityPermit, Error> {
+        let guard = self.shared()?;
+        let owner = self.owners.enter("native", operation);
+        owner.session_started(session);
+        Ok(ActivityPermit {
+            _owner: owner,
+            _guard: guard,
+        })
     }
-    pub(super) fn retain_activity(&self,guard:OwnedRwLockWriteGuard<()>)->Result<ActivityPermit,Error> {
-        self.check()?;let mut activity=self.activity.lock().map_err(|_|Error::internal())?;
-        if activity.count!=0{return Err(Error::internal());}
-        activity.guard=Some(guard);activity.count=1;Ok(ActivityPermit(self.activity.clone()))
-    }
-
-    /// Permanently close the gate after an unreaped command.
+    /// Unknown process ownership still prevents unsafe new admissions.
     pub fn poison(&self) {
         self.poisoned.store(true, Ordering::Release);
     }
-
     pub fn is_poisoned(&self) -> bool {
         self.poisoned.load(Ordering::Acquire)
     }
-
-    /// Wait for every in-flight file operation; used only during shutdown.
     pub async fn drain(&self) -> ExclusivePermit {
-        let mutations = self.inner.clone().write_owned().await;
-        let readers = self.readers.clone().write_owned().await;
         ExclusivePermit {
             _owner: None,
-            _mutations: mutations,
-            _readers: readers,
+            _guard: self.inner.clone().write_owned().await,
         }
     }
-
     fn busy(&self, stage: &'static str) -> Error {
         let mut fields = self.owners.fields();
-        fields.as_object_mut().unwrap().extend(serde_json::json!({"operation":"file.gate.acquire",
-            "operationId":format!("gate-{}-{}", std::process::id(), chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()),
-            "stage":stage,"result":"failure","code":"EBUSY","durationMs":0}).as_object().unwrap().clone());
+        fields.as_object_mut().unwrap().extend(serde_json::json!({"operation":"file.lifecycle.admit",
+            "stage":stage,"result":"failure","code":"EBUSY","outcome":"not-committed","durationMs":0}).as_object().unwrap().clone());
         crate::core::events::emit(
             crate::core::events::Level::Warn,
             "file.gate.conflict",
             fields,
         );
-        Error::busy()
+        Error {
+            outcome: Some("not-committed"),
+            ..Error::busy()
+        }
     }
-
     pub fn check(&self) -> Result<(), Error> {
         if self.is_poisoned() {
             return Err(Error::unavailable());
@@ -188,118 +142,60 @@ impl FileGate {
 mod tests {
     use super::*;
     #[tokio::test]
-    async fn conflict_metadata_tracks_command_and_clears_on_release_and_cancel() {
-        let gate = FileGate::new();
-        let context = serde_json::json!({"requestId":"http-command-1"}).as_object().unwrap().clone();
-        let command = crate::core::trace::scope(context, gate.command("command-1", 1000)).await.unwrap();
-        let fields = gate.owners.fields();
-        assert_eq!(fields["blockerOperationId"], "command-1");
-        assert_eq!(fields["blockerRequestId"], "http-command-1");
-        assert_eq!(fields["blockerKind"], "command");
-        assert!(fields["heldMs"].is_number());
-        drop(command);
-        assert!(gate.owners.fields().get("blockerOperationId").is_none());
-        let _reader = gate.read_only().unwrap();
-        let mut pending = Box::pin(gate.command("cancelled", 1000));
-        tokio::select! {biased; _ = &mut pending => panic!("reader still held"), _ = tokio::task::yield_now() => {}}
-        assert_eq!(gate.owners.fields()["blockerOperationId"], "cancelled");
-        drop(pending);
-        assert!(gate.owners.fields().get("blockerOperationId").is_none());
-    }
-    #[tokio::test]
-    async fn command_waits_fairly_for_readers_and_keeps_mutation_exclusion() {
-        let gate = FileGate::new();
-        let reader = gate.read_only().unwrap();
-        let mut pending = Box::pin(gate.command("waiting-command", 1000));
-        tokio::select! {biased; _ = &mut pending => panic!("reader still held"), _ = tokio::task::yield_now() => {}}
-        assert!(gate.read_only().is_err());
-        assert!(gate.shared().is_err());
-        assert!(gate.activity().is_err());
-        drop(reader);
-        let command = pending.await.unwrap();
-        assert!(gate.read_only().is_err());
-        drop(command);
-        assert!(gate.read_only().is_ok());
-        assert!(gate.activity().is_ok());
-    }
-
-    #[tokio::test]
-    async fn command_timeout_and_cancel_release_both_gates() {
-        let gate = FileGate::new();
-        let reader = gate.read_only().unwrap();
-        assert_eq!(gate.command("timeout", 10).await.unwrap_err().code, "PROCESS_READERS_BUSY");
-        assert!(gate.shared().is_ok());
-        assert!(gate.read_only().is_ok());
-        let mut pending = Box::pin(gate.command("cancelled-wait", 1000));
-        tokio::select! {biased; _ = &mut pending => panic!("reader still held"), _ = tokio::task::yield_now() => {}}
-        drop(pending);
-        drop(reader);
-        assert!(gate.exclusive().is_ok());
-    }
-
-    #[tokio::test]
-    async fn command_does_not_wait_for_native_turns_or_admit_after_poisoning() {
-        let gate = FileGate::new();
-        let native = gate.activity().unwrap();
-        assert_eq!(gate.command("native-busy", 1000).await.unwrap_err().code, "EBUSY");
-        drop(native);
-        let reader = gate.read_only().unwrap();
-        let mut pending = Box::pin(gate.command("poisoned-wait", 1000));
-        tokio::select! {biased; _ = &mut pending => panic!("reader still held"), _ = tokio::task::yield_now() => {}}
-        gate.poison();
-        drop(reader);
-        assert_eq!(pending.await.unwrap_err().code, "EIO");
-    }
-
-    #[test]
-    fn execution_permits_exclude_mutations_until_the_last_owner_leaves() {
-        let gate = FileGate::new();
-        let read = gate.shared().unwrap();
-        assert_eq!(gate.activity().unwrap_err().code, "EBUSY");
-        drop(read);
-        let a = gate.activity().unwrap();
-        let b = gate.activity().unwrap();
-        assert!(gate.shared().is_err());
-        assert!(gate.read_only().is_ok());
-        assert!(gate.exclusive().is_err());
-        drop(a);
-        assert!(gate.shared().is_err());
-        assert!(gate.read_only().is_ok());
-        drop(b);
-        assert!(gate.shared().is_ok());
-        let write = gate.exclusive().unwrap();
-        assert_eq!(gate.activity().unwrap_err().code, "EBUSY");
-        drop(write);
-        assert!(gate.activity().is_ok());
-    }
-    #[test]
-    fn observations_overlap_native_admission_but_exclusive_commands_block_both() {
+    async fn files_commands_and_native_turns_share_lifecycle_without_global_contention() {
         let gate = FileGate::new();
         let read = gate.read_only().unwrap();
-        let native = gate.activity().unwrap();
+        let write = gate.shared().unwrap();
+        let a = gate
+            .activity_for(Some("session-a"), Some("turn-a"))
+            .unwrap();
+        let b = gate
+            .activity_for(Some("session-b"), Some("turn-b"))
+            .unwrap();
+        let command = gate.command("git-worktree", 1).await.unwrap();
         assert!(gate.read_only().is_ok());
-        assert!(gate.shared().is_err());
-        drop(native);
-        assert!(gate.exclusive().is_err());
         assert!(gate.shared().is_ok());
-        drop(read);
-        let command = gate.exclusive().unwrap();
-        assert!(gate.read_only().is_err());
-        assert!(gate.activity().is_err());
-        assert!(gate.shared().is_err());
-        drop(command);
-        assert!(gate.read_only().is_ok());
-        assert!(gate.activity().is_ok());
+        assert_eq!(gate.exclusive().unwrap_err().outcome, Some("not-committed"));
+        drop((read, write, a, b, command));
+        assert!(gate.exclusive().is_ok());
     }
-
-    #[test]
-    fn poisoning_rejects_new_owners_even_when_a_group_is_already_running() {
+    #[tokio::test]
+    async fn topology_and_shutdown_wait_for_actual_owners_and_release_on_cancellation() {
         let gate = FileGate::new();
-        let permit = gate.activity().unwrap();
+        let command = gate.command_now("owned").unwrap();
+        let mut draining = Box::pin(gate.drain());
+        tokio::select! {biased;_= &mut draining=>panic!("command still owned"),_=tokio::task::yield_now()=>{}}
+        drop(draining);
+        assert!(gate.shared().is_ok());
+        drop(command);
+        let topology = gate.exclusive().unwrap();
+        assert!(gate.shared().is_err());
+        assert!(gate.activity().is_err());
+        drop(topology);
+        assert!(gate.shared().is_ok());
+    }
+    #[test]
+    fn poisoning_does_not_release_accepted_work_or_admit_unknown_owners() {
+        let gate = FileGate::new();
+        let native = gate.activity().unwrap();
         gate.poison();
-        assert_eq!(gate.read_only().unwrap_err().code, "EIO");
-        assert_eq!(gate.activity().unwrap_err().code, "EIO");
-        drop(permit);
         assert_eq!(gate.shared().unwrap_err().code, "EIO");
+        assert_eq!(gate.command_now("new").unwrap_err().code, "EIO");
+        drop(native);
+        assert!(gate.is_poisoned());
+    }
+    #[test]
+    fn concurrent_owner_diagnostics_preserve_the_remaining_operation_on_release() {
+        let gate = FileGate::new();
+        let a = gate.command_now("command-a").unwrap();
+        let b = gate
+            .activity_for(Some("session-b"), Some("turn-b"))
+            .unwrap();
+        assert_eq!(gate.owners.fields()["blockerCount"], 2);
+        drop(a);
+        assert_eq!(gate.owners.fields()["blockerOperationId"], "turn-b");
+        assert_eq!(gate.owners.fields()["blockerSessionId"], "session-b");
+        drop(b);
+        assert!(gate.owners.fields().get("blockerOperationId").is_none());
     }
 }

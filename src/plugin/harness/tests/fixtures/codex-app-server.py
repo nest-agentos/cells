@@ -42,6 +42,9 @@ for line in sys.stdin:
         thread = {'id': thread_id, 'cwd': params['cwd'], 'name': '<script>history</script>', 'createdAt': 1791458500, 'updatedAt': 1791458565, 'status': {'type': 'idle'}, 'turns': []}
         threads[thread_id] = thread
         result = {'thread': thread}
+    elif method == 'thread/unsubscribe':
+        emit({'method': 'thread/closed', 'params': {'threadId': params['threadId']}})
+        result = {'status': 'unsubscribed'}
     elif method == 'thread/list':
         result = {'data': [thread for thread in threads.values() if bool(thread.get('archived')) == bool(params.get('archived')) and (not params.get('ancestorThreadId') or thread.get('spawnedFromId') == params['ancestorThreadId'])], 'nextCursor': None}
     elif method in ('thread/read', 'thread/resume'):

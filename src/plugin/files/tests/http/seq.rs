@@ -1,8 +1,29 @@
 use crate::common::{app_export, body_json, request};
 use axum::{body::Body, http::StatusCode};
 use cells::fs::Export;
-use serde_json::json;
+use serde_json::{json,Value};
 use tower::ServiceExt;
+
+#[tokio::test]
+async fn seq_transactions_remain_atomic_during_unrelated_native_and_command_execution() {
+    let root=tempfile::tempdir().unwrap();
+    let state=crate::common::state(Export::exclusive(root.path()).unwrap(),None,vec!["docs".into()],vec!["docs".into()]);
+    let _native=state.files.activity_for(Some("other-session"),Some("other-turn")).unwrap();
+    let _command=state.files.command_now("other-command").unwrap();
+    let server=crate::common::router_for(state);
+    let transaction=|id:&str,revision:Value,value:&str|request("/v1/fs/docs/seq/transaction").method("POST")
+        .header("content-type","application/json").header("x-operation-id",id)
+        .body(Body::from(json!({"path":"info.seq","expectedRevision":revision,"changes":[{"action":"set","key":"name","value":value}]}).to_string())).unwrap();
+    let first=server.clone().oneshot(transaction("first",Value::Null,"original")).await.unwrap();
+    assert_eq!(first.status(),StatusCode::OK);assert_eq!(body_json(first).await["outcome"],"committed");
+    let snapshot=server.clone().oneshot(request("/v1/fs/docs/seq/snapshot").method("POST").header("content-type","application/json")
+        .body(Body::from(r#"{"path":"info.seq"}"#)).unwrap()).await.unwrap();
+    let revision=body_json(snapshot).await["revision"].clone();assert!(revision.is_string());
+    let (left,right)=tokio::join!(server.clone().oneshot(transaction("left",revision.clone(),"left")),server.oneshot(transaction("right",revision,"right")));
+    let codes=[left.unwrap().status(),right.unwrap().status()];
+    assert_eq!(codes.iter().filter(|&&code|code==StatusCode::OK).count(),1);
+    assert_eq!(codes.iter().filter(|&&code|code==StatusCode::PRECONDITION_FAILED).count(),1);
+}
 
 #[tokio::test]
 async fn seq_routes_enforce_authorization_and_write_permissions() {
