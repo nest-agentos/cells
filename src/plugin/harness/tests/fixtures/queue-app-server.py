@@ -12,6 +12,8 @@ for line in sys.stdin:
  result={}
  if method in ('thread/start','thread/resume'):
   thread['cwd']=params.get('cwd',thread['cwd']); thread['status']={'type':'idle'}; save();result={'thread':thread}
+ elif method=='thread/unsubscribe':
+  thread['status']={'type':'notLoaded'};save();emit({'method':'thread/closed','params':{'threadId':params['threadId']}});result={'status':'unsubscribed'}
  elif method=='thread/read':
   if os.path.exists(finish) and thread['turns']:
    os.unlink(finish); thread['turns'][-1]['status']='completed'; thread['status']={'type':'idle'};save();emit({'method':'turn/completed','params':{'threadId':'native','turn':thread['turns'][-1]}})
