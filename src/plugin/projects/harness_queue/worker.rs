@@ -499,6 +499,7 @@ fn stamp_receipt(queue: &mut Value, item: &Value) {
                 row[key] = value.clone();
             }
         }
+        row["attemptId"] = json!(attempt(item));
         for key in ["turnId", "commandId"] {
             if let Some(value) = item["receipt"].get(key) {
                 row[key] = value.clone();

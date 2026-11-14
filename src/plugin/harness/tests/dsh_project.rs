@@ -44,6 +44,10 @@ async fn managed_dsh_uses_the_project_launcher_and_readonly_mounts() {
     // Existing native sessions retain their original physical workspace path.
     let host = native::Host::new(&root.path().join("docs")).await;
     std::fs::write(&command,format!("#!/bin/sh\n[ -f readme.txt ] || exit 8\nif touch forbidden-write 2>/dev/null; then exit 9; fi\n[ -f {source:?}/readme.txt ] || exit 10\nif touch {source:?}/native-forbidden-write 2>/dev/null; then exit 11; fi\n[ ! -e {private:?}/secret.txt ] || exit 12\nprintf 'dsh web: {}?token=fixture\\n'\nexec sleep 300\n",host.url,source=root.path().join("docs"),private=root.path().join("private"))).unwrap();
+    let nested=root.path().join("docs/nested/deep");
+    std::fs::create_dir_all(&nested).unwrap();
+    host.state.rows.lock().unwrap().insert("nested-session".into(),json!({"sessionId":"nested-session","cwd":nested,"running":false,"updatedAt":900}));
+    host.state.rows.lock().unwrap().insert("sibling-session".into(),json!({"sessionId":"sibling-session","cwd":root.path().join("docs-other"),"running":false,"updatedAt":800}));
     let mut args = json!({"profileId":"old-dsh","projectId":project["id"],"revision":project["revision"],"epoch":state.services.require::<cells::harness::Harnesses>().unwrap().profiles()["epoch"],"requestId":"create","workspaceId":project["id"]});
     let listed = state
         .services
@@ -52,8 +56,10 @@ async fn managed_dsh_uses_the_project_launcher_and_readonly_mounts() {
         .project_call(&state, who, "harness_sessions", args.clone())
         .await
         .unwrap();
-    assert_eq!(listed["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["sessions"].as_array().unwrap().len(), 2);
     assert_eq!(listed["sessions"][0]["id"], "existing");
+    assert_eq!(listed["sessions"][1]["id"],"nested-session");
+    assert_eq!(listed["sessions"][1]["cwd"],nested.to_str().unwrap());
     let mut query_args = args.clone();
     query_args.as_object_mut().unwrap().remove("epoch");
     query_args["sessionId"] = json!("existing");

@@ -1,4 +1,6 @@
 //! Codex-specific session semantics and native app-server protocol.
+#[path = "codex/local_catalog.rs"]
+mod local_catalog;
 use super::{
     bridge::Bridge,
     config::{ProfileConfig, WorkspaceConfig},
@@ -83,6 +85,7 @@ impl Codex {
         Ok(bridge)
     }
     async fn read(&self, name: &str, args: Value) -> Result<Value, Error> {
+        if name=="harness_sessions" {if let Some(page)=self.local_sessions(&args).await? {return Ok(page)}}
         let bridge = self.bridge().await?;
         match name {
             "harness_query" => self.query(&bridge, &args).await,
@@ -158,6 +161,7 @@ impl Codex {
         }
     }
     pub(super) async fn sessions(&self, bridge: &Bridge, args: &Value) -> Result<Value, Error> {
+        if let Some(page)=self.local_sessions(args).await? {return Ok(page)}
         let limit = args["limit"].as_u64().unwrap_or(25).clamp(1, 100);
         let result = bridge
             .call(
@@ -212,6 +216,13 @@ impl Codex {
                     .any(|w| path.starts_with(&w.path))
             })
     }
+    fn require_session_cwd(&self, bridge:&Bridge, cwd:&str)->Result<(),Error> {
+        if let Some(runtime)=&self.runtime {
+            let translated=runtime.resolve_cwd(cwd)?;
+            if translated!=cwd && !bridge.source_paths {return Err(Error::forbidden("HARNESS_SOURCE_PATH_UNAVAILABLE"))}
+        }
+        Ok(())
+    }
     fn workspace(&self, id: &str) -> Result<&WorkspaceConfig, Error> {
         self.config
             .workspaces
@@ -250,14 +261,8 @@ impl Codex {
         let mut params = json!({"cwd":directory,"approvalPolicy":"on-request","sandbox":if self.runtime.is_some(){"danger-full-access"}else{"workspace-write"},"historyMode":"legacy"});
         if let Some(runtime) = &self.runtime {
             let state = runtime.state()?;
-            if let Some(config) = state
-                .services
-                .require::<crate::projects::ProjectService>()?
-                .channels
-                .config(&runtime.project.id, &directory, &runtime.project.owner)?
-            {
-                params["config"] = config;
-            }
+            params["config"] = state.services.require::<crate::projects::ProjectService>()?.channels
+                .creation_config(&runtime.project.id,&directory,&runtime.project.owner)?;
         }
         let result = bridge
             .persistent_call("thread/start", params.clone())
@@ -309,12 +314,7 @@ impl Codex {
         if stored["thread"]["status"]["type"] == "active" {
             return Err(Error::busy());
         }
-        let translated = self
-            .runtime
-            .as_ref()
-            .map(|runtime| runtime.resolve_cwd(cwd))
-            .transpose()?;
-        let cwd = translated.as_deref().unwrap_or(cwd);
+        self.require_session_cwd(bridge,cwd)?;
         let mut params = json!({"threadId":id,"cwd":cwd,"excludeTurns":true,"approvalPolicy":"on-request","sandbox":if self.runtime.is_some(){"danger-full-access"}else{"workspace-write"}});
         if let Some(runtime) = &self.runtime {
             params["config"] = runtime
@@ -341,7 +341,8 @@ impl Codex {
             return Ok(());
         };
         let thread = self.summary(bridge, id).await?;
-        let cwd = runtime.resolve_cwd(string(&thread, "cwd")?)?;
+        let cwd = string(&thread, "cwd")?;
+        self.require_session_cwd(bridge,cwd)?;
         let state = runtime.state()?;
         let service = state
             .services
@@ -353,19 +354,20 @@ impl Codex {
             id,
         )?;
         let fingerprint = config.to_string();
-        if self.channel_configs.lock().await.get(id) == Some(&fingerprint) {
-            return Ok(());
-        }
+        let cached=self.channel_configs.lock().await.get(id).cloned();
+        channel_config_diagnostic(&self.config.id,id,"compare",if cached.as_ref()==Some(&fingerprint){"unchanged"}else{"rebind"},cached.is_some(),0,None);
+        if cached.as_ref()==Some(&fingerprint) {return Ok(());}
+
         if thread["status"]["type"] == "active" {
             return Err(Error::busy());
         }
-        self.unload_channel(bridge, id).await?;
-        bridge
-            .persistent_call(
-                "thread/resume",
-                json!({"threadId":id,"cwd":cwd,"excludeTurns":true,"config":config}),
-            )
-            .await?;
+        let started=std::time::Instant::now();
+        let result=async {
+            self.unload_channel(bridge, id).await?;
+            bridge.persistent_call("thread/resume",json!({"threadId":id,"cwd":cwd,"excludeTurns":true,"config":config})).await
+        }.await;
+        channel_config_diagnostic(&self.config.id,id,"rebind",if result.is_ok(){"success"}else{"failure"},cached.is_some(),started.elapsed().as_millis(),result.as_ref().err().map(|e|e.code));
+        result?;
         self.channel_configs
             .lock()
             .await
@@ -789,16 +791,12 @@ impl Codex {
         if thread["status"]["type"] == "active" {
             return Err(Error::busy());
         }
-        Ok(self
-            .runtime
-            .as_ref()
-            .map(|runtime| runtime.resolve_cwd(cwd))
-            .transpose()?
-            .unwrap_or_else(|| cwd.to_owned()))
+        Ok(cwd.to_owned())
     }
     async fn fork(&self, bridge: &Bridge, args: &Value) -> Result<Value, Error> {
         let thread = self.summary(bridge, string(args, "sessionId")?).await?;
         let cwd = self.fork_cwd(&thread)?;
+        self.require_session_cwd(bridge,&cwd)?;
         self.require_checkpoint(bridge, args).await?;
         let mut params = json!({"threadId":string(args,"sessionId")?,"cwd":cwd,"excludeTurns":true,
             "approvalPolicy":"on-request","sandbox":if self.runtime.is_some(){"danger-full-access"}else{"workspace-write"}});
@@ -855,6 +853,11 @@ fn validate_response(request: &Value, result: Value) -> Result<(), Error> {
         _ => return Err(Error::unsupported()),
     }
     Ok(())
+}
+
+fn channel_config_diagnostic(profile:&str,session:&str,stage:&str,result:&str,cached:bool,duration:u128,code:Option<&str>) {
+    crate::core::events::emit(if code.is_some(){crate::core::events::Level::Warn}else if result=="unchanged"{crate::core::events::Level::Debug}else{crate::core::events::Level::Info},"channel.native.configure",
+        json!({"operation":"channel.configure","profileId":profile,"sessionId":session,"stage":stage,"result":result,"baselineCached":cached,"durationMs":duration,"code":code}));
 }
 
 impl HarnessDriver for Codex {

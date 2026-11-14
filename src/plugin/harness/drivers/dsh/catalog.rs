@@ -39,22 +39,16 @@ impl Dsh {
             return Err(Error::invalid());
         }
         let rows = rows["items"].as_array().ok_or_else(Error::invalid)?;
-        let workspaces = baseline["value"]["items"]
-            .as_array()
-            .ok_or_else(Error::invalid)?;
         let archived = baseline["value"]["archivedSessionIds"]
             .as_array()
             .into_iter()
             .flatten()
             .filter_map(Value::as_str)
             .collect::<std::collections::HashSet<_>>();
-        let visible = self.visible_session_ids(workspaces);
         Ok(rows
             .iter()
             .filter(|row| {
-                row["sessionId"]
-                    .as_str()
-                    .is_some_and(|id| visible.contains(id))
+                row["sessionId"].is_string()
                     && row["cwd"].as_str().is_some_and(|cwd| self.authorized(cwd))
             })
             .map(|row| {
@@ -66,42 +60,13 @@ impl Dsh {
             .collect())
     }
 
-    fn authorized(&self, cwd: &str) -> bool {
+    pub(super) fn authorized(&self, cwd: &str) -> bool {
         if let Some(runtime) = &self.runtime {
             return runtime.resolve_cwd(cwd).is_ok();
         }
-        let path = std::path::Path::new(cwd);
-        !path
-            .components()
-            .any(|p| p == std::path::Component::ParentDir)
-            && self
-                .config
-                .workspaces
-                .iter()
-                .any(|w| path.starts_with(&w.path))
+        std::path::Path::new(cwd).canonicalize().ok().is_some_and(|path|
+            self.config.workspaces.iter().any(|w|path.starts_with(&w.path)))
     }
-    fn visible_session_ids(&self, workspaces: &[Value]) -> std::collections::HashSet<String> {
-        workspaces
-            .iter()
-            .filter(|workspace| {
-                workspace["path"].as_str().is_some_and(|path| {
-                    self.runtime.as_ref().map_or_else(
-                        || {
-                            self.config
-                                .workspaces
-                                .iter()
-                                .any(|w| Some(path) == w.path.to_str())
-                        },
-                        |runtime| runtime.resolve_cwd(path).is_ok(),
-                    )
-                })
-            })
-            .flat_map(|workspace| workspace["sessionIds"].as_array().into_iter().flatten())
-            .filter_map(Value::as_str)
-            .map(str::to_owned)
-            .collect()
-    }
-
     pub(super) async fn summary(&self, client: &Client, id: &str) -> Result<Value, Error> {
         let (row, archived) = self
             .catalog(client)
@@ -130,6 +95,7 @@ impl Dsh {
         Ok(session)
     }
     pub(super) async fn read_native(&self, name: &str, args: Value) -> Result<Value, Error> {
+        if name=="harness_sessions" {if let Some(page)=self.local_sessions(&args).await? {return Ok(page)}}
         let client = self.client().await?;
         match name {
             "harness_query" => self.query(&client, &args).await,

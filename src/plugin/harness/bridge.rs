@@ -31,6 +31,7 @@ enum Command {
 pub struct Bridge {
     sender: mpsc::Sender<Command>,
     pub events: Arc<Mutex<Events>>,
+    pub source_paths: bool,
     stop: CancellationToken,
     exited: watch::Receiver<bool>,
     context: Value,
@@ -44,10 +45,14 @@ impl Bridge {
         config: &ProfileConfig,
         runtime: Option<Arc<crate::projects::runtime::ProjectRuntime>>,
     ) -> Result<Arc<Self>, Error> {
-        let mut prepared = runtime
-            .as_ref()
-            .map(|r| r.prepare(config, vec!["app-server".into(),"-c".into(),"thread_unload_delay_secs=0".into()]))
-            .transpose()?;
+        let mut source_paths=true;
+        let arguments=vec!["app-server".into(),"-c".into(),"thread_unload_delay_secs=0".into()];
+        let mut prepared = runtime.as_ref().map(|r| {
+            match r.prepare_with_source_paths(config,arguments.clone()) {
+                Err(error) if error.code=="HARNESS_SOURCE_PATH_UNAVAILABLE" => {source_paths=false; r.prepare(config,arguments.clone())},
+                result=>result,
+            }
+        }).transpose()?;
         let mut command = match prepared.as_mut() {
             Some(p) => {
                 std::mem::replace(&mut p.command, tokio::process::Command::new("/bin/false"))
@@ -94,6 +99,7 @@ impl Bridge {
             "projectId":runtime.as_ref().map(|r| &r.project.id),
             "ownerId":runtime.as_ref().map(|r| &r.project.owner)});
         let bridge = Arc::new(Self {
+            source_paths,
             sender,
             events: Arc::new(Mutex::new(Events::new())),
             stop: CancellationToken::new(),
@@ -392,6 +398,7 @@ fn dispatch(message: Value, pending: &PendingCalls, events: &Mutex<Events>) -> R
                 reply.method.as_str(),
                 "thread/start"
                     | "thread/resume"
+                    | "thread/unsubscribe"
                     | "thread/archive"
                     | "thread/unarchive"
                     | "thread/delete"
@@ -435,6 +442,12 @@ fn native_error(error: &Value) -> Error {
         .is_some_and(|message| message.contains("already has an active writer"))
     {
         return Error::conflict("HARNESS_SESSION_BUSY");
+    }
+    if error["message"].as_str().is_some_and(|message|message.starts_with("thread not loaded:")) {
+        return Error::conflict("HARNESS_SESSION_NOT_LOADED");
+    }
+    if error["message"].as_str().is_some_and(|message|message.starts_with("thread not found:") || message.starts_with("no rollout found for thread")) {
+        return Error::not_found("HARNESS_SESSION_NOT_FOUND");
     }
     if error["code"] == -32602 {
         return Error::conflict("HARNESS_INVALID_PARAMS");
@@ -579,6 +592,8 @@ mod diagnostic_tests {
             "HARNESS_INVALID_PARAMS"
         );
         assert_eq!(native_error(&json!({"code":-32601})).code, "ECAPABILITY");
+        assert_eq!(native_error(&json!({"code":-32600,"message":"thread not loaded: private-id"})).code,"HARNESS_SESSION_NOT_LOADED");
+        assert_eq!(native_error(&json!({"code":-32600,"message":"thread not found: private-id"})).code,"HARNESS_SESSION_NOT_FOUND");
         assert_eq!(
             native_error(&json!({"code":-32000,"message":"thread not materialized yet"})).code,
             "HARNESS_HISTORY_PENDING"

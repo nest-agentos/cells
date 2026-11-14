@@ -46,7 +46,24 @@ impl ClientStores {
         let key = Self::identity(project, owner, namespace);
         self.gates.with(&key, || {
             let route = self.route(project, owner, namespace)?;
-            self.shards.with(&route, work)
+            self.shards.with(&route, |db| {ensure_live(db,project,owner,namespace)?;work(db)})
+        })
+    }
+    /// Keep a tombstone so stale clients cannot recreate a removed empty session binding.
+    pub(in crate::plugin::projects) fn retire_namespace(&self, project: &str, owner: &str, namespace: &str) -> Result<(),Error> {
+        let key=Self::identity(project,owner,namespace);
+        self.gates.with(&key,|| {
+            let route=self.route(project,owner,namespace)?;
+            self.shards.with(&route,|db| {
+                let tx=db.transaction().map_err(storage)?;
+                tx.execute("DELETE FROM client_state WHERE project=?1 AND owner=?2 AND substr(key,1,length(?3)+1)=?3||'/'",params![project,owner,namespace]).map_err(storage)?;
+                for table in ["harness_bindings","owned_harness_queues"] {
+                    tx.execute(&format!("DELETE FROM {table} WHERE project=?1 AND owner=?2 AND namespace=?3"),params![project,owner,namespace]).map_err(storage)?;
+                }
+                tx.execute("INSERT INTO client_state VALUES(?1,?2,?3,'1')",params![project,owner,format!("{namespace}/retired")]).map_err(storage)?;
+                tx.commit().map_err(storage)
+            })?;
+            self.catalog.with("routes",|db| {db.execute("UPDATE routes SET binding=NULL WHERE project=?1 AND owner=?2 AND namespace=?3",params![project,owner,namespace]).map_err(storage)?;Ok(())})
         })
     }
     fn route(&self, project: &str, owner: &str, namespace: &str) -> Result<String, Error> {
@@ -88,6 +105,7 @@ impl ClientStores {
     }
     fn bind_resource(&self, binding: &Binding, key: &str) -> Result<(), Error> {
         let before = self.route(&binding.project_id, &binding.owner, &binding.namespace)?;
+        self.shards.with(&before,|db|ensure_live(db,&binding.project_id,&binding.owner,&binding.namespace))?;
         let after = json!([
             "session",
             binding.project_id,
@@ -166,8 +184,13 @@ impl ClientStores {
             });
             bindings.push(binding);
         }
+        bindings.retain(|b|self.with(&b.project_id,&b.owner,&b.namespace,|_|Ok(())).err().is_none_or(|e|e.code!="HARNESS_SESSION_RETIRED"));
         Ok(bindings)
     }
+}
+fn ensure_live(db: &Connection, project: &str, owner: &str, namespace: &str) -> Result<(),Error> {
+    let retired:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM client_state WHERE project=?1 AND owner=?2 AND key=?3)",params![project,owner,format!("{namespace}/retired")],|r|r.get(0)).map_err(storage)?;
+    if retired {return Err(Error::not_found("HARNESS_SESSION_RETIRED"))}Ok(())
 }
 fn read_bindings(db: &Connection, sql: &str) -> Result<Vec<Binding>, Error> {
     let mut statement = db.prepare(sql).map_err(storage)?;
@@ -255,6 +278,18 @@ mod tests {
             session_id: session.into(),
             revision: 1,
         }
+    }
+    #[test]
+    fn retired_namespace_cannot_be_recreated_or_rebound_after_restart() {
+        let root=tempfile::tempdir().unwrap();let store=ClientStores::open(root.path()).unwrap();
+        put(&store,"old","private");store.bind(&binding("old","empty")).unwrap();
+        store.retire_namespace("p","alice","old").unwrap();
+        assert_eq!(store.with("p","alice","old",|_|Ok(())).unwrap_err().code,"HARNESS_SESSION_RETIRED");
+        assert_eq!(store.bind(&binding("old","new")).unwrap_err().code,"HARNESS_SESSION_RETIRED");
+        assert!(store.bindings().unwrap().is_empty());drop(store);
+        let store=ClientStores::open(root.path()).unwrap();
+        assert_eq!(store.bind(&binding("old","empty")).unwrap_err().code,"HARNESS_SESSION_RETIRED");
+        put(&store,"fresh","new");assert_eq!(get(&store,"fresh"),"new");
     }
     fn put(store: &ClientStores, namespace: &str, value: &str) {
         store

@@ -228,7 +228,7 @@ retained_files = 5
 
 0.3.5 的历史投影使用持久事件中的原生 turn 编号，不再将不同轮次合并；分页从轮次中间开始也保持相同身份。实时流仍沿用当前提交的 requestId。DSH 会话额外返回可选 archiveAllowed，允许客户端显示空闲但未附着会话的归档操作；不以 owned 推测原生管理权限，归档提交仍再次核验原生运行状态与目录授权。
 
-默认托管模式显式配置 `command` 和已存在的私有 `home`（DSH_HOME），由 cells 延迟启动 `dsh --patch <临时传输配置> --profile web --no-open --host 127.0.0.1 --port 0`，读取 readiness URL 后在内存交换 cookie。临时 overlay 在私有 home 内使用 0600 权限，固定回环地址、随机端口、readiness 输出及禁止打开浏览器，避免用户 profile 的固定绑定覆盖启动参数；进程回收后删除 overlay。请先在该 home 完成 DSH profile 初始化、模型与凭据配置；启动超时默认 120 秒。项目模式 `projects = true` 使用共同 ProjectRuntime/launcher、目录 grants 与文件活动租约；`[projects].network = true` 允许本机控制连接和模型网络。DSH 应安装在沙箱可访问的系统目录；源码开发启动器可能引用沙箱外路径，不能直接当作可部署命令。
+默认托管模式显式配置 `command`；`home` 默认是运行 Cells 的有效系统用户的 `~/.dsh`，也可显式指定已存在的本机私有目录（DSH_HOME），由 cells 延迟启动 `dsh --patch <临时传输配置> --profile web --no-open --host 127.0.0.1 --port 0`，读取 readiness URL 后在内存交换 cookie。临时 overlay 在私有 home 内使用 0600 权限，固定回环地址、随机端口、readiness 输出及禁止打开浏览器，避免用户 profile 的固定绑定覆盖启动参数；进程回收后删除 overlay。请先在该 home 完成 DSH profile 初始化、模型与凭据配置；启动超时默认 120 秒。项目模式 `projects = true` 使用共同 ProjectRuntime/launcher、目录 grants 与文件活动租约；`[projects].network = true` 允许本机控制连接和模型网络。DSH 应安装在沙箱可访问的系统目录；源码开发启动器可能引用沙箱外路径，不能直接当作可部署命令。
 
 已有服务模式设置 `[harnesses.dsh].url`（仅 HTTP(S) origin）及 `token_env`，令牌只在服务端环境解析。该模式必须使用显式 legacy workspaces、`projects = false`，且不能用于多身份项目运行时；已有 DSH 的工具权限由它自己的配置决定。不会结束已有服务进程。DSH 服务需允许该 URL 的 Host；HTTP(S) 与 WS(S) 均使用同一 origin 和 cookie。
 
@@ -276,7 +276,7 @@ DSH 0.2.0-rc.2 的 `command/run.source` 只有 `kind=user`，原生 `commandId` 
 
 认证使用每请求的 HTTP Basic 或 Bearer，没有 cookie 登录会话和自动到期时间；配置凭据不变时，服务重启后仍有效。itookit 的 cells 项目绑定支持标准 MCP API Key（Bearer）和旧 Basic 配置；API Key 使用 MCP 既有存储，驱动运行时只保留内存副本。API Key 不写入项目挂载记录，MCP 导出仍移除 API Key。
 
-使用 [config.harness.example.toml](config.harness.example.toml) 配置。`harnesses` 缺省为空，不启动或访问 Codex；每个 profile 显式设置已存在的绝对 CODEX_HOME 和授权 workspace。运行 cells 的系统用户需已有 Codex 登录状态及已安装的 CLI。要浏览当前用户 ~/.codex 的会话，填写该目录的实际绝对路径；TOML 不展开 `~`。不读取未配置的其他 home，不把 auth.json 等密钥文件作为会话返回。
+使用 [config.harness.example.toml](config.harness.example.toml) 配置。`harnesses` 缺省为空，不启动或访问 Codex；每个 profile 设置授权 workspace；省略 home 时使用运行 Cells 的有效系统用户的 ~/.codex，显式 home 仍须为已存在的本机绝对目录。运行 cells 的系统用户需已有 Codex 登录状态及已安装的 CLI。当前用户的 home 由 Cells 所在机器的有效系统账号解析，不使用 httpd 的 home；显式 TOML 路径不展开 `~`。不读取其他用户的 home，不把 auth.json 等密钥文件作为会话返回。
 
 `execution = false` 关闭原有 shell 服务，但仍可启用 harness；无需 exports 即可仅运行控制中心。workspace 必须与 exclusive rw exports 分离（启动时拒绝重叠），可用 ro export 浏览相同目录。`server_id` 可设置稳定服务身份。
 
@@ -376,7 +376,7 @@ Codex 提供 `harness_rename`、`harness_archive`、`harness_unarchive`、`harne
 
 ### Claude Code
 
-显式配置已安装的 Claude CLI 和已存在的私有目录；`home` 对应 `CLAUDE_CONFIG_DIR`，不会自动读取未配置的 `~/.claude`。多身份配置的追加式模板见 [profiles/claude.example.toml](profiles/claude.example.toml)，须绑定已有 principal。项目实例复用 ProjectLauncher 和 Bubblewrap 的目录、mounts、网络授权：
+配置已安装的 Claude CLI；省略 `home` 时读取运行 Cells 的有效系统用户的 `~/.claude`，显式本机私有目录对应 `CLAUDE_CONFIG_DIR`。多身份配置的追加式模板见 [profiles/claude.example.toml](profiles/claude.example.toml)，须绑定已有 principal。项目实例复用 ProjectLauncher 和 Bubblewrap 的目录、mounts、网络授权：
 
 ```toml
 [[harnesses]]
@@ -636,3 +636,17 @@ The node persists claims before native dispatch, owns background subscriptions, 
 ### Superseded task channels
 
 A native conversation can outlive the task scope bound to its directory. Resuming or refreshing that conversation disables its revoked `cells_session` MCP capability rather than inheriting the active scope of another Session. The successor's binding, token and execution record remain unchanged. Codex explicitly disables the persisted server; Claude and DSH remove its routing. Ordinary owner-authorized agent servers remain available. This does not reactivate a closed scope or replay a previously rejected instruction.
+
+
+### Cells 权威项目草稿与本机发现
+
+`projectDrafts: 1` 的固定 `project_draft` API 管理当前项目草稿的 open/save/begin/reset、分块附件、回执核对与 promotion/resolve。草稿 UUID 与后继 UUID 由 Cells 生成；仅真实原生接纳允许转正，原生历史不复制到草稿表。httpd 通过节点协议使用同一当前草稿，不再为远程项目创建本机草稿。NestOS Agent/Flow 正式 Session 由宿主核验持久提交后以固定 submissionId 确认退休。旧 httpd 远程草稿不迁移。
+
+会话发现读取本机 profile home：Codex 只读 `state_<version>.sqlite`，Claude 读取 projects 历史，托管 DSH 读取 storages/session_projcache/sessions 与 workspace 归档元数据；不存在本地索引时保留原生查询。项目根目录及全部子目录均纳入归属，匹配以路径分量为界。发现不启动本地执行器、不创建或续用 Session；续用保留原 cwd，隔离启动器通过授权源路径挂载提供可达性。原生控制、实时状态与执行回执仍走原生接口；本地索引不代表任务已完成。
+
+
+Codex 的新建配置与后续会话 channel 配置使用同一显式基线，无任务 scope 时将 cells_session 禁用；首次输入不因缺失缓存而卸载尚未持久化的空 thread。`channel.native.configure` 记录 compare/rebind、baselineCached、结果及耗时，native 回执补充 thread/unsubscribe。已知未加载与不存在的原生错误分别保留 HARNESS_SESSION_NOT_LOADED / HARNESS_SESSION_NOT_FOUND，不输出原始异常、配置或凭据。原已失败且未接纳的输入仍保留核对事实，不自动重发。
+
+### 首条内容统一提交
+
+节点通过 `projectDraftFirstInput: 1` 声明首条内容统一提交。`project_draft` 的 `submit` / `submission` 使用稳定 operationId、draftId、profileId；只有 submit 携带首条内容、附件和模型选择。Cells 负责原生创建和首次接纳，确认接纳后才与草稿转正同事务发布原生映射和统一回执。明确拒绝后删除已确认的空会话；未知结果仅查询原回执，不重发内容。旧失败空会话在打开草稿时退休，原客户端命名空间阻止迟到写入复活失效绑定。

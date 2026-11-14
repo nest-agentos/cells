@@ -792,6 +792,13 @@ impl Profile {
             }
             Some(serial)
         };
+        if name == "harness_delete" && args["emptyOnly"] == true {
+            let history=self.driver.get()?.read("harness_session_read",args.clone()).await?;
+            if history["turns"].as_array().is_none_or(|rows|!rows.is_empty()) || !history["nextCursor"].is_null()
+                || !history["recovery"].is_null() || history["session"]["activeTurnId"].is_string() {
+                return Err(Error::conflict("HARNESS_EMPTY_SESSION_UNCONFIRMED"));
+            }
+        }
         let mut args = args.clone();
         if let Some(descriptor) = descriptor {
             super::commands::verify(&args, &descriptor)?;

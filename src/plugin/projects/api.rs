@@ -18,6 +18,7 @@ pub async fn call(
         .get::<crate::projects::ProjectService>()
         .ok_or_else(Error::unsupported)?;
     match name {
+        "project_draft" => super::drafts::handle(state,identity,&args).await,
         "project_client_state"=>{
             let project=service.get(identity,text(&args,"projectId")?)?;authorize(state,identity,&project)?;
             if project.revision!=args["revision"].as_u64().ok_or_else(Error::invalid)? {return Err(Error::conflict("CLIENT_STATE_BINDING_CHANGED"));}

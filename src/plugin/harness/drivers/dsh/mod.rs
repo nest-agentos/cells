@@ -1,6 +1,7 @@
 //! DSH Remote adapter; native policies and persistence remain owned by DSH.
 mod admission;
 mod catalog;
+mod local_catalog;
 mod channel;
 mod command_admission;
 mod commands;

@@ -213,8 +213,8 @@ impl ProjectRuntime {
         self.prepare_harness(profile, args, false, None)
     }
     pub fn prepare_at(&self,profile:&ProfileConfig,args:Vec<String>,cwd:&str)->Result<Prepared,Error> {
-        let cwd=self.resolve_cwd(cwd)?;
-        self.prepare_harness(profile,args,false,Some(cwd))
+        let translated=self.resolve_cwd(cwd)?;
+        self.prepare_harness(profile,args,translated!=cwd,Some(cwd.to_owned()))
     }
     pub fn prepare_with_source_paths(
         &self,

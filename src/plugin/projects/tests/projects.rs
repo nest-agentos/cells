@@ -1041,3 +1041,136 @@ fn independent_directory_registrations_allocate_distinct_readable_ids_concurrent
     });
     assert_eq!(ids.len(),12);assert!(ids.contains("concurrent"));assert!(ids.contains("concurrent-12"));
 }
+
+#[tokio::test]
+async fn cells_draft_uses_real_native_admission_and_retains_its_identity_mapping() {
+    use std::os::unix::fs::PermissionsExt;
+    let root=tempfile::tempdir().unwrap(); let mut config=deployment(root.path());
+    config.projects.as_mut().unwrap().isolation=cells::projects::model::Isolation::None;
+    let fixture=root.path().join("draft-peer.py");
+    let source=include_str!("../../harness/tests/fixtures/queue-app-server.py")
+        .replace("__STATE__",&json!(root.path().join("native.json")).to_string())
+        .replace("__COUNT__",&json!(root.path().join("turn-count")).to_string())
+        .replace("__FINISH__",&json!(root.path().join("finish")).to_string());
+    std::fs::write(&fixture,source).unwrap();
+    std::fs::set_permissions(&fixture,std::fs::Permissions::from_mode(0o700)).unwrap();
+    config.harnesses[0].command=fixture.to_str().unwrap().into();
+    let state=State::from_config(&config).unwrap(); cells::process::enable(&state).await.unwrap();
+    let project=register(&state,"group/existing",false).await;
+    verify_native_draft(&state,&project).await;
+    state.services.require::<cells::harness::Harnesses>().unwrap().close().await;
+}
+async fn verify_native_draft(state:&Arc<State>,project:&Value) {
+    let mut args=json!({"projectId":project["id"],"revision":project["revision"],"action":"open"});
+    let first=call(state,0,"project_draft",args.clone()).await.unwrap();
+    args["action"]=json!("begin"); args["draftId"]=first["record"]["id"].clone(); args["expectedData"]=json!("");
+    args["namespace"]=json!("a".repeat(64)); args["profileId"]=json!("codex");
+    args["target"]=json!({"connectionId":"c","serverProjectId":project["id"],"profileId":"codex"});
+    call(state,0,"project_draft",args.clone()).await.unwrap();
+    let harness=state.services.require::<cells::harness::Harnesses>().unwrap();
+    let base=json!({"projectId":project["id"],"revision":project["revision"],"profileId":"codex","epoch":harness.profiles()["epoch"]});
+    let mut create=base.clone(); create["requestId"]=json!("draft-create"); create["workspaceId"]=project["id"].clone();
+    let created=harness.project_call(state,0,"harness_create",create).await.unwrap();
+    let mut turn=base.clone(); turn["sessionId"]=created["result"]["session"]["id"].clone(); turn["requestId"]=json!("draft-input"); turn["prompt"]=json!("fixture");
+    let admitted=harness.project_call(state,0,"harness_turn",turn.clone()).await.unwrap();
+    assert_eq!(admitted["outcome"],"committed");
+    let mut receipt=json!({"sessionId":turn["sessionId"],"submittedTurnId":"invented","submission":{"id":"draft-input","status":"accepted"}});
+    write_draft_journal(state,project,&receipt).await;
+    args["action"]=json!("promote");
+    assert_eq!(call(state,0,"project_draft",args.clone()).await.unwrap_err().code,"PROJECT_DRAFT_RECEIPT_UNCONFIRMED");
+    receipt=json!({"sessionId":turn["sessionId"],"instructionQueue":{"revision":0,"paused":false,"items":[],"receipts":[{"id":"queued-input","input":"a".repeat(64),"attemptId":"draft-input","turnId":admitted["result"]["turnId"]}]}});
+    write_draft_journal(state,project,&receipt).await;
+    let mut register=args.clone(); register["action"]=json!("register"); register["sessionId"]=turn["sessionId"].clone(); register["queueOwner"]=json!("cells");
+    call(state,0,"project_harness_recovery",register).await.unwrap();
+    let promoted=call(state,0,"project_draft",args.clone()).await.unwrap();
+    assert_ne!(promoted["record"]["id"],args["draftId"]); assert_eq!(promoted["record"]["data"],"");
+    assert_eq!(call(state,0,"project_draft",args.clone()).await.unwrap()["promotion"],promoted["promotion"]);
+    args["action"]=json!("resolve"); args["sessionId"]=turn["sessionId"].clone();
+    assert_eq!(call(state,0,"project_draft",args).await.unwrap()["conversationId"],first["record"]["id"]);
+}
+async fn write_draft_journal(state:&Arc<State>,project:&Value,record:&Value) {
+    let mut args=json!({"projectId":project["id"],"revision":project["revision"],"key":format!("{}/recovery","a".repeat(64)),"action":"read"});
+    let before=call(state,0,"project_client_state",args.clone()).await.unwrap()["value"].clone();
+    args["action"]=json!("compare"); args["expected"]=before;
+    args["value"]=json!(json!({"schema":1,"text":record.to_string()}).to_string());
+    assert_eq!(call(state,0,"project_client_state",args).await.unwrap()["applied"],true);
+}
+
+
+#[tokio::test]
+async fn first_input_owns_creation_cleanup_and_idempotent_publication() {
+    use std::os::unix::fs::PermissionsExt;
+    let root=tempfile::tempdir().unwrap();let mut config=deployment(root.path());
+    config.projects.as_mut().unwrap().isolation=cells::projects::model::Isolation::None;
+    let fixture=root.path().join("first-peer.py");
+    let source=include_str!("../../harness/tests/fixtures/codex-app-server.py")
+        .replace("threads = {}", "threads = {}\ncreated_count = 0")
+        .replace("thread_id = 'session-' + str(len(threads) + 1)", "created_count += 1\n        thread_id = 'session-' + str(created_count)")
+        .replace("elif method == 'turn/start':", "elif method == 'turn/start':\n        if params['input'][0].get('text') == 'fixture:reject-first':\n            emit({'id':request['id'],'error':{'code':-32602,'message':'invalid fixture input'}})\n            continue");
+    std::fs::write(&fixture,source).unwrap();std::fs::set_permissions(&fixture,std::fs::Permissions::from_mode(0o700)).unwrap();
+    config.harnesses[0].command=fixture.to_str().unwrap().into();
+    let state=State::from_config(&config).unwrap();cells::process::enable(&state).await.unwrap();
+    let project=register(&state,"group/existing",false).await;
+    let args=json!({"projectId":project["id"],"revision":project["revision"],"action":"open"});
+    let first=call(&state,0,"project_draft",args.clone()).await.unwrap()["record"].clone();
+    let mut begin=args.clone();begin["action"]=json!("begin");begin["draftId"]=first["id"].clone();
+    begin["expectedData"]=json!("");begin["profileId"]=json!("codex");begin["namespace"]=json!("a".repeat(64));
+    begin["target"]=json!({"connectionId":"c","serverProjectId":project["id"],"profileId":"codex"});
+    call(&state,0,"project_draft",begin.clone()).await.unwrap();
+    let mut fenced=begin.clone();fenced["action"]=json!("submission");fenced["operationId"]=json!("never-dispatched");
+    let unseen=call(&state,0,"project_draft",fenced.clone()).await.unwrap();assert_eq!(unseen["receipt"]["code"],"HARNESS_REQUEST_NOT_STARTED");
+    fenced["action"]=json!("submit");fenced["prompt"]=json!("late input");
+    assert_eq!(call(&state,0,"project_draft",fenced).await.unwrap(),unseen);
+    let mut submit=begin.clone();submit["action"]=json!("submit");submit["operationId"]=json!("first-rejected");submit["prompt"]=json!("fixture:reject-first");
+    let rejected=call(&state,0,"project_draft",submit.clone()).await.unwrap();
+    assert_eq!(rejected["receipt"]["outcome"],"not-committed");
+    assert_eq!(call(&state,0,"project_draft",submit.clone()).await.unwrap(),rejected);
+    let harness=state.services.require::<cells::harness::Harnesses>().unwrap();
+    let list=harness.project_call(&state,0,"harness_sessions",json!({"projectId":project["id"],"revision":project["revision"],"profileId":"codex"})).await.unwrap();
+    assert!(list["sessions"].as_array().unwrap().is_empty(),"Rejected first input must remove its native thread");
+    assert_eq!(call(&state,0,"project_draft",args.clone()).await.unwrap()["record"]["id"],first["id"]);
+    submit["operationId"]=json!("first-accepted");submit["prompt"]=json!("fixture:first-input");
+    let accepted=call(&state,0,"project_draft",submit.clone()).await.unwrap();
+    assert_eq!(accepted["receipt"]["outcome"],"committed");
+    assert_eq!(accepted["receipt"]["result"]["session"]["id"],"session-2");
+    assert_eq!(call(&state,0,"project_draft",submit.clone()).await.unwrap(),accepted);
+    submit["prompt"]=json!("changed");assert_eq!(call(&state,0,"project_draft",submit.clone()).await.unwrap_err().code,"PROJECT_DRAFT_CHANGED");
+    let opened=call(&state,0,"project_draft",args).await.unwrap();
+    assert_ne!(opened["record"]["id"],first["id"]);assert_eq!(opened["promotion"]["draftId"],first["id"]);
+    verify_failed_legacy_draft(&state,&project,&opened["record"]).await;
+    verify_first_prompt_command(&state,&project).await;
+    harness.close().await;
+}
+async fn verify_first_prompt_command(state:&Arc<State>,project:&Value) {
+    let harness=state.services.require::<cells::harness::Harnesses>().unwrap();
+    let base=json!({"projectId":project["id"],"revision":project["revision"],"profileId":"codex"});
+    let commands=harness.project_call(state,0,"harness_commands",base.clone()).await.unwrap();
+    let command=commands["commands"].as_array().unwrap().iter().find(|c|c["kind"]=="prompt").unwrap();
+    let mut args=base.clone();args["action"]=json!("open");
+    let draft=call(state,0,"project_draft",args.clone()).await.unwrap()["record"].clone();
+    args["action"]=json!("begin");args["draftId"]=draft["id"].clone();args["expectedData"]=json!("");args["namespace"]=json!("b".repeat(64));
+    args["target"]=json!({"connectionId":"c","serverProjectId":project["id"],"profileId":"codex"});
+    call(state,0,"project_draft",args.clone()).await.unwrap();
+    args["action"]=json!("submit");args["operationId"]=json!("prompt-first");args["prompt"]=json!("fixture prompt");
+    args["command"]=json!({"name":command["name"],"arguments":"fixture prompt","expectedCommand":{"id":command["id"],"revision":command["revision"]}});
+    let result=call(state,0,"project_draft",args.clone()).await.unwrap();
+    assert_eq!(result["receipt"]["outcome"],"committed");assert!(result["receipt"]["result"]["turnId"].is_string());
+    assert_eq!(call(state,0,"project_draft",args).await.unwrap(),result);
+}
+async fn verify_failed_legacy_draft(state:&Arc<State>,project:&Value,draft:&Value) {
+    let mut args=json!({"projectId":project["id"],"revision":project["revision"],"action":"begin","draftId":draft["id"],"expectedData":"","namespace":"a".repeat(64),"profileId":"codex",
+        "target":{"connectionId":"c","serverProjectId":project["id"],"profileId":"codex"}});
+    call(state,0,"project_draft",args.clone()).await.unwrap();
+    let harness=state.services.require::<cells::harness::Harnesses>().unwrap();
+    let mut native=json!({"projectId":project["id"],"revision":project["revision"],"profileId":"codex","epoch":harness.profiles()["epoch"],"workspaceId":project["id"],"requestId":"legacy-create"});
+    let created=harness.project_call(state,0,"harness_create",native.clone()).await.unwrap();
+    native["sessionId"]=created["result"]["session"]["id"].clone();native["requestId"]=json!("legacy-input");native["prompt"]=json!("fixture:reject-first");
+    assert_eq!(harness.project_call(state,0,"harness_turn",native.clone()).await.unwrap()["outcome"],"not-committed");
+    write_draft_journal(state,project,&json!({"sessionId":native["sessionId"],"submission":{"id":"legacy-input","status":"rejected"},"pending":{"requestId":"uncertain"}})).await;
+    args["action"]=json!("open");
+    assert_eq!(call(state,0,"project_draft",args.clone()).await.unwrap()["record"]["id"],draft["id"]);
+    write_draft_journal(state,project,&json!({"sessionId":native["sessionId"],"submission":{"id":"legacy-input","status":"rejected"}})).await;
+    let fresh=call(state,0,"project_draft",args.clone()).await.unwrap();assert_ne!(fresh["record"]["id"],draft["id"]);
+    assert_eq!(fresh["record"]["state"],"draft");
+    assert_eq!(call(state,0,"project_client_state",json!({"projectId":project["id"],"revision":project["revision"],"action":"read","key":format!("{}/recovery","a".repeat(64))})).await.unwrap_err().code,"HARNESS_SESSION_RETIRED");
+}

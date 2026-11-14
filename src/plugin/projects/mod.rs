@@ -37,3 +37,5 @@ mod identity;
 pub(crate) mod harness_recovery;
 
 pub(crate) mod harness_queue;
+
+mod drafts;

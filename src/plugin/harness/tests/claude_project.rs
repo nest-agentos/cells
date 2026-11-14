@@ -50,6 +50,9 @@ fn history(root: &Path, project: &Value) {
         "22222222-2222-4222-8222-222222222222",
         None,
     );
+    let nested=physical.join("nested/deep");
+    std::fs::create_dir_all(&nested).unwrap();
+    transcript(&home,nested.to_str().unwrap(),"44444444-4444-4444-8444-444444444444",None);
     transcript(
         &home,
         physical.to_str().unwrap(),
@@ -66,7 +69,7 @@ async fn verify_history(state: &Arc<State>, alice: usize, args: &Value) {
         .project_call(state, alice, "harness_sessions", args.clone())
         .await
         .unwrap();
-    assert_eq!(listed["sessions"].as_array().unwrap().len(), 2);
+    assert_eq!(listed["sessions"].as_array().unwrap().len(), 3);
     for session in listed["sessions"].as_array().unwrap() {
         assert_eq!(session["status"], "notLoaded");
         assert_eq!(session["owned"], false);
@@ -81,6 +84,8 @@ async fn verify_history(state: &Arc<State>, alice: usize, args: &Value) {
             .unwrap();
         assert_eq!(read["turns"][0]["items"][0]["type"], "userMessage");
         assert_eq!(read["session"]["owned"], false);
+        assert_eq!(read["session"]["cwd"],session["cwd"]);
+        if session["id"]=="44444444-4444-4444-8444-444444444444" {assert!(session["cwd"].as_str().unwrap().ends_with("nested/deep"));}
     }
 }
 

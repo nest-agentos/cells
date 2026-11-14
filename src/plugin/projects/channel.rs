@@ -211,6 +211,12 @@ impl Channels {
         drop(db);
         self.agent_config(owner, scoped)
     }
+    /// New and resumed sessions must start from the same explicit channel baseline.
+    pub fn creation_config(&self, project:&str, cwd:&str, owner:&str)->Result<Value,Error> {
+        let mut config=self.config(project,cwd,owner)?.unwrap_or(json!({}));
+        if config.get("mcp_servers.cells_session").is_none() {config["mcp_servers.cells_session"]=disabled_channel();}
+        Ok(config)
+    }
     /// A conversation outlives its task scope; it must never inherit another Session's capability.
     pub fn session_config(
         &self,
@@ -221,11 +227,7 @@ impl Channels {
     ) -> Result<Value, Error> {
         match self.bind(project, cwd, session) {
             Ok(()) => {
-                let mut config = self.config(project, cwd, owner)?.unwrap_or(json!({}));
-                if config.get("mcp_servers.cells_session").is_none() {
-                    config["mcp_servers.cells_session"] = disabled_channel();
-                }
-                Ok(config)
+                self.creation_config(project,cwd,owner)
             }
             Err(error) if error.code == "CHANNEL_SESSION_CHANGED" => {
                 let config = self
@@ -1141,5 +1143,18 @@ mod tests {
                 .unwrap()["ack"]["status"],
             "accepted"
         );
+    }
+}
+
+#[cfg(test)]
+mod creation_config_tests {
+    use super::*;
+    #[test]
+    fn empty_project_sessions_use_the_same_explicit_channel_config_on_create_and_resume() {
+        let root=tempfile::tempdir().unwrap();
+        let channels=Channels::open(root.path()).unwrap();
+        let created=channels.creation_config("project","/work","owner").unwrap();
+        assert_eq!(created["mcp_servers.cells_session"],disabled_channel());
+        assert_eq!(channels.session_config("project","/work","owner","native").unwrap(),created);
     }
 }
