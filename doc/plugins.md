@@ -1,6 +1,6 @@
 # 节点插件接口与装配框架
 
-节点功能通过 `NodePlugin` 接入，注册、开关、依赖校验和生命周期由上层框架统一管理。当前使用同一进程内、编译时注册的 Rust 插件；配置修改在重启后生效。业务实现、配置、路由、工具契约和测试按插件归属放置；仍使用同一个 Rust crate，不动态加载二进制插件。
+节点功能通过 `NodePlugin` 接入，注册、开关、依赖校验和生命周期由上层框架统一管理。业务操作由插件声明，HTTP 路由另行注册，文件读取通过来源端口执行。当前使用同一进程内、编译时注册的 Rust 插件；配置修改在重启后生效。业务实现、配置、路由、工具契约和测试按插件归属放置；仍使用同一个 Rust crate，不动态加载二进制插件。
 
 ## 目录与依赖
 
@@ -27,6 +27,34 @@ src/
 
 State 仅持有认证、目录能力、文件门闩、线程预算、分页密钥、节点 epoch 及通用 `Services`。进程、同步、项目、Harness 和文件操作账本由各插件注册类型化 `Arc<T>`；关闭插件不创建其服务。`State::host` 和 `Application::assemble` 可用空插件目录构建宿主。旧 crate 模块路径通过公开 re-export 保留，代码物理归属以 `plugin/` 为准。
 
+## 传输、协调与业务端口
+
+| 边界 | 接口与职责 | 禁止承担 |
+| --- | --- | --- |
+| HTTP 传输 | `HttpRoutes`、各插件 `http_routes.rs` 和 `http/`；提取凭据、headers、URL、body，映射响应及流 | 按 projects/harness/agents 名称选择业务、判定业务收据结果 |
+| 应用协调 | `app::operations::invoke`；校验、按插件声明分发、关联诊断 | 依赖具体业务服务、接收 Axum Router |
+| 业务插件 | `NodePlugin::operation_domains` / `call`，配置、状态、生命周期及错误结果语义 | 创建公共路由、绕过其他功能的授权策略 |
+| 文件来源 | `FileSource`、`Sources`、`ReadContext`、`Content`；元数据批查、目录列举、版本化流读取 | 接收 HTTP 请求、默认假定远端目录可交给原生执行器 |
+| 文件读取协调 | `files::reading`；身份授权、项目门闩、生命周期、截止时间、读取和传输阶段日志 | 替来源执行网络协议或本地系统调用 |
+
+`NodePlugin` 和公共注册框架不再依赖 Axum。`/v1/api/:domain/:operation` 调用应用协调入口，projects、agents 和 harness 的域声明与分发归所属插件；重复域即使在插件禁用时也拒绝。HTTP 仅输出统一成功/错误 envelope，`HARNESS_RECEIPT_STORAGE` 的 unknown 语义归 Harness 插件。MCP 继续使用现有 `McpContribution`，不转发成固定 HTTP API，避免改变其授权、Schema 和回执协议。
+
+`HttpRoutes::register(owner, router)` 独立于生命周期，拒绝重复 owner，构建 router 时拒绝未注册的 owner；宿主仅挂载启用 owner 的路由，并统一应用认证、CORS、no-store 和请求诊断。内置装配在 `plugin/catalog.rs` 选择适配器，自有宿主在 `Application::assemble` 前将自己的 `HttpRoutes` 放入 `host.services`。URL 冲突遵循 Axum 的路由校验。各适配器保留原来的 URL、请求体限制和状态码。
+
+项目路径策略接收已验证的 identity 和字符串 claims，不读取 HTTP headers。传输只提取注册的路径字段；**已禁用插件的字段仍须传入策略并拒绝**，不得退回无项目限制的访问。目录原生能力仍由宿主持有，关闭文件传输不关闭命令所需的本地目录能力。
+
+### 文件来源与 WebDAV 客户端准备
+
+本地 `Export` 已通过 `LocalSource` 走同一来源端口，现有 stat、entries、content 适配器实际消费它；文件 DTO 移到 `source/model.rs`，旧公开路径保留 re-export。一次 stat 批查仍只占用一个本地 worker；目录分页、cursor 身份绑定、Range / If-Match / If-Range、SeqFile 的读取快照和项目访问边界保持原协议。来源按输入顺序返回同数量的 stat 项，单项不存在为 `None`，单项失败保留错误码；数量不符以 `FILE_SOURCE_RESULT_MISMATCH` 拒绝。
+
+来源的 `open` 提供 size、revision 和版本绑定的 `Content`，`Content::read(offset, length)` 返回异步 reader。HTTP 限制输出窗口；后续 WebDAV 客户端可在这里使用远端 Range 和条件请求。来源必须固定此次读取版本，无法满足时返回明确失败，不能在读取中静默切换版本。未来 NestOS VFS 导出也可实现同一端口；Linux FUSE 客户端可复用现有文件协议。
+
+`ReadContext` 的生命周期租约须随阻塞工作或转移的任务一起保留；本地 worker 即使请求超时仍持有租约至实际停止。HTTP body 消费或丢弃前持续保留项目和节点门闩。来源 future 取消应中断网络请求，不得产生失去所有者的后台传输。来源阶段与流传输失败记录 request/operation 关联、错误分类和耗时，不记录路径正文、内容或凭据。
+
+当前端口完成的是**通用读取**和可选本地目录能力。条件写入、原子发布、操作回执和 SeqFile 修改仍使用本地持久执行实现；缺少本地能力的来源返回 `ECAPABILITY`，不得伪造成功、写入能力或将 URL 当成本地路径。来源注册检查能力一致性。WebDAV 远端写入需要后续独立的条件写入和持久回执端口，不能将普通 PUT 成功等同于完整 Cells 收据语义。
+
+本次没有实现 WebDAV 网络客户端、NestOS VFS 对外导出或 Linux FUSE 挂载。宿主配置仍声明本地 exports；非本地来源可以通过独立宿主与 `Sources` 注册接入，尚无 WebDAV 配置入口。现有共享 Error 暂保留 HTTP 状态映射；项目业务内部的跨服务协作也未全部改为独立端口，不能将本次入口解耦视为所有业务实现均已隔离。
+
 ## 内置插件与开关
 
 | ID | 功能 | 未显式配置时 |
@@ -46,7 +74,7 @@ State 仅持有认证、目录能力、文件门闩、线程预算、分页密�
 
 ## 接口与上层职责
 
-`plugin::common::NodePlugin` 提供稳定 ID、必需和可选依赖、默认开关、有效配置投影、静态验证、服务装配、路由及异步 start/stop。公共接口消费 `PluginConfiguration`，不导入产品 Config；独立插件可使用 `PluginSettings.options` 解析自己的配置。既有部署格式通过 config/plugin_adapter.rs 适配，新增插件的参数可放在 `[plugin_options.<id>]`，无需添加宿主字段。插件只管理自己的功能，资源授权仍由领域模块执行。插件的 stop 必须可重复调用，构造失败时应自行释放局部资源。
+`plugin::common::NodePlugin` 提供稳定 ID、必需和可选依赖、默认开关、有效配置投影、静态验证、服务装配、业务操作及异步 start/stop。公共接口消费 `PluginConfiguration`，不导入产品 Config；独立插件可使用 `PluginSettings.options` 解析自己的配置。既有部署格式通过 config/plugin_adapter.rs 适配，新增插件的参数可放在 `[plugin_options.<id>]`，无需添加宿主字段。插件只管理自己的功能，资源授权仍由领域模块执行。插件的 stop 必须可重复调用，构造失败时应自行释放局部资源。
 
 `PluginRegistry::empty()` 创建独立注册表，`register(Arc<dyn NodePlugin>)` 加入插件，`PluginRegistry::builtins()` 提供产品默认目录。注册表不使用全局可变状态；重复/非法 ID、缺失或被禁用的必需依赖、依赖环在创建服务之前拒绝。可选依赖仅在双方启用时决定顺序，例如项目在同步库初始化后检查目录隔离，不强制项目开启同步。
 
@@ -84,3 +112,9 @@ Harness 直接订阅已有有界事件缓冲，沿用 epoch/cursor/gap 与待答
 自有插件实现 NodePlugin，按需实现 McpContribution；在独立 PluginRegistry 中注册，再调用 Application::assemble(host, registry, configuration)。类型化状态通过 host.services.insert(Arc::new(OwnState)) 注册，处理器通过 require::<OwnState>() 取得；禁用或未注册时返回能力错误，容器拒绝重复类型，不隐式创建默认服务。
 
 完整扩展示例及验收见 [contributions.rs](../src/plugin/common/tests/contributions.rs)：只注册测试插件和 MCP，即能验证独立配置、状态、HTTP、工具、资源、能力与关闭行为，不初始化其他业务服务。运行 `cargo test --locked --test contributions`。各插件的自测与共享框架测试同时属于 `cargo test --locked`。
+
+### 边界回归与真实传输验收
+
+`source_ports` 使用没有 POSIX 目录的内存来源，覆盖同一文件协议的批查、分页响应、Range、条件读取、授权、路径限制、超时、拒绝本地写入和 body 丢弃后的排空。`contributions` 覆盖同一业务端口的 HTTP 与进程内调用、禁用、重复域和 unknown 结果。`plugin_layout` 防止公共框架与生命周期接口重新导入 Axum 或公共操作入口导入具体业务。
+
+仓库根目录运行 `node scripts/tests/cells-plugin-transport-smoke.mjs`，默认使用本地 debug Cells 二进制；可通过 `CELLS_BINARY` 指定已构建产物。脚本在同一个受管理临时作用域内启动节点和验收驱动，使用 600 个 4096 字节文件，分别记录首次/重复文件打开流程的耗时、逻辑 API 与 HTTP 次数，覆盖分页、256 项 stat、Range、条件创建、冲突及并发读取。成功输出包含产物 SHA256 与已确认清理回执。这是文件协议验收，**不代表完整 UI 点击到可操作的性能验收**；完整页面仍按主仓库性能规范独立验证。

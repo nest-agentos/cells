@@ -26,3 +26,5 @@ pub(crate) mod plugin;
 mod contribution;
 
 pub use plugin::Sync as Plugin;
+
+pub(crate) mod http_routes;

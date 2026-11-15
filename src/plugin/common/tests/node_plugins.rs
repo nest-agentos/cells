@@ -128,9 +128,7 @@ impl NodePlugin for Custom {
     fn id(&self) -> &'static str {
         "custom"
     }
-    fn routes(&self) -> Router<Arc<State>> {
-        Router::new().route("/v1/custom", get(|| async { Json(json!({"custom":true})) }))
-    }
+
 }
 
 #[tokio::test]
@@ -138,7 +136,11 @@ async fn applications_accept_an_isolated_registry_and_protect_contributed_routes
     let root = tempfile::tempdir().unwrap();
     let mut registry = PluginRegistry::empty();
     registry.register(Arc::new(Custom)).unwrap();
-    let application = Application::with_registry(&config(root.path()), registry).unwrap();
+    let mut host = State::host(cells::auth::Auth::new(None, vec![cells::auth::Client::new(common::SECRET.into(), None, vec![], vec![])]), cells::fs::Exports::default()).unwrap();
+    let mut routes = cells::http::HttpRoutes::default();
+    routes.register("custom", Router::new().route("/v1/custom", get(|| async { Json(json!({"custom":true})) }))).unwrap();
+    host.services.insert(Arc::new(routes)).unwrap();
+    let application = Application::assemble(host, registry, &cells::plugins::PluginSettings::default()).unwrap();
     let router = application.router().unwrap();
     let request = axum::http::Request::builder()
         .uri("/v1/custom")
@@ -208,4 +210,15 @@ async fn disabled_project_claims_cannot_fall_back_to_unscoped_file_access() {
         .to_string()
         .contains("ECAPABILITY"));
     application.shutdown().await.unwrap();
+}
+
+#[test]
+fn disabling_file_transport_preserves_native_directory_capabilities() {
+    let root = tempfile::tempdir().unwrap();
+    let mut config = config(root.path());
+    config.plugins.insert("files".into(), false);
+    let app = Application::from_config(&config).unwrap();
+    let request = common::request("/").body(Body::empty()).unwrap();
+    assert!(cells::http::access::export(app.state(), request.headers(), "docs").is_ok());
+    assert!(app.state().services.get::<cells::plugin::files::source::Sources>().is_none());
 }

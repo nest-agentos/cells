@@ -3,6 +3,14 @@ use std::sync::Arc;
 
 pub struct Projects;
 impl NodePlugin for Projects {
+    fn operation_domains(&self) -> &'static [&'static str] { &["projects", "agents"] }
+    fn call<'a>(&'a self, state: &'a Arc<State>, identity: usize, domain: &'a str, operation: &'a str, args: serde_json::Value) -> crate::plugins::OperationFuture<'a> {
+        Box::pin(async move { if state.auth.client(identity).anonymous() { return Err(crate::core::error::Error::unsupported()); }
+            if domain == "projects" { return super::call(state, identity, &format!("project_{operation}"), args).await; }
+            let service = state.services.require::<super::ProjectService>()?;
+            let owner = state.auth.client(identity).id();
+            match operation { "mcp_list" => service.channels.server_list(owner), "mcp_save" => service.channels.server_save(owner, &args), "mcp_remove" => service.channels.server_remove(owner, &args), _ => Err(crate::core::error::Error::unsupported()) } })
+    }
     fn subscribe<'a>(
         &'a self,
         state: &'a Arc<State>,
@@ -28,7 +36,8 @@ impl NodePlugin for Projects {
     ) -> Result<Option<tokio::sync::OwnedRwLockReadGuard<()>>, crate::core::error::Error> {
         super::access::project_path(
             state,
-            access.headers,
+            access.identity,
+            access.claims,
             access.alias,
             access.path,
             access.write,
@@ -108,6 +117,7 @@ impl NodePlugin for Projects {
             if service.channels_enabled {if let Some(transport)=state.services.get::<crate::plugin::mcp::InternalTransport>() {
                 service.channels.set_endpoint(Some(transport.endpoint()?))?;
             }}
+            if state.plugins.enabled("harness") { super::harness_recovery::maintain(Arc::downgrade(state)); }
             Ok(())
         })
     }

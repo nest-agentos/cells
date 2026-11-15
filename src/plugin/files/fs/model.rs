@@ -5,41 +5,12 @@
 //! in exactly one place.
 
 use crate::core::error::Error;
-use serde::{Deserialize, Serialize};
 use std::time::UNIX_EPOCH;
 
 /// Milliseconds since the epoch, or `0` when the platform cannot report it.
 const MAX_JSON_INTEGER: u128 = 9_007_199_254_740_991;
 
-#[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum ReadFields {
-    Entry,
-    #[default]
-    Stat,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Stat {
-    pub kind: &'static str,
-    pub size: u64,
-    pub modified_at: u64,
-    pub created_at: u64,
-    /// Present only for writable exports; absent otherwise.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub revision: Option<String>,
-    #[serde(skip_serializing_if = "serde_json::Map::is_empty")]
-    pub metadata: serde_json::Map<String, serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_identity: Option<String>,
-}
-
-#[derive(Serialize)]
-pub struct Entry {
-    pub name: String,
-    pub stat: Stat,
-}
+pub use crate::plugin::files::source::model::{Entry, ReadFields, Stat};
 
 /// Project kernel metadata into a protocol [`Stat`].
 pub(crate) fn attributes(file: &std::fs::File) -> Result<Stat, Error> {

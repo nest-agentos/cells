@@ -6,7 +6,6 @@ pub use registry::{PluginPlan, PluginRegistry};
 pub use runtime::PluginRuntime;
 
 use crate::app::State;
-use axum::Router;
 use std::{future::Future, pin::Pin, sync::Arc};
 
 pub type PluginFuture<'a> = Pin<Box<dyn Future<Output = Result<(), PluginFailure>> + Send + 'a>>;
@@ -42,9 +41,13 @@ impl From<&str> for PluginFailure {
     }
 }
 
-/// Compiled-in features own settings, validation, service assembly, routes and cleanup.
+/// Compiled-in features own settings, validation, service assembly, operations and cleanup.
 /// Hooks must release their own partial work when construction fails; stop must be idempotent.
 pub trait NodePlugin: Send + Sync {
+    fn operation_domains(&self) -> &'static [&'static str] { &[] }
+    fn call<'a>(&'a self, _state: &'a Arc<State>, _identity: usize, _domain: &'a str, _operation: &'a str, _args: serde_json::Value) -> OperationFuture<'a> {
+        Box::pin(async { Err(crate::core::error::Error::unsupported()) })
+    }
     fn subscribe<'a>(
         &'a self,
         _state: &'a Arc<State>,
@@ -104,9 +107,6 @@ pub trait NodePlugin: Send + Sync {
         Ok(())
     }
     fn stop_admission(&self, _state: &State) {}
-    fn routes(&self) -> Router<Arc<State>> {
-        Router::new()
-    }
     fn start<'a>(&'a self, _state: &'a Arc<State>) -> PluginFuture<'a> {
         Box::pin(async { Ok(()) })
     }
@@ -137,9 +137,13 @@ pub mod workspace;
 mod contributions;
 
 pub struct PathAccess<'a> {
-    pub headers: &'a axum::http::HeaderMap,
+    pub identity: usize,
+    pub claims: &'a std::collections::BTreeMap<String, String>,
     pub alias: &'a str,
     pub path: &'a str,
     pub write: bool,
     pub metadata: bool,
 }
+
+/// Business invocation contract shared by transports and in-process callers.
+pub type OperationFuture<'a> = Pin<Box<dyn Future<Output = Result<serde_json::Value, crate::core::error::Error>> + Send + 'a>>;

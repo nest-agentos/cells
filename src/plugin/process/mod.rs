@@ -32,3 +32,5 @@ pub(crate) mod plugin;
 mod contribution;
 
 pub use plugin::Process as Plugin;
+
+pub(crate) mod http_routes;

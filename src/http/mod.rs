@@ -10,6 +10,8 @@ pub(crate) mod agent_mcp;
 mod events;
 pub mod handlers;
 mod operations;
+mod routes;
+pub use routes::HttpRoutes;
 pub mod query;
 pub mod range;
 pub(crate) mod subscriptions;
@@ -42,6 +44,8 @@ const ALLOWED_HEADERS: [&str; 13] = [
 ];
 
 pub fn router(state: Arc<State>, origins: &[String]) -> Result<Router, String> {
+    let routes = state.services.get::<HttpRoutes>().map(|routes| routes.enabled(&state.plugins))
+        .transpose()?.unwrap_or_default();
     let allowed = ALLOWED_HEADERS
         .into_iter()
         .chain(state.plugins.request_headers())
@@ -67,7 +71,7 @@ pub fn router(state: Arc<State>, origins: &[String]) -> Result<Router, String> {
         )
         .route("/v1/api/:domain/:operation", post(operations::invoke))
         .route("/v1/node/status", get(handlers::node_status::status))
-        .merge(state.plugins.routes())
+        .merge(routes)
         .merge(subscriptions::routes())
         .route_layer(middleware::from_fn_with_state(
             state.clone(),

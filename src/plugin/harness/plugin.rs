@@ -7,6 +7,14 @@ use std::sync::Arc;
 
 pub struct Harness(pub crate::harness::HarnessPlugins);
 impl NodePlugin for Harness {
+    fn operation_domains(&self) -> &'static [&'static str] { &["harness"] }
+    fn call<'a>(&'a self, state: &'a Arc<State>, identity: usize, _domain: &'a str, operation: &'a str, args: serde_json::Value) -> crate::plugins::OperationFuture<'a> {
+        Box::pin(async move { let service = state.services.require::<super::Harnesses>()?;
+            let name = format!("harness_{operation}");
+            let result = if args.get("projectId").is_some() { service.project_call(state, identity, &name, args).await }
+                else { service.authorized_call(state, identity, &name, args).await };
+            result.map_err(|mut error| { if error.code == "HARNESS_RECEIPT_STORAGE" { error.outcome = Some("unknown"); } error }) })
+    }
     fn optional_dependencies(&self)-> &'static [&'static str] { &["mcp","projects"] }
     fn subscribe<'a>(
         &'a self,
@@ -78,7 +86,6 @@ impl NodePlugin for Harness {
     }
     fn start<'a>(&'a self, state: &'a Arc<State>) -> PluginFuture<'a> {
         Box::pin(async move {
-            if state.services.get::<crate::projects::ProjectService>().is_some() {crate::plugin::projects::harness_recovery::maintain(Arc::downgrade(state));}
             super::Harnesses::maintain(Arc::downgrade(state));
             Ok(())
         })

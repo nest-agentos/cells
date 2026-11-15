@@ -10,6 +10,7 @@ use crate::{
 };
 use std::sync::Arc;
 mod application;
+pub mod operations;
 pub use application::Application;
 pub const WORKER_LIMIT: usize = 16;
 const KEY_BYTES: usize = 32;

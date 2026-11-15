@@ -38,7 +38,9 @@ async fn entries_once(
     headers: HeaderMap,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Value>, Error> {
-    let (identity, export) = access::export(&state, &headers, &alias)?;
+    let identity = access::identity(&state, &headers)?;
+    state.auth.authorize(identity, &alias)?;
+    crate::fs::path::validate(&query.path)?;
     let _project_guard =
         access::authorize_path(&state, &headers, &alias, &query.path, false, false)?;
     let deadline = access::deadline(&headers)?;
@@ -48,13 +50,8 @@ async fn entries_once(
         .as_deref()
         .map(|token| cursor::decode(&state.cursor_key, &binding, token))
         .transpose()?;
-    let listing = state
-        .workers
-        .read(&state.files, deadline, move |token| {
-            let _project_guard = _project_guard;
-            export.list_fields(&query.path, &token, query.fields)
-        })
-        .await?;
+    let reading = super::super::reading::Reading::authorize(&state, identity, &alias, _project_guard, deadline)?;
+    let listing = reading.run("entries", reading.source.list(query.path, query.fields, reading.context.clone())).await?;
     // Fetch one extra entry to learn whether another page exists.
     let mut entries: Vec<_> = listing
         .entries

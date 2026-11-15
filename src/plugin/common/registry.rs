@@ -1,6 +1,5 @@
 use super::{NodePlugin, PluginConfiguration};
 use crate::{app::State, core::ids};
-use axum::Router;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
@@ -222,9 +221,5 @@ impl PluginPlan {
         }
         Ok(())
     }
-    pub(crate) fn routes(&self) -> Router<Arc<State>> {
-        self.ordered.iter().fold(Router::new(), |routes, plugin| {
-            routes.merge(plugin.routes())
-        })
-    }
+
 }

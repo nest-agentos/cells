@@ -11,10 +11,9 @@ pub(crate) fn exports(state: &State, client: &Client) -> Vec<Value> {
 }
 
 fn export(state: &State, client: &Client, alias: &str) -> Value {
-    let writable = state
-        .exports
-        .get(alias)
-        .is_some_and(|export| export.writable());
+    let capabilities = state.services.get::<super::source::Sources>()
+        .and_then(|sources| sources.get(alias)).map(|source| source.capabilities()).unwrap_or_default();
+    let writable = capabilities.write;
     let access = if writable && client.may_write(alias) {
         "rw"
     } else {
@@ -32,8 +31,10 @@ fn export(state: &State, client: &Client, alias: &str) -> Value {
     );
     value.as_object_mut().unwrap().remove("at");
     value["nameSemantics"] = json!("source");
-    value["strongRevision"] = json!(writable);
-    value["metadata"] = json!(true);
+    value["strongRevision"] = json!(capabilities.strong_revision);
+    value["metadata"] = json!(capabilities.metadata);
+    value["capabilities"]["fileWrite"] = json!(writable && client.may_write(alias));
+    value["access"] = json!(access);
     value["authorization"] = client.authorization();
     value
 }
@@ -51,5 +52,5 @@ pub(crate) fn directory(state: &State, client: &Client, mount: &Mount) -> Value 
     json!({"alias":mount.alias,"path":mount.path,"virtualPath":virtual_path,"at":mount.at,
         "access":if writable {"rw"} else {"ro"},
         "capabilities":{"fileRead":true,"fileWrite":writable,
-            "run":state.services.get::<crate::process::Execution>().is_some_and(|service| service.ready()) && client.may_execute(&mount.alias)}})
+            "run":state.exports.contains(&mount.alias) && state.services.get::<crate::process::Execution>().is_some_and(|service| service.ready()) && client.may_execute(&mount.alias)}})
 }

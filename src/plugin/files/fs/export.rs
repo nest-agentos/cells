@@ -262,12 +262,7 @@ impl Export {
     }
 }
 
-/// Result of one directory scan.
-#[derive(Default)]
-pub struct Listing {
-    pub entries: Vec<Entry>,
-    pub warnings: Vec<&'static str>,
-}
+pub use crate::plugin::files::source::model::Listing;
 
 pub(crate) fn child_path(parent: &str, name: &str) -> String {
     if parent.is_empty() {

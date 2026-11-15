@@ -3,3 +3,5 @@ pub(crate) mod plugin;
 mod listener;
 pub(crate) use listener::Listener as InternalTransport;
 pub use plugin::Mcp as Plugin;
+
+pub(crate) mod http_routes;

@@ -51,12 +51,15 @@ impl State {
         );
         plan.configure(effective.as_ref(), &mut state)?;
         state.plugins = plan;
+        state.services.insert(Arc::new(http_routes(&state.plugins)?))?;
         state.allowed_origins = config.allowed_origins.clone();
         Ok(Arc::new(state))
     }
 }
 pub(crate) fn compatibility(state: &mut State) -> Result<(), String> {
     state.plugins = PluginRegistry::builtins().all_enabled()?;
+    state.services.insert(Arc::new(http_routes(&state.plugins)?))?;
+    super::files::source::Sources::install(state)?;
     state
         .services
         .insert(Arc::new(crate::operations::Operations::default()))?;
@@ -94,4 +97,18 @@ pub(crate) fn configured_auth(
         None => None,
     };
     crate::config::authorization::compile(config, exports, server_id)
+}
+
+fn http_routes(plan: &crate::plugins::PluginPlan) -> Result<crate::http::HttpRoutes, String> {
+    let mut routes = crate::http::HttpRoutes::default();
+    type Factory = fn() -> axum::Router<Arc<State>>;
+    for (owner, factory) in [
+        ("files", super::files::http_routes::routes as Factory),
+        ("process", super::process::http_routes::routes as Factory),
+        ("sync", super::sync::http_routes::routes as Factory),
+        ("mcp", super::mcp::http_routes::routes as Factory),
+    ] {
+        if plan.statuses().contains_key(owner) { routes.register(owner, factory())?; }
+    }
+    Ok(routes)
 }

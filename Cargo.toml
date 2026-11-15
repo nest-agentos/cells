@@ -159,3 +159,7 @@ path = "src/plugin/common/tests/events.rs"
 [[test]]
 name = "plugin_layout"
 path = "src/plugin/common/tests/plugin_layout.rs"
+
+[[test]]
+name = "source_ports"
+path = "src/plugin/files/tests/source_ports.rs"

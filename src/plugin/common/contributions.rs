@@ -4,7 +4,31 @@ use std::collections::BTreeSet;
 
 impl PluginPlan {
     pub(super) fn validate_declarations(&self) -> Result<(), String> {
-        self.validate_fields()
+        self.validate_fields()?;
+        self.validate_operations()
+    }
+    fn validate_operations(&self) -> Result<(), String> {
+        let mut domains = BTreeSet::new();
+        for plugin in &self.registered {
+            for domain in plugin.operation_domains() {
+                if domain.is_empty() || domain.len() > 64
+                    || !domain.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+                    || !domains.insert(*domain) {
+                    return Err(format!("Invalid or duplicate operation domain: {domain}"));
+                }
+            }
+        }
+        Ok(())
+    }
+    pub fn operation_owner(&self, domain: &str) -> Option<&str> {
+        self.ordered.iter().find(|p| p.operation_domains().contains(&domain)).map(|p| p.id())
+    }
+    pub async fn call(&self, state: &std::sync::Arc<State>, identity: usize,
+        domain: &str, operation: &str, args: serde_json::Value,
+    ) -> Result<serde_json::Value, crate::core::error::Error> {
+        let plugin = self.ordered.iter().find(|p| p.operation_domains().contains(&domain))
+            .ok_or_else(crate::core::error::Error::unsupported)?;
+        plugin.call(state, identity, domain, operation, args).await
     }
     fn validate_fields(&self) -> Result<(), String> {
         let mut fields = BTreeSet::new();
@@ -50,6 +74,11 @@ impl PluginPlan {
 }
 
 impl PluginPlan {
+    /// Disabled policies still own their claims and must reject them rather than ignore them.
+    pub fn path_claim_headers(&self) -> Vec<&'static str> {
+        self.registered.iter().flat_map(|p| p.path_headers().iter()).copied()
+            .collect::<BTreeSet<_>>().into_iter().collect()
+    }
     pub fn request_headers(&self) -> Vec<&'static str> {
         self.ordered
             .iter()
@@ -70,7 +99,7 @@ impl PluginPlan {
                 if plugin
                     .path_headers()
                     .iter()
-                    .any(|header| access.headers.contains_key(*header))
+                    .any(|header| access.claims.contains_key(*header))
                 {
                     return Err(crate::core::error::Error::unsupported());
                 }

@@ -1,28 +1,28 @@
 use crate::{app::State, core::error::Error};
-use axum::http::HeaderMap;
+use std::collections::BTreeMap;
 /// Project-aware clients keep the original file protocol but carry a directory fence.
 pub fn project_path(
     state: &State,
-    headers: &HeaderMap,
+    identity: usize,
+    claims: &BTreeMap<String, String>,
     alias: &str,
     path: &str,
     write: bool,
     metadata: bool,
 ) -> Result<Option<tokio::sync::OwnedRwLockReadGuard<()>>, Error> {
-    let Some(id) = headers.get("x-fsagent-project") else {
+    let Some(id) = claims.get("x-fsagent-project") else {
         return Ok(None);
     };
-    let id = id.to_str().map_err(|_| Error::invalid())?;
-    let project = load_project(state, headers, id)?;
+    let id = id.as_str();
+    let project = load_project(state, identity, claims, id)?;
     let service = state.services.require::<super::ProjectService>()?;
     let guard = service.lifecycle(id).shared()?;
     // Only the revision needs a second read after admission; avoid repeating filesystem authorization.
-    let identity = crate::http::access::identity(state, headers)?;
     if service.get(identity, id)?.revision != project.revision {
         return Err(Error::conflict("PROJECT_REVISION_CHANGED"));
     }
     if write
-        && headers
+        && claims
             .get("x-fsagent-project-readonly")
             .is_some_and(|h| h == "true")
     {
@@ -71,19 +71,18 @@ fn project_allows(
 
 fn load_project(
     state: &State,
-    headers: &HeaderMap,
+    identity: usize,
+    claims: &BTreeMap<String, String>,
     id: &str,
 ) -> Result<super::model::Project, Error> {
-    let identity = crate::http::access::identity(state, headers)?;
     let project = state
         .services
         .get::<crate::projects::ProjectService>()
         .ok_or_else(Error::unsupported)?
         .get(identity, id)?;
     crate::projects::service::authorize(state, identity, &project)?;
-    if headers
+    if claims
         .get("x-fsagent-project-revision")
-        .and_then(|h| h.to_str().ok())
         .and_then(|h| h.parse().ok())
         != Some(project.revision)
     {

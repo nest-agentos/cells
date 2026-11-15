@@ -44,7 +44,8 @@ async fn stat_once(
     headers: HeaderMap,
     Json(input): Json<StatRequest>,
 ) -> Result<Json<Value>, Error> {
-    let (_, export) = access::export(&state, &headers, &alias)?;
+    let identity = access::identity(&state, &headers)?;
+    state.auth.authorize(identity, &alias)?;
     let deadline = access::deadline(&headers)?;
     if input.paths.len() > MAX_PATHS
         || input.paths.iter().map(String::len).sum::<usize>() > MAX_PATH_BYTES
@@ -55,22 +56,11 @@ async fn stat_once(
         .paths
         .iter()
         .map(|path| access::authorize_path(&state, &headers, &alias, path, false, true))
-        .collect::<Result<Vec<_>, _>>()?;
-    state
-        .workers
-        .read(&state.files, deadline, move |token| {
-            let _project_guards = _project_guards;
-            let mut results = Vec::with_capacity(input.paths.len());
-            for path in input.paths {
-                if token.is_cancelled() {
-                    return Err(Error::cancelled());
-                }
-                results.push(match export.stat_fields(&path, input.fields) {
-                    Ok(stat) => json!({"stat": stat}),
-                    Err(error) => json!({"error": error.code}),
-                });
-            }
-            Ok(Json(json!({"results": results})))
-        })
-        .await
+        .collect::<Result<Vec<_>, _>>()?.into_iter().flatten().collect();
+    let reading = super::super::reading::Reading::authorize(&state, identity, &alias, _project_guards, deadline)?;
+    let results = reading.stat(input.paths, input.fields).await?
+        .into_iter().map(|result| match result {
+            Ok(stat) => json!({"stat":stat}), Err(error) => json!({"error":error.code}),
+        }).collect::<Vec<_>>();
+    Ok(Json(json!({"results":results})))
 }

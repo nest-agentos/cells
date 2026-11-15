@@ -3,7 +3,7 @@ use crate::{
     plugin::common::PluginConfiguration,
     plugins::{NodePlugin, PluginFailure, PluginFuture},
 };
-use axum::{extract::DefaultBodyLimit, routing::get, Router};
+
 use std::{sync::Arc, time::Duration};
 
 pub struct Sync;
@@ -57,17 +57,7 @@ impl NodePlugin for Sync {
         crate::sync::SyncService::validate_isolation(sync, config)
             .map_err(|error| error.to_string())
     }
-    fn routes(&self) -> Router<Arc<State>> {
-        use crate::sync::transport;
-        Router::new()
-            .route(
-                "/v1/sync/*path",
-                get(transport::get)
-                    .post(transport::post)
-                    .put(transport::put),
-            )
-            .layer(DefaultBodyLimit::disable())
-    }
+
     fn start<'a>(&'a self, state: &'a Arc<State>) -> PluginFuture<'a> {
         Box::pin(async move {
             if let Some(sync) = &state.services.get::<crate::sync::SyncService>() {

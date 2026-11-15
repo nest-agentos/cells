@@ -16,7 +16,6 @@ use axum::{
     response::Response,
 };
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 /// Bytes read per stream item.
 const CHUNK_BYTES: u64 = 64 * 1024;
@@ -39,15 +38,16 @@ async fn content_once(
     headers: HeaderMap,
     Query(query): Query<ListQuery>,
 ) -> Result<Response, Error> {
-    let (_, export) = access::export(&state, &headers, &alias)?;
+    let identity = access::identity(&state, &headers)?;
+    state.auth.authorize(identity, &alias)?;
+    crate::fs::path::validate(&query.path)?;
     let _project_guard =
         access::authorize_path(&state, &headers, &alias, &query.path, false, false)?;
-    let gate = state.files.read_only()?;
     let deadline = access::deadline(&headers)?;
-    let (file, revision, gate, _project_guard) = state
-        .workers
-        .run_ungated(deadline, move |_| {let result=export.read(&query.path);result.map(|(file,revision)|(file,revision,gate,_project_guard))})
-        .await?;
+    let reading = super::super::reading::Reading::authorize(&state, identity, &alias, _project_guard, deadline)?;
+    let opened = reading.run("open", reading.source.open(query.path, reading.context.clone())).await?;
+    let revision = opened.revision;
+    let size = opened.size;
 
     // A read-only export has no validator, so a client-supplied `If-Match`
     // cannot be evaluated and must not turn every read into a 412.
@@ -58,7 +58,6 @@ async fn content_once(
             }
         }
     }
-    let size = file.metadata()?.len();
     let range_header = if if_range_matches(&headers, revision.as_deref()) {
         header(&headers, "range")
     } else {
@@ -79,29 +78,18 @@ async fn content_once(
         Err(error) => return Err(error),
     };
 
-    let mut file = tokio::fs::File::from_std(file);
-    file.seek(std::io::SeekFrom::Start(window.start)).await?;
+    let file = reading.run("read-window", opened.content.read(window.start, window.length)).await?;
     // Retain lifecycle ownership until the body is consumed or dropped.
     let stream = futures_util::stream::try_unfold(
-        (file, window.length, (gate,_project_guard)),
-        move |(mut file, remaining, gate)| async move {
+        (file, window.length, reading),
+        move |(mut file, remaining, reading)| async move {
             if remaining == 0 {
                 return Ok::<_, std::io::Error>(None);
             }
             let mut data = vec![0; remaining.min(CHUNK_BYTES) as usize];
-            let read = tokio::time::timeout_at(deadline, file.read(&mut data))
-                .await
-                .map_err(|_| {
-                    std::io::Error::new(std::io::ErrorKind::TimedOut, "read deadline")
-                })??;
-            if read == 0 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "content changed while streaming",
-                ));
-            }
+            let read = reading.chunk(&mut file, &mut data).await?;
             data.truncate(read);
-            Ok(Some((data, (file, remaining - read as u64, gate))))
+            Ok(Some((data, (file, remaining - read as u64, reading))))
         },
     );
     let mut response = Response::builder()
@@ -119,9 +107,9 @@ async fn content_once(
     if window.partial {
         response = response.header("content-range", window.content_range(size));
     }
-    Ok(response
-        .body(Body::from_stream(stream))
-        .expect("static response"))
+    response.body(Body::from_stream(stream)).map_err(|_| {
+        Error::new(Error::internal().status, "FILE_SOURCE_INVALID_REVISION")
+    })
 }
 
 fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {

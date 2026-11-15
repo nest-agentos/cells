@@ -28,7 +28,7 @@ impl Listener {
         let address=listener.local_addr().map_err(|_|PluginFailure::new("MCP_LISTEN_FAILED","Cannot inspect internal listener"))?;
         let endpoint=format!("http://{address}/v1/channel/mcp");
         *self.endpoint.write().map_err(|_|PluginFailure::new("MCP_LISTENER_UNAVAILABLE","Internal endpoint unavailable"))?=Some(endpoint.clone());
-        let router=crate::http::internal_mcp(state.clone(),super::plugin::routes());
+        let router=crate::http::internal_mcp(state.clone(),super::http_routes::routes());
         let stop=CancellationToken::new();let cancelled=stop.clone();
         let task=tokio::spawn(async move {axum::serve(listener,router).with_graceful_shutdown(cancelled.cancelled_owned()).await});
         *running=Some((stop,task));

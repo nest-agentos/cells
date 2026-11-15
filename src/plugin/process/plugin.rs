@@ -3,11 +3,7 @@ use crate::{
     plugin::common::PluginConfiguration,
     plugins::{NodePlugin, PluginFailure, PluginFuture},
 };
-use axum::{
-    extract::DefaultBodyLimit,
-    routing::{get, post},
-    Router,
-};
+
 use std::sync::Arc;
 
 pub struct Process;
@@ -65,14 +61,7 @@ impl NodePlugin for Process {
             service.stop_accepting();
         }
     }
-    fn routes(&self) -> Router<Arc<State>> {
-        use crate::plugin::process::http as processes;
-        Router::new()
-            .route("/v1/processes", post(processes::start))
-            .route("/v1/processes/:epoch/:id", get(processes::status))
-            .route("/v1/processes/:epoch/:id/cancel", post(processes::cancel))
-            .layer(DefaultBodyLimit::max(512 * 1024))
-    }
+
     fn start<'a>(&'a self, state: &'a Arc<State>) -> PluginFuture<'a> {
         Box::pin(async move {
             crate::process::enable(state)

@@ -71,3 +71,28 @@ fn implementations_and_test_targets_remain_owned_by_their_plugins() {
         assert!(root.join(target).is_file());
     }
 }
+
+#[test]
+fn lifecycle_and_operation_coordination_are_independent_of_http_routers() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut paths = rust_sources(&root.join("plugin/common"));
+    paths.push(root.join("app/operations.rs"));
+    for feature in ["files", "process", "sync", "projects", "harness", "mcp"] {
+        paths.push(root.join(format!("plugin/{feature}/plugin.rs")));
+    }
+    for path in paths {
+        let source = std::fs::read_to_string(&path).unwrap();
+        for forbidden in ["axum::", "Router<", "fn routes("] {
+            assert!(!source.contains(forbidden), "{} contains {forbidden}", path.display());
+        }
+    }
+    for file in ["http/operations.rs", "app/operations.rs", "http/routes.rs"] {
+        let source = std::fs::read_to_string(root.join(file)).unwrap();
+        for feature in ["harness", "projects", "process", "sync"] {
+            assert!(!source.contains(&format!("crate::{feature}::")), "{file} imports {feature}");
+            assert!(!source.contains(&format!("\"{feature}\"")), "{file} dispatches {feature}");
+        }
+    }
+    let model = std::fs::read_to_string(root.join("plugin/files/source/model.rs")).unwrap();
+    for forbidden in ["axum", "std::fs", "Export"] { assert!(!model.contains(forbidden)); }
+}

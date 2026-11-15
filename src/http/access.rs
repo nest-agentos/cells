@@ -77,11 +77,12 @@ pub fn export(
         crate::core::events::emit(crate::core::events::Level::Warn,"authorization.rejected",
             serde_json::json!({"principalId":state.auth.client(identity).id(),"operation":"files.read","alias":alias.chars().take(128).collect::<String>()}));
     })?;
-    let export = state
-        .exports
-        .get(alias)
-        .ok_or_else(|| Error::forbidden("EACCES"))?
-        .clone();
+    let export = state.exports.get(alias).cloned().ok_or_else(|| {
+        if state.services.get::<crate::plugin::files::source::Sources>()
+            .is_some_and(|sources| sources.get(alias).is_some()) {
+            Error::unsupported()
+        } else { Error::forbidden("EACCES") }
+    })?;
     Ok((identity, export))
 }
 
@@ -134,10 +135,16 @@ pub fn authorize_path(
     write: bool,
     metadata: bool,
 ) -> Result<Vec<tokio::sync::OwnedRwLockReadGuard<()>>, Error> {
+    let identity = identity(state, headers)?;
+    let claims = state.plugins.path_claim_headers().into_iter()
+        .filter_map(|name| headers.get(name).map(|value| (name, value)))
+        .map(|(name, value)| Ok((name.to_owned(), value.to_str().map_err(|_| Error::invalid())?.to_owned())))
+        .collect::<Result<std::collections::BTreeMap<_, _>, Error>>()?;
     state.plugins.authorize_path(
         state,
         &crate::plugin::common::PathAccess {
-            headers,
+            identity,
+            claims: &claims,
             alias,
             path,
             write,
