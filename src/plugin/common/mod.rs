@@ -56,6 +56,9 @@ pub trait NodePlugin: Send + Sync {
     ) -> EventFuture<'a> {
         Box::pin(async { Err(crate::core::error::Error::unsupported()) })
     }
+    /// HTTP transport declarations never grant application permissions.
+    fn http_methods(&self) -> &'static [&'static str] { &[] }
+    fn response_headers(&self) -> &'static [&'static str] { &[] }
     fn request_headers(&self) -> &'static [&'static str] {
         &[]
     }

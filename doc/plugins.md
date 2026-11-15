@@ -122,3 +122,5 @@ Harness 直接订阅已有有界事件缓冲，沿用 epoch/cursor/gap 与待答
 ## Files WebDAV 入口
 
 通过 `[plugin_options.files] webdav = true` 在现有 files HTTP 适配器启用 `/dav/<alias>/`，与原生文件操作共用授权、暂存/提交、资源租约及执行准入。协议边界和 Linux 恢复说明见 [WebDAV](webdav.md)；启用配置不代表已完成 Linux 挂载实测。
+
+HTTP 插件通过 `NodePlugin` 的 `http_methods()`、`request_headers()` 和 `response_headers()` 声明传输方法及头部；关闭的插件不贡献 CORS 声明。这些元数据不授予文件或执行权限。普通 OPTIONS 经认证后进入协议路由并保留能力头；CORS 预检继续按已配置的 Origin 策略处理。

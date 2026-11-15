@@ -8,6 +8,7 @@
 pub mod access;
 pub(crate) mod agent_mcp;
 mod events;
+mod cors;
 pub mod handlers;
 mod operations;
 mod routes;
@@ -54,17 +55,16 @@ pub fn router(state: Arc<State>, origins: &[String]) -> Result<Router, String> {
                 .map_err(|_| "Invalid plugin request header".to_owned())
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let methods = ["GET", "POST", "PUT", "OPTIONS"].into_iter().chain(state.plugins.http_methods())
+        .map(|name| name.parse::<Method>().map_err(|_| "Invalid plugin HTTP method".to_owned())).collect::<Result<Vec<_>,_>>()?;
+    let exposed = ["content-range", "etag", "x-trace-id", "x-request-id"].into_iter().chain(state.plugins.response_headers())
+        .map(|name| name.parse::<HeaderName>().map_err(|_| "Invalid plugin response header".to_owned())).collect::<Result<Vec<_>,_>>()?;
     let cors = CorsLayer::new()
         .allow_origin(allow_origin(origins)?)
-        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::OPTIONS])
+        .allow_methods(methods)
         .allow_headers(allowed)
-        .expose_headers([
-            HeaderName::from_static("content-range"),
-            HeaderName::from_static("etag"),
-            HeaderName::from_static("x-trace-id"),
-            HeaderName::from_static("x-request-id"),
-        ]);
-    Ok(Router::new()
+        .expose_headers(exposed);
+    let application = Router::new()
         .route(
             "/v1/capabilities",
             get(handlers::capabilities::capabilities),
@@ -77,7 +77,8 @@ pub fn router(state: Arc<State>, origins: &[String]) -> Result<Router, String> {
             state.clone(),
             access::authenticate,
         ))
-        .layer(cors)
+        .with_state(state);
+    Ok(cors::protocol_options(application, cors)
         // File content and metadata must never be cached by an intermediary.
         .layer(middleware::map_response(
             |mut response: axum::response::Response| async move {
@@ -87,8 +88,7 @@ pub fn router(state: Arc<State>, origins: &[String]) -> Result<Router, String> {
                 response
             },
         ))
-        .layer(middleware::from_fn(events::failures))
-        .with_state(state))
+        .layer(middleware::from_fn(events::failures)))
 }
 
 /// Internal transport exposes only the scope-authorized MCP route, without management APIs.

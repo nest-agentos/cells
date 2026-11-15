@@ -79,6 +79,12 @@ impl PluginPlan {
         self.registered.iter().flat_map(|p| p.path_headers().iter()).copied()
             .collect::<BTreeSet<_>>().into_iter().collect()
     }
+    pub fn http_methods(&self) -> Vec<&'static str> {
+        self.ordered.iter().flat_map(|p| p.http_methods()).copied().collect::<BTreeSet<_>>().into_iter().collect()
+    }
+    pub fn response_headers(&self) -> Vec<&'static str> {
+        self.ordered.iter().flat_map(|p| p.response_headers()).copied().collect::<BTreeSet<_>>().into_iter().collect()
+    }
     pub fn request_headers(&self) -> Vec<&'static str> {
         self.ordered
             .iter()

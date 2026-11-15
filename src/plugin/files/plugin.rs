@@ -4,6 +4,15 @@ use std::sync::Arc;
 
 pub struct Files;
 impl NodePlugin for Files {
+    fn http_methods(&self) -> &'static [&'static str] {
+        &["HEAD", "PROPFIND", "MKCOL", "MOVE", "DELETE", "LOCK", "UNLOCK"]
+    }
+    fn request_headers(&self) -> &'static [&'static str] {
+        &["depth", "destination", "overwrite", "lock-token", "timeout", "if"]
+    }
+    fn response_headers(&self) -> &'static [&'static str] {
+        &["dav", "allow", "lock-token", "timeout"]
+    }
     fn capabilities(
         &self,
         state: &State,
