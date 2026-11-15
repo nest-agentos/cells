@@ -44,3 +44,7 @@ access = "ro"        # default; "rw" takes an exclusive lock for writes
 
 # External harness control can be enabled separately from shell execution.
 # See config.harness.example.toml for an explicit Codex home/workspace profile.
+
+# Optional DAV adapter: see config.webdav.example.toml and doc/webdav.md.
+# [plugin_options.files]
+# webdav = true

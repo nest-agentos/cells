@@ -1,0 +1,18 @@
+# File-only DAV node; serve through a trusted TLS reverse proxy for remote access.
+listen = "127.0.0.1:8787"
+execution = false
+username = "dav-user"
+password_env = "CELLS_DAV_PASSWORD"
+log_level = "info"
+
+[plugin_options.files]
+webdav = true
+
+[[exports]]
+alias = "docs"
+path = "/srv/cells/docs"
+access = "rw"
+
+# Existing directory/principal grants remain authoritative for every protocol.
+# API keys use Bearer authentication; davfs2's ordinary secrets file uses Basic.
+# See doc/webdav.md for protocol limits, leases, caches and recovery.

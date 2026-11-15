@@ -58,6 +58,14 @@ async fn content_once(
             }
         }
     }
+    if let Some(condition) = header(&headers, "if-none-match") {
+        if condition != "*" && (!condition.starts_with('"') || !condition.ends_with('"') || condition.contains(',')) { return Err(Error::invalid()); }
+        if condition == "*" || revision.as_deref() == Some(condition) {
+            let mut response = Response::builder().status(StatusCode::NOT_MODIFIED);
+            if let Some(revision) = revision { response = response.header("etag", revision); }
+            return response.body(Body::empty()).map_err(|_| Error::internal());
+        }
+    }
     let range_header = if if_range_matches(&headers, revision.as_deref()) {
         header(&headers, "range")
     } else {

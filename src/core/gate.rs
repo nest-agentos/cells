@@ -18,6 +18,7 @@ pub struct FileGate {
 /// Only topology changes and shutdown require exclusive lifecycle ownership.
 #[derive(Debug)]
 pub struct ExclusivePermit {
+    _constraint: Option<super::file_constraints::Native>,
     _owner: Option<super::gate_owner::OwnerGuard>,
     _guard: OwnedRwLockWriteGuard<()>,
 }
@@ -25,6 +26,7 @@ pub struct ExclusivePermit {
 /// Commands share lifecycle ownership with file work and native turns.
 #[derive(Debug)]
 pub struct ExecutionPermit {
+    _constraint: super::file_constraints::Native,
     owner: super::gate_owner::OwnerGuard,
     _guard: OwnedRwLockReadGuard<()>,
     resource: Option<Box<ExecutionPermit>>,
@@ -41,6 +43,7 @@ impl ExecutionPermit {
         self
     }
     pub fn poison(&self) {
+        super::file_constraints::poison();
         if let Some(resource) = &self.resource {
             resource.poison();
         } else {
@@ -57,6 +60,7 @@ impl ExecutionPermit {
 }
 #[derive(Debug)]
 pub struct ActivityPermit {
+    _constraint: super::file_constraints::Native,
     _owner: super::gate_owner::OwnerGuard,
     _guard: OwnedRwLockReadGuard<()>,
     resource: Option<Box<ActivityPermit>>,
@@ -106,6 +110,7 @@ impl FileGate {
             .try_write_owned()
             .map_err(|_| self.busy("topology"))?;
         Ok(ExclusivePermit {
+            _constraint: Some(super::file_constraints::native()?),
             _owner: Some(self.owners.enter("topology", None)),
             _guard: guard,
         })
@@ -113,6 +118,7 @@ impl FileGate {
     pub fn command_now(&self, operation: &str) -> Result<ExecutionPermit, Error> {
         let guard = self.shared()?;
         Ok(ExecutionPermit {
+            _constraint: super::file_constraints::native()?,
             owner: self.owners.enter("command", Some(operation)),
             _guard: guard,
             resource: None,
@@ -146,6 +152,7 @@ impl FileGate {
         let owner = self.owners.enter("native", operation);
         owner.session_started(session);
         Ok(ActivityPermit {
+            _constraint: super::file_constraints::native()?,
             _owner: owner,
             _guard: guard,
             resource: None,
@@ -153,6 +160,7 @@ impl FileGate {
     }
     /// Unknown process ownership still prevents unsafe new admissions.
     pub fn poison(&self) {
+        super::file_constraints::poison();
         self.poisoned.store(true, Ordering::Release);
     }
     pub fn is_poisoned(&self) -> bool {
@@ -160,6 +168,7 @@ impl FileGate {
     }
     pub async fn drain(&self) -> ExclusivePermit {
         ExclusivePermit {
+            _constraint: None,
             _owner: None,
             _guard: self.inner.clone().write_owned().await,
         }

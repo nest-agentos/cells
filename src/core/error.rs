@@ -29,6 +29,10 @@ impl Error {
         }
     }
 
+    pub const fn unknown(code: &'static str) -> Self {
+        Self {status:StatusCode::INTERNAL_SERVER_ERROR,code,outcome:Some("unknown")}
+    }
+
     pub const fn partial(code: &'static str) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,

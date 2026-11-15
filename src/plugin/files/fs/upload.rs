@@ -48,20 +48,26 @@ pub struct StagedUpload {
     file: File,
     journal: Arc<UploadJournal>,
     pending: PendingUpload,
+    operation_id: Option<String>,
 }
 
 impl Drop for StagedUpload {
     fn drop(&mut self) {
-        if matches!(
-            super::recovery::cleanup(&self.parent, &self.pending),
-            Ok(true)
-        ) {
-            let _ = self.journal.forget(self.pending.id);
-        }
+        let started = std::time::Instant::now();
+        let result = match super::recovery::cleanup(&self.parent, &self.pending) {
+            Ok(true) => self.journal.forget(self.pending.id),
+            Ok(false) => Err(Error::conflict("UPLOAD_CLEANUP_IDENTITY_CHANGED")),
+            Err(error) => Err(error),
+        };
+        crate::core::events::emit(if result.is_ok(){crate::core::events::Level::Info}else{crate::core::events::Level::Warn},"file.upload.cleanup",serde_json::json!({"operation":"upload.cleanup","stage":"cleanup","uploadId":self.pending.id,"operationId":self.operation_id,"result":if result.is_ok(){"success"}else{"retained"},"code":result.as_ref().err().map(|error|error.code),"durationMs":started.elapsed().as_millis() as u64}));
     }
 }
 
 impl StagedUpload {
+    pub(crate) fn track_operation(&mut self, id: &str) {
+        if crate::core::ids::is_identifier_within(id,128) { self.operation_id = Some(id.to_owned()); }
+    }
+    pub(crate) fn journal_id(&self) -> i64 { self.pending.id }
     /// Duplicate the descriptor for the asynchronous body writer.
     pub fn writer(&self) -> Result<File, Error> {
         Ok(self.file.try_clone()?)
@@ -85,6 +91,7 @@ impl Export {
         };
         pending.identify(&file)?;
         let staged = StagedUpload {
+            operation_id: None,
             pending,
             parent,
             name,
@@ -124,7 +131,7 @@ pub fn commit(
     expected: Option<&str>,
     checkpoint: impl Fn() -> Result<(), Error>,
 ) -> Result<Stat, Error> {
-    publish(export, path, upload, expected, None, checkpoint)
+    publish(export, path, upload, Condition::Revision(expected), None, checkpoint)
 }
 
 /// Publish durable sync contents and executable bits in the same rename.
@@ -136,13 +143,20 @@ pub fn commit_executable(
     executable: bool,
     checkpoint: impl Fn() -> Result<(), Error>,
 ) -> Result<Stat, Error> {
-    publish(export, path, upload, expected, Some(executable), checkpoint)
+    publish(export, path, upload, Condition::Revision(expected), Some(executable), checkpoint)
+}
+pub(crate) enum Condition<'a> {
+    Revision(Option<&'a str>),
+    Locked { owner: usize, tokens: &'a [String] },
+}
+pub(crate) fn commit_locked(export: &Export, path: &str, upload: StagedUpload, owner: usize, tokens: &[String], checkpoint: impl Fn() -> Result<(), Error>) -> Result<Stat, Error> {
+    publish(export, path, upload, Condition::Locked { owner, tokens }, None, checkpoint)
 }
 fn publish(
     export: &Export,
     path: &str,
     upload: StagedUpload,
-    expected: Option<&str>,
+    condition: Condition<'_>,
     executable: Option<bool>,
     checkpoint: impl Fn() -> Result<(), Error>,
 ) -> Result<Stat, Error> {
@@ -150,19 +164,14 @@ fn publish(
         return Err(Error::forbidden("EROFS"));
     }
     export.path_locks.with(&[(path, true)], || {
+        let constraints = export.constrain(&[path])?;
         checkpoint()?;
         // Re-resolve the parent under the lock: renaming it invalidates the upload.
         let (target, name) = export.parent(path)?;
         if identity(&target) != identity(&upload.parent) {
             return Err(Error::precondition_failed());
         }
-        let (mut mode, _file_lease) = match expected {
-            Some(expected) => {
-                let (mode, lease) = replaced_mode(export, path, expected)?;
-                (mode, Some(lease))
-            }
-            None => (DEFAULT_FILE_MODE, None),
-        };
+        let (mut mode, _file_lease, replace) = publication_mode(export,path,condition,&constraints)?;
         if let Some(executable) = executable {
             let bits = if executable {
                 mode.bits() | 0o111
@@ -175,24 +184,27 @@ fn publish(
         // Give the published inode the mode the caller would expect to find.
         rustix::fs::fchmod(&upload.file, mode)?;
         upload.file.sync_all()?;
+        checkpoint()?;
+        if constraints.enabled() { constraints.check(&[export.resource(path)?])?; }
         rustix::fs::renameat_with(
             &upload.parent,
             upload.name.as_str(),
             &target,
             name.as_str(),
-            if expected.is_none() {
+            if !replace {
                 RenameFlags::NOREPLACE
             } else {
                 RenameFlags::empty()
             },
         )
         .map_err(|error| {
-            if expected.is_none() && error == rustix::io::Errno::EXIST {
+            if !replace && error == rustix::io::Errno::EXIST {
                 Error::precondition_failed()
             } else {
                 error.into()
             }
         })?;
+        target.sync_all().map_err(|_|Error::partial("FILE_PUBLISHED_SYNC_FAILED"))?;
         let result=(||{
             let mut stat=attributes(&upload.file)?;
             stat.revision=Some(export.lock_revisions().unwrap().get(&upload.file)?);
@@ -228,4 +240,25 @@ fn replaced_mode(export: &Export, path: &str, expected: &str) -> Result<(Mode, F
 fn identity(file: &File) -> Result<(u64, u64), Error> {
     let metadata = file.metadata()?;
     Ok((metadata.dev(), metadata.ino()))
+}
+
+// A lease condition is not a client read validator; never manufacture an expected revision.
+fn publication_mode(export: &Export,path: &str,condition: Condition<'_>,constraints: &crate::core::file_constraints::Registry) -> Result<(Mode,Option<File>,bool),Error> {
+    match condition {
+        Condition::Revision(Some(expected)) => replaced_mode(export,path,expected).map(|(mode,file)|(mode,Some(file),true)),
+        Condition::Revision(None) => Ok((DEFAULT_FILE_MODE,None,false)),
+        Condition::Locked {owner,tokens} => {
+            if !constraints.owns(&export.resource(path)?,owner,tokens) { return Err(Error::precondition_failed()); }
+            match export.lock_existing_file(path) {
+                Err(error) if error.is_not_found() => Ok((DEFAULT_FILE_MODE,None,false)),
+                Err(error) => Err(error),
+                Ok(None) => Err(Error::conflict("EISDIR")),
+                Ok(Some(file)) => {
+                    let mode = Mode::from_bits_truncate(file.metadata()?.permissions().mode() & MODE_MASK);
+                    export.lock_revisions().ok_or_else(||Error::forbidden("EROFS"))?.retire(&file)?;
+                    Ok((mode,Some(file),true))
+                },
+            }
+        },
+    }
 }

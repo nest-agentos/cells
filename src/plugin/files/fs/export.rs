@@ -86,7 +86,7 @@ impl Export {
         self.path_locks
             .with(&[(path, false)], || self.stat_inner(path))
     }
-    fn stat_inner(&self, path: &str) -> Result<Option<Stat>, Error> {
+    pub(crate) fn stat_inner(&self, path: &str) -> Result<Option<Stat>, Error> {
         match self.open_path(path, OFlags::PATH) {
             Ok(file) => {
                 let mut stat = attributes(&file)?;

@@ -8,9 +8,8 @@
 use crate::{
     app::State,
     core::error::Error,
-    fs::{mutation::Change, path, upload, Export},
+    fs::{mutation::Change, path},
     http::{access, query::ListQuery},
-    operations::Operation,
 };
 use axum::{
     body::Body,
@@ -22,43 +21,8 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
-use tokio::{io::AsyncWriteExt, sync::OwnedRwLockReadGuard, time::Instant};
 
-/// Largest accepted upload body.
-const MAX_UPLOAD_BYTES: usize = 256 * 1024 * 1024;
-
-/// What the client asserted about the current state of the target.
-enum WriteCondition {
-    /// `If-None-Match: *`
-    Create,
-    /// `If-Match: <revision>`
-    Replace(String),
-}
-
-impl WriteCondition {
-    fn from_headers(headers: &HeaderMap) -> Result<Self, Error> {
-        let expected = headers
-            .get("if-match")
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
-        let create = headers
-            .get("if-none-match")
-            .is_some_and(|value| value == "*");
-        match (create, expected) {
-            (true, None) => Ok(Self::Create),
-            (false, Some(revision)) => Ok(Self::Replace(revision)),
-            // Neither, or both: the caller has not stated a usable precondition.
-            _ => Err(Error::precondition_required("REVISION_REQUIRED")),
-        }
-    }
-
-    fn expected(&self) -> Option<&str> {
-        match self {
-            Self::Create => None,
-            Self::Replace(revision) => Some(revision),
-        }
-    }
-}
+use super::super::writing::{Replacement, WriteCondition};
 
 pub async fn replace(
     AxumState(state): AxumState<Arc<State>>,
@@ -71,7 +35,7 @@ pub async fn replace(
     path::validate(&query.path)?;
     let _project_guard =
         access::authorize_path(&state, &headers, &alias, &query.path, true, false)?;
-    let condition = WriteCondition::from_headers(&headers)?;
+    let condition = native_condition(&headers)?;
     let gate = state.files.shared().map_err(|error| Error {outcome: Some("not-committed"), ..error})?;
     let (identity, export) = access::writable_export(&state, &headers, &alias)?;
     let operation = state
@@ -93,88 +57,18 @@ pub async fn replace(
         condition,
         deadline,
         operation: task.clone(),
+        operation_id: access::operation_id(&headers)?.to_owned(),
         gate,
         project_guards:_project_guard,
     };
     // The operation owns the work and its cleanup after the waiter disconnects.
-    tokio::spawn(async move {
-        let result = replacement.run(body).await;
+    crate::core::trace::spawn(async move {
+        let result = replacement.run(Box::pin(body.into_data_stream().map(|chunk| chunk.map(|bytes| bytes.to_vec()).map_err(|_| Error::new(StatusCode::BAD_REQUEST, "UPLOAD_DISCONNECTED"))))).await;
         mutation_finished(audit, &result);
         task.finish(result);
     });
     let (status, receipt) = operation.wait(deadline).await;
     Ok((status, Json(receipt)))
-}
-
-/// One in-flight replacement: everything the body writer and the commit need.
-struct Replacement {
-    state: Arc<State>,
-    export: Arc<Export>,
-    path: String,
-    condition: WriteCondition,
-    deadline: Instant,
-    operation: Arc<Operation>,
-    gate: OwnedRwLockReadGuard<()>,
-    project_guards: Vec<OwnedRwLockReadGuard<()>>,
-}
-
-impl Replacement {
-    /// Stream the request body into a staging file, then publish it atomically.
-    async fn run(self, body: Body) -> Result<Value, Error> {
-        let Self {
-            state,
-            export,
-            path,
-            condition,
-            deadline,
-            operation,
-            gate,project_guards,
-        } = self;
-        let permit = state.workers.acquire(deadline).await?;
-        operation.checkpoint(deadline)?;
-        let staging = export.clone();
-        let staged_path = path.clone();
-        let (staged,gate,project_guards) = tokio::task::spawn_blocking(move || staging.stage(&staged_path).map(|staged|(staged,gate,project_guards)))
-            .await
-            .map_err(|_| Error::internal())??;
-
-        let mut writer = tokio::fs::File::from_std(staged.writer()?);
-        let mut stream = body.into_data_stream();
-        let mut size = 0usize;
-        loop {
-            operation.checkpoint(deadline)?;
-            let chunk = tokio::select! {
-                _ = operation.token().cancelled() => return Err(Error::cancelled()),
-                chunk = tokio::time::timeout_at(deadline, stream.next()) => {
-                    chunk.map_err(|_| Error::timed_out())?
-                }
-            };
-            let Some(chunk) = chunk else { break };
-            let chunk = chunk.map_err(|_| Error::invalid())?;
-            size += chunk.len();
-            if size > MAX_UPLOAD_BYTES {
-                return Err(Error::too_large("UPLOAD_LIMIT"));
-            }
-            tokio::time::timeout_at(deadline, writer.write_all(&chunk))
-                .await
-                .map_err(|_| Error::timed_out())??;
-        }
-        writer.flush().await?;
-        drop(writer);
-
-        let expected = condition.expected().map(str::to_owned);
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            let _gate = gate;
-            let _project_guards=project_guards;
-            upload::commit(&export, &path, staged, expected.as_deref(), || {
-                operation.checkpoint(deadline)
-            })
-        })
-        .await
-        .map_err(|_| Error::internal())?
-        .map(|stat| json!(stat))
-    }
 }
 
 #[derive(Deserialize)]
@@ -239,20 +133,21 @@ pub async fn mutate(
         "mutation.accepted",
         audit.clone(),
     );
-    tokio::spawn(async move {
+    crate::core::trace::spawn(async move {
         let result = match state.workers.acquire(deadline).await {
             Ok(permit) => {
                 let tracked = task.clone();
-                match tokio::task::spawn_blocking(move || {
+                let context = crate::core::trace::current();
+                match tokio::task::spawn_blocking(move || crate::core::trace::sync_scope(context,|| {
                     let _permit = permit;
                     let _gate = gate;
                     let _project_guards=project_guards;
                     export.apply(&change, || tracked.checkpoint(deadline))
-                })
+                }))
                 .await
                 {
                     Ok(result) => result,
-                    Err(_) => Err(Error::internal()),
+                    Err(_) => Err(Error::unknown("FILE_COMMIT_WORKER_LOST")),
                 }
             }
             Err(error) => Err(error),
@@ -278,3 +173,19 @@ fn mutation_finished(operation: Value, result: &Result<Value, Error>) {
         "code": result.as_ref().err().map(|error| error.code)}),
     );
 }
+
+fn native_condition(headers: &HeaderMap) -> Result<WriteCondition, Error> {
+        let expected = headers
+            .get("if-match")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let create = headers
+            .get("if-none-match")
+            .is_some_and(|value| value == "*");
+        match (create, expected) {
+            (true, None) => Ok(WriteCondition::Create),
+            (false, Some(revision)) => Ok(WriteCondition::Replace(revision)),
+            // Neither, or both: the caller has not stated a usable precondition.
+            _ => Err(Error::precondition_required("REVISION_REQUIRED")),
+        }
+    }

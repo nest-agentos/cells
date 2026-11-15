@@ -230,6 +230,7 @@ pub fn update(
     }
     checkpoint()?;
     let existing = export.path_locks.with(&[(&input.path, true)], || {
+        let _constraints = export.constrain(&[&input.path])?;
         // Coordinate an inode replacement with this database's in-place transaction.
         let _inode_lease = match export.lock_existing_file(&input.path) {
             Ok(lease) => lease,

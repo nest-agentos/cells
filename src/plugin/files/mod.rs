@@ -13,3 +13,7 @@ pub(crate) mod http_routes;
 
 pub mod source;
 pub(crate) mod reading;
+
+pub(crate) mod webdav;
+
+pub(crate) mod writing;

@@ -17,7 +17,14 @@ pub(crate) async fn authenticate(
     if request.uri().path() == "/v1/channel/mcp" && super::agent_mcp::authorized(&state,request.headers()) {
         return Ok(next.run(request).await);
     }
-    identity(&state, request.headers())?;
+    if let Err(error) = identity(&state, request.headers()) {
+        use axum::response::IntoResponse;
+        let mut response = error.into_response();
+        if error.status == axum::http::StatusCode::UNAUTHORIZED && request.uri().path().starts_with("/dav/") {
+            response.headers_mut().insert("www-authenticate", axum::http::HeaderValue::from_static("Basic realm=\"Cells\", charset=\"UTF-8\""));
+        }
+        return Ok(response);
+    }
     Ok(next.run(request).await)
 }
 

@@ -1,5 +1,7 @@
 # cells — NestOS 的单个智能节点
 
+可选的 Linux davfs2 文件入口见 [WebDAV 配置、协议范围与恢复](doc/webdav.md)，配置示例见 [config.webdav.example.toml](config.webdav.example.toml)。默认关闭，保留原生文件 API。
+
 cells 寓意蜂房中的单个巢室：将信息与 Agent 集成到 NestOS 的单个智能节点。每个 cells 节点连接设备上的文件、项目与执行环境，提供同步、受控访问和 AI harness 会话管理；多个节点共同构成 NestOS 的知识与智能协作网络。
 
 服务源码：[cells](https://github.com/nest-agentos/cells)；统一客户端：[cells-driver](https://github.com/nest-agentos/cells-driver)，npm 包为 `@nestos/cells-driver`。

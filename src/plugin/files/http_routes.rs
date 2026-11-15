@@ -17,6 +17,7 @@ pub(crate) fn routes() -> Router<Arc<State>> {
             get(handlers::content::content).put(handlers::mutations::replace),
         )
         .route("/v1/fs/:alias/mutate", post(handlers::mutations::mutate))
+        .merge(super::webdav::routes())
         .merge(seq_routes())
         .merge(operation_routes())
         .layer(DefaultBodyLimit::max(512 * 1024))

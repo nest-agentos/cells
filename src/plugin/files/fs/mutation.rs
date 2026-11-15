@@ -74,6 +74,9 @@ impl Export {
         change: &Change,
         checkpoint: impl Fn() -> Result<(), Error>,
     ) -> Result<(), Error> {
+        self.apply_checked(change, false, checkpoint)
+    }
+    pub(crate) fn apply_checked(&self, change: &Change, overwrite: bool, checkpoint: impl Fn() -> Result<(), Error>) -> Result<(), Error> {
         if !self.writable() {
             return Err(Error::forbidden("EROFS"));
         }
@@ -82,7 +85,9 @@ impl Export {
             paths.push((to, true));
         }
         self.path_locks.with(&paths, || {
+            let mut constraints = self.constrain(&paths.iter().map(|(path, _)| *path).collect::<Vec<_>>())?;
             checkpoint()?;
+            let source_resource = constraints.enabled().then(||self.resource(change.path())).transpose()?;
             let _file_lease = if matches!(change, Change::Rename { .. } | Change::Remove { .. }) {
                 self.lock_existing_file(change.path())?
             } else {
@@ -106,21 +111,38 @@ impl Export {
             } else {
                 None
             };
+            checkpoint()?;
+            if constraints.enabled() {
+                let resources = paths.iter().map(|(path,_)|self.resource(path)).collect::<Result<Vec<_>,_>>()?;
+                constraints.check(&resources)?;
+            }
             match change {
                 Change::Mkdir { path } => {
                     let (directory, name) = self.parent(path)?;
                     rustix::fs::mkdirat(&directory, name.as_str(), DIRECTORY_MODE)?;
+                    directory.sync_all().map_err(|_|Error::partial("FILE_DIRECTORY_SYNC_FAILED"))?;
                 }
                 Change::Rename { path, to } => {
                     let (from, name) = self.parent(path)?;
                     let (destination, destination_name) = self.parent(to)?;
+                    if overwrite {
+                        if let Some(target) = self.stat_inner(to)? {
+                            let source = self.stat_inner(path)?.ok_or_else(||Error::not_found("ENOENT"))?;
+                            if target.kind != "file" || source.kind != "file" { return Err(Error::unsupported()); }
+                        }
+                    }
+                    let _destination_lease = if overwrite {
+                        match self.lock_existing_file(to) { Ok(lease)=>lease,Err(error) if error.is_not_found()=>None,Err(error)=>return Err(error) }
+                    } else { None };
                     rustix::fs::renameat_with(
                         &from,
                         name.as_str(),
                         &destination,
                         destination_name.as_str(),
-                        RenameFlags::NOREPLACE,
+                        if overwrite { RenameFlags::empty() } else { RenameFlags::NOREPLACE },
                     )?;
+                    if let Some(resource) = &source_resource { constraints.removed(resource); }
+                    from.sync_all().and_then(|()|destination.sync_all()).map_err(|_|Error::partial("FILE_DIRECTORY_SYNC_FAILED"))?;
                     if let Some(metadata) = metadata.as_mut() {
                         metadata
                             .rename(
@@ -142,6 +164,8 @@ impl Export {
                         AtFlags::empty()
                     };
                     rustix::fs::unlinkat(&directory, name.as_str(), flags)?;
+                    if let Some(resource) = &source_resource { constraints.removed(resource); }
+                    directory.sync_all().map_err(|_|Error::partial("FILE_DIRECTORY_SYNC_FAILED"))?;
                     if let Some(metadata) = metadata.as_ref() {
                         metadata.remove(&metadata_path).map_err(|_| {
                             self.invalidate_revisions();

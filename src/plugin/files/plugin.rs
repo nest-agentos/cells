@@ -30,9 +30,12 @@ impl NodePlugin for Files {
     }
     fn configure(
         &self,
-        _config: &dyn crate::plugin::common::PluginConfiguration,
+        config: &dyn crate::plugin::common::PluginConfiguration,
         state: &mut State,
     ) -> Result<(), String> {
+        let options: super::webdav::Options = config.option("files").cloned().map(|value| value.try_into()).transpose().map_err(|_| "Invalid files options")?.unwrap_or_default();
+        if options.webdav { crate::core::file_constraints::enable().map_err(|_| "Cannot enable file constraints")?; }
+        state.services.insert(Arc::new(options))?;
         super::source::Sources::install(state)?;
         state
             .services

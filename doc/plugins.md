@@ -118,3 +118,7 @@ Harness 直接订阅已有有界事件缓冲，沿用 epoch/cursor/gap 与待答
 `source_ports` 使用没有 POSIX 目录的内存来源，覆盖同一文件协议的批查、分页响应、Range、条件读取、授权、路径限制、超时、拒绝本地写入和 body 丢弃后的排空。`contributions` 覆盖同一业务端口的 HTTP 与进程内调用、禁用、重复域和 unknown 结果。`plugin_layout` 防止公共框架与生命周期接口重新导入 Axum 或公共操作入口导入具体业务。
 
 仓库根目录运行 `node scripts/tests/cells-plugin-transport-smoke.mjs`，默认使用本地 debug Cells 二进制；可通过 `CELLS_BINARY` 指定已构建产物。脚本在同一个受管理临时作用域内启动节点和验收驱动，使用 600 个 4096 字节文件，分别记录首次/重复文件打开流程的耗时、逻辑 API 与 HTTP 次数，覆盖分页、256 项 stat、Range、条件创建、冲突及并发读取。成功输出包含产物 SHA256 与已确认清理回执。这是文件协议验收，**不代表完整 UI 点击到可操作的性能验收**；完整页面仍按主仓库性能规范独立验证。
+
+## Files WebDAV 入口
+
+通过 `[plugin_options.files] webdav = true` 在现有 files HTTP 适配器启用 `/dav/<alias>/`，与原生文件操作共用授权、暂存/提交、资源租约及执行准入。协议边界和 Linux 恢复说明见 [WebDAV](webdav.md)；启用配置不代表已完成 Linux 挂载实测。
