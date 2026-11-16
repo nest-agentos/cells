@@ -109,7 +109,12 @@ impl PluginPlan {
                 {
                     return Err(crate::core::error::Error::unsupported());
                 }
-            } else if let Some(guard) = plugin.authorize_path(state, access)? {
+            } else if let Some(guard) = plugin.authorize_path(state, access).inspect_err(|error| {
+                crate::core::events::emit(crate::core::events::Level::Warn,"files.authorization.failed",
+                    serde_json::json!({"operation":"files.authorize","stage":"plugin-policy","result":"failure",
+                        "plugin":plugin.id(),"code":error.code,"status":error.status.as_u16(),
+                        "write":access.write,"metadata":access.metadata}));
+            })? {
                 guards.push(guard);
             }
         }

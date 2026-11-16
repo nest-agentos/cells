@@ -44,23 +44,34 @@ async fn stat_once(
     headers: HeaderMap,
     Json(input): Json<StatRequest>,
 ) -> Result<Json<Value>, Error> {
+    let started = std::time::Instant::now();
+    let count = input.paths.len();
     let identity = access::identity(&state, &headers)?;
     state.auth.authorize(identity, &alias)?;
     let deadline = access::deadline(&headers)?;
-    if input.paths.len() > MAX_PATHS
-        || input.paths.iter().map(String::len).sum::<usize>() > MAX_PATH_BYTES
-    {
-        return Err(Error::invalid());
-    }
-    let _project_guards = input
-        .paths
-        .iter()
-        .map(|path| access::authorize_path(&state, &headers, &alias, path, false, true))
-        .collect::<Result<Vec<_>, _>>()?.into_iter().flatten().collect();
-    let reading = super::super::reading::Reading::authorize(&state, identity, &alias, _project_guards, deadline)?;
-    let results = reading.stat(input.paths, input.fields).await?
+    let guards = authorize_paths(&state, &headers, &alias, &input.paths)
+        .inspect_err(|error| failure("authorize-path", count, started, error))?;
+    let reading = super::super::reading::Reading::authorize(&state, identity, &alias, guards, deadline)
+        .inspect_err(|error| failure("prepare-source", count, started, error))?;
+    let results = reading.stat(input.paths, input.fields).await
+        .inspect_err(|error| failure("source-stat", count, started, error))?
         .into_iter().map(|result| match result {
             Ok(stat) => json!({"stat":stat}), Err(error) => json!({"error":error.code}),
         }).collect::<Vec<_>>();
     Ok(Json(json!({"results":results})))
+}
+
+fn authorize_paths(state: &State, headers: &HeaderMap, alias: &str, paths: &[String])
+    -> Result<Vec<tokio::sync::OwnedRwLockReadGuard<()>>, Error> {
+    if paths.len() > MAX_PATHS || paths.iter().map(String::len).sum::<usize>() > MAX_PATH_BYTES {
+        return Err(Error::invalid());
+    }
+    paths.iter().map(|path| access::authorize_path(state, headers, alias, path, false, true))
+        .collect::<Result<Vec<_>, _>>().map(|guards| guards.into_iter().flatten().collect())
+}
+
+fn failure(stage: &str, count: usize, started: std::time::Instant, error: &Error) {
+    crate::core::events::emit(crate::core::events::Level::Warn, "files.stat.failed",
+        json!({"operation":"files.stat","stage":stage,"result":"failure","code":error.code,
+            "status":error.status.as_u16(),"count":count,"durationMs":started.elapsed().as_millis()}));
 }

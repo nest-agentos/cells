@@ -65,7 +65,7 @@ fn server_records_startup_and_http_failure_without_authentication_secrets() {
     fs::create_dir(&export).unwrap();
     fs::write(
         &path,
-        format!("listen='127.0.0.1:0'\nexecution=false\ntoken='test-private-token-at-least-24-bytes'\n[[exports]]\npath='{}'\n", export.display()),
+        format!("listen='127.0.0.1:0'\nexecution=false\ntoken='test-private-token-at-least-24-bytes'\n[[exports]]\nalias='root'\npath='{}'\n", export.display()),
     )
     .unwrap();
     let mut server = launch(&path);
@@ -83,6 +83,12 @@ fn server_records_startup_and_http_failure_without_authentication_secrets() {
     let mut response = String::new();
     socket.read_to_string(&mut response).unwrap();
     assert!(response.starts_with("HTTP/1.1 401"));
+    let mut socket = TcpStream::connect(record["fields"]["address"].as_str().unwrap()).unwrap();
+    socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let body = r#"{"paths":["PRIVATE_FILENAME"]}"#;
+    socket.write_all(format!("POST /v1/fs/root/stat HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer test-private-token-at-least-24-bytes\r\nX-Fsagent-Project: PRIVATE_PROJECT\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).as_bytes()).unwrap();
+    response.clear();socket.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 422"), "{response}");
     let logs = records(&log_dir);
     assert_eq!(logs[0]["event"], "server.starting");
     assert_eq!(logs[0]["fields"]["version"], env!("CARGO_PKG_VERSION"));
@@ -92,6 +98,10 @@ fn server_records_startup_and_http_failure_without_authentication_secrets() {
     assert!(!serde_json::to_string(&logs)
         .unwrap()
         .contains("test-private-token"));
+    assert!(logs.iter().any(|r| r["event"] == "files.stat.failed"
+        && r["fields"]["stage"] == "authorize-path" && r["fields"]["code"] == "ECAPABILITY"
+        && r["fields"]["count"] == 1 && r["fields"]["requestId"].is_string()));
+    assert!(!serde_json::to_string(&logs).unwrap().contains("PRIVATE_"));
 }
 
 #[test]

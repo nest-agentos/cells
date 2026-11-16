@@ -140,6 +140,7 @@ impl IntoResponse for Error {
 }
 
 impl From<std::io::Error> for Error {
+    #[track_caller]
     fn from(error: std::io::Error) -> Self {
         use std::io::ErrorKind::*;
         match error.kind() {
@@ -149,7 +150,14 @@ impl From<std::io::Error> for Error {
             PermissionDenied => Self::forbidden("EACCES"),
             // A component longer than NAME_MAX is client input, not a server fault.
             InvalidFilename => Self::invalid(),
-            _ => Self::internal(),
+            _ => {
+                let source = std::panic::Location::caller();
+                crate::core::events::emit(crate::core::events::Level::Warn,"storage.io.failed",
+                    json!({"operation":"storage.io","stage":"syscall","result":"failure","code":"EIO",
+                        "errorKind":format!("{:?}",error.kind()),"errno":error.raw_os_error(),
+                        "sourceFile":source.file(),"sourceLine":source.line()}));
+                Self::internal()
+            },
         }
     }
 }
