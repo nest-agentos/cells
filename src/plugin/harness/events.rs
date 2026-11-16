@@ -7,6 +7,7 @@ const MAX_EVENTS: usize = 1024;
 const MAX_BYTES: usize = 8 * 1024 * 1024;
 pub struct Events {
     commands: super::command_runs::CommandRuns,
+    heads: super::runtime_heads::RuntimeHeads,
     changed: tokio::sync::watch::Sender<u64>,
     pub epoch: String,
     pub runtime: Option<std::sync::Arc<crate::projects::runtime::ProjectRuntime>>,
@@ -24,6 +25,7 @@ impl Events {
         getrandom::getrandom(&mut bytes).expect("random unavailable");
         Self {
             commands: Default::default(),
+            heads: Default::default(),
             changed: tokio::sync::watch::channel(0).0,
             epoch: bytes.iter().map(|b| format!("{b:02x}")).collect(),
             runtime: None,
@@ -43,6 +45,7 @@ impl Events {
             return Err(Error::too_large("EFBIG"));
         }
         self.track(&message)?;
+        self.heads.observe(&message);
         let command = self.commands.observe(&message);
         self.last_activity = std::time::Instant::now();
         if let Some(runtime) = &self.runtime {
@@ -91,32 +94,7 @@ impl Events {
         Some(value)
     }
     pub fn runtime_metadata(&self, thread: &str) -> Value {
-        let mut value = json!({});
-        let mut lifecycle = false;
-        for (_, event, _, _) in self.entries.iter().rev() {
-            if event["params"]["threadId"] != thread {
-                continue;
-            }
-            let turn = &event["params"]["turn"];
-            match event["method"].as_str() {
-                Some("turn/started") if !lifecycle => {
-                    value["activeTurnId"] = turn["id"].clone();
-                    lifecycle = true;
-                }
-                Some("turn/completed") if value["lastTurnId"].is_null() => {
-                    lifecycle = true;
-                    value["lastTurnId"] = turn["id"].clone();
-                    value["lastTurnResult"] = match turn["status"].as_str() {
-                        Some("completed") => json!("completed"),
-                        Some("failed") => json!("failed"),
-                        Some("interrupted" | "cancelled") => json!("cancelled"),
-                        _ => Value::Null,
-                    };
-                }
-                _ => (),
-            }
-        }
-        value
+        self.heads.get(thread)
     }
     fn track(&mut self, message: &Value) -> Result<(), Error> {
         if let Some(id) = message["params"]["threadId"].as_str() {
@@ -332,6 +310,17 @@ mod tests {
             .unwrap();
         assert!(events.idle_since().is_some());
         assert_eq!(events.active_count(),0);
+    }
+    #[test]
+    fn retains_current_and_terminal_turn_facts_after_replay_eviction() {
+        let mut events = Events::new();
+        events.push(json!({"method":"turn/started","params":{"threadId":"s","turn":{"id":"long"}}})).unwrap();
+        for _ in 0..MAX_EVENTS + 1 { events.push(json!({"method":"item/delta","params":{"threadId":"s"}})).unwrap(); }
+        assert_eq!(events.runtime_metadata("s")["activeTurnId"], "long");
+        assert!(events.page(Some(&events.epoch), 0)["gap"].as_bool().unwrap());
+        events.push(json!({"method":"turn/completed","params":{"threadId":"s","turn":{"id":"long","status":"completed"}}})).unwrap();
+        for _ in 0..MAX_EVENTS + 1 { events.push(json!({"method":"item/delta","params":{}})).unwrap(); }
+        assert_eq!(events.runtime_metadata("s"), json!({"lastTurnId":"long","lastTurnResult":"completed"}));
     }
     #[test]
     fn reports_replay_gaps_and_epoch_reset() {

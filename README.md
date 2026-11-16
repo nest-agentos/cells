@@ -550,6 +550,8 @@ Executable directory projects use immutable readable IDs (1–64 ASCII letters/d
 
 文件基础事实投影：`GET /v1/fs/:alias/entries?fields=entry` 和 `POST /v1/fs/:alias/stat` 的 `fields: "entry"` 只返回基础属性，跳过 revision/metadata 锁和 sidecar 数据库。完整 `stat` 投影保留条件写入所需版本和 source metadata；路径授权、符号链接限制、批量数量及字节上限在两种投影中一致。驱动与节点按同一协议一起升级。
 
+原生轮次的 activeTurnId、lastTurnId 与 lastTurnResult 由独立运行头保存，不从有界事件回放推导。长轮次超过 1024 条事件或 8 MiB 回放字节后，仍能按同一轮次补充输入、取消和核对终态；最多保留 1024 个已结算会话头，已准入的活动轮次不因回放淘汰而失去责任。该读模型不增加历史读取或公开 API，生命周期诊断继续使用原有通道。
+
 ### Harness 消息时间
 
 原生消息可携带 Unix 毫秒 `submittedAt`、`startedAt`、`completedAt` 和失败/取消的 `endedAt`。节点在生命周期事件进入 replay buffer 前保留原生时间，缺失时记录该事件的节点接收时间；该值不来自浏览器渲染。Codex、Claude 与 DSH 可确认的持久消息完成记录保留完成时间，工具摘要透传时间字段。旧 `timestamp` 不等同于完成时间，未知历史时间不补造；客户端重连合并保留已有明确时间，显示时钟不改变原生状态。

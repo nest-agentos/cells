@@ -22,6 +22,7 @@ mod dsh;
 mod environment;
 mod session_channel;
 mod events;
+mod runtime_heads;
 mod history;
 mod models;
 mod metrics;
