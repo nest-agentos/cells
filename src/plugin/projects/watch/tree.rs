@@ -1,6 +1,7 @@
 //! A watch is installed through an open descriptor, never an unchecked pathname.
 use super::*;
 use std::{ffi::CStr, path::PathBuf};
+pub(super) const MAX_DIRECTORIES: usize = 2048;
 pub(super) struct Root {
     pub export: Arc<crate::fs::Export>,
     pub path: String,
@@ -98,7 +99,7 @@ struct Scan {
 }
 impl Scan {
     fn full(&self) -> bool {
-        self.directories.len() >= 2048
+        self.directories.len() >= MAX_DIRECTORIES
             || self.entries >= 50000
             || self.started.elapsed() > Duration::from_secs(2)
     }

@@ -13,6 +13,8 @@ use std::{
 };
 mod subscription;
 mod tree;
+pub(super) mod resources;
+pub(super) const MAX_SUBSCRIPTIONS: usize = 16;
 pub(super) use subscription::subscribe;
 
 struct Watch {

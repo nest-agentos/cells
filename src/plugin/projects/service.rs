@@ -30,6 +30,7 @@ pub struct ProjectService {
 }
 impl ProjectService {
     pub fn open(config: &Config, deployment: &crate::config::Config) -> Result<Self, String> {
+        super::watch::resources::prepare();
         if config.channel_endpoint.as_deref().is_some_and(|endpoint| !super::api::valid_channel_endpoint(endpoint)) {
             return Err("Invalid project channel endpoint".into());
         }
@@ -68,7 +69,7 @@ impl ProjectService {
             channels_enabled: config.network,
             channel_endpoint: config.channel_endpoint.clone(),
             channels: super::channel::Channels::open(store.root()).map_err(|_| "Cannot open session channels")?,
-            watch_slots: Arc::new(tokio::sync::Semaphore::new(16)),
+            watch_slots: Arc::new(tokio::sync::Semaphore::new(super::watch::MAX_SUBSCRIPTIONS)),
             store,
             isolation: config.isolation,
             launcher: match config.isolation {

@@ -411,6 +411,8 @@ python3 src/plugin/harness/tests/real_claude.py
 
 最多同时 16 个目录订阅，关闭流即释放监听，不维护 watchId 租约或 unwatch 操作。建立监听最多覆盖 2048 个目录、50000 项及 2 秒，覆盖不足明确返回 truncated，不能据此声称完整观察。授权与项目 revision 在发送前重新核验，没有原生会话也能观察目录。目录变化不表示外部会话正在运行，也不授予控制权。
 
+项目服务初始化按现有订阅容量准备进程文件描述符软上限：16 × 2048 × 两代监听重建 + 4096 个普通读写/传输余量，目前为 69632。只在管理员硬上限内提升继承的软上限，不降低既有更高值，不修改硬上限或目录覆盖预算。`project.watch.capacity` 记录调整前后数值、硬上限、所需容量及结果；硬上限不足或系统调用失败明确报告 `PROJECT_WATCH_FD_LIMIT_INSUFFICIENT`，不声明已满足容量。低软上限回归在独立子进程覆盖两个 1200 目录订阅、重建、文件读取和释放，另验证低硬上限保持不变。
+
 Codex/Claude 子进程只继承允许列表内的环境；代理保留 `HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/NO_PROXY` 及各自小写形式，证书保留 `SSL_CERT_FILE/SSL_CERT_DIR`。大小写同时存在时原样传入，由原生客户端决定优先级。不把代理凭据写入日志，不自动覆盖全局代理设置。
 
 ## Native usage snapshots

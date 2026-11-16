@@ -183,3 +183,53 @@ async fn fences_subscriptions_by_owner_revision_and_directory_identity() {
             .is_err()
     );
 }
+
+fn isolated_limit_test(name: &str, hard: Option<libc::rlim_t>) -> bool {
+    use std::{os::unix::process::CommandExt, process::Command};
+    if std::env::var_os("CELLS_WATCH_LIMIT_TEST").is_some() { return false; }
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command.args(["--exact", name]).env("CELLS_WATCH_LIMIT_TEST", "1");
+    unsafe { command.pre_exec(move || {
+        let mut limits = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limits) != 0 {return Err(std::io::Error::last_os_error());}
+        limits.rlim_cur = 64;
+        if let Some(hard) = hard { limits.rlim_max = hard.min(limits.rlim_max); }
+        if libc::setrlimit(libc::RLIMIT_NOFILE, &limits) != 0 {return Err(std::io::Error::last_os_error());}
+        Ok(())
+    }); }
+    let output = command.output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    true
+}
+
+#[tokio::test]
+async fn low_inherited_soft_limit_keeps_large_watches_rebuilds_and_file_reads_available() {
+    if isolated_limit_test("low_inherited_soft_limit_keeps_large_watches_rebuilds_and_file_reads_available", None) {return;}
+    let (root, state) = fixture();
+    let base = root.path().join("export/project");
+    for index in 0..1200 {std::fs::create_dir(base.join(format!("directory-{index}"))).unwrap();}
+    let project = project(&state).await;
+    let args = json!({"projectId":project["id"],"revision":project["revision"]});
+    let baseline = std::fs::read_dir("/proc/self/fd").unwrap().count();
+    let mut first = state.plugins.subscribe(&state, 0, "projects", args.clone()).await.unwrap();
+    assert_eq!(next(&mut first).await["truncated"], false);
+    let mut second = state.plugins.subscribe(&state, 0, "projects", args).await.unwrap();
+    assert_eq!(next(&mut second).await["truncated"], false);
+    std::fs::create_dir(base.join("added-after-subscription")).unwrap();
+    assert_eq!(next(&mut first).await["truncated"], false);
+    assert_eq!(next(&mut second).await["truncated"], false);
+    assert!(state.exports.get("root").unwrap().stat("project/directory-1199").unwrap().is_some());
+    std::fs::write(base.join("added-after-subscription/change.md"), "update").unwrap();
+    next(&mut first).await;next(&mut second).await;
+    drop(first);drop(second);
+    assert!(std::fs::read_dir("/proc/self/fd").unwrap().count() <= baseline);
+}
+
+#[test]
+fn watch_capacity_never_raises_the_administrator_hard_limit() {
+    if isolated_limit_test("watch_capacity_never_raises_the_administrator_hard_limit", Some(128)) {return;}
+    let (_root, _state) = fixture();
+    let mut limits = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    assert_eq!(unsafe {libc::getrlimit(libc::RLIMIT_NOFILE, &mut limits)}, 0);
+    assert_eq!(limits.rlim_cur, 128);assert_eq!(limits.rlim_max, 128);
+}
