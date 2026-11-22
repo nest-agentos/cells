@@ -12,6 +12,8 @@ webdav = true
 alias = "docs"
 path = "/srv/cells/docs"
 access = "rw"
+# Opt in on a dedicated export if the client requires DAV lock leases.
+# webdav_locks = true
 
 # Existing directory/principal grants remain authoritative for every protocol.
 # API keys use Bearer authentication; davfs2's ordinary secrets file uses Basic.

@@ -85,10 +85,12 @@ impl Export {
             paths.push((to, true));
         }
         self.path_locks.with(&paths, || {
-            let mut constraints = self.constrain(&paths.iter().map(|(path, _)| *path).collect::<Vec<_>>())?;
+            let removes = matches!(change, Change::Rename { .. } | Change::Remove { .. });
+            let mut constraints = self.constrain(&paths.iter().map(|(path, _)| *path).collect::<Vec<_>>(), removes)?;
             checkpoint()?;
-            let source_resource = constraints.enabled().then(||self.resource(change.path())).transpose()?;
-            let _file_lease = if matches!(change, Change::Rename { .. } | Change::Remove { .. }) {
+            let source_resource = (self.webdav_locks && constraints.is_some() && removes)
+                .then(|| self.resource(change.path())).transpose()?;
+            let _file_lease = if removes {
                 self.lock_existing_file(change.path())?
             } else {
                 None
@@ -106,15 +108,15 @@ impl Export {
             } else {
                 None
             };
-            let mut metadata = if matches!(change, Change::Rename { .. } | Change::Remove { .. }) {
+            let mut metadata = if removes {
                 super::metadata::Metadata::existing_write(&metadata_root)?
             } else {
                 None
             };
             checkpoint()?;
-            if constraints.enabled() {
+            if let Some(registry) = constraints.as_ref() {
                 let resources = paths.iter().map(|(path,_)|self.resource(path)).collect::<Result<Vec<_>,_>>()?;
-                constraints.check(&resources)?;
+                registry.check(&resources)?;
             }
             match change {
                 Change::Mkdir { path } => {
@@ -141,7 +143,7 @@ impl Export {
                         destination_name.as_str(),
                         if overwrite { RenameFlags::empty() } else { RenameFlags::NOREPLACE },
                     )?;
-                    if let Some(resource) = &source_resource { constraints.removed(resource); }
+                    if let (Some(registry), Some(resource)) = (&mut constraints, &source_resource) { registry.removed(resource); }
                     from.sync_all().and_then(|()|destination.sync_all()).map_err(|_|Error::partial("FILE_DIRECTORY_SYNC_FAILED"))?;
                     if let Some(metadata) = metadata.as_mut() {
                         metadata
@@ -164,7 +166,7 @@ impl Export {
                         AtFlags::empty()
                     };
                     rustix::fs::unlinkat(&directory, name.as_str(), flags)?;
-                    if let Some(resource) = &source_resource { constraints.removed(resource); }
+                    if let (Some(registry), Some(resource)) = (&mut constraints, &source_resource) { registry.removed(resource); }
                     directory.sync_all().map_err(|_|Error::partial("FILE_DIRECTORY_SYNC_FAILED"))?;
                     if let Some(metadata) = metadata.as_ref() {
                         metadata.remove(&metadata_path).map_err(|_| {

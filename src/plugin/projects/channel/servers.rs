@@ -62,12 +62,23 @@ impl Channels {
                     })
             })
             .ok_or_else(Error::invalid)?;
+        let site = super::site_approvals::site_registration(args)?;
         let expected = args["revision"].as_u64().ok_or_else(Error::invalid)?;
+        let session = args.get("sessionId").map(|_| identifier(args, "sessionId")).transpose()?;
         self.6.owner(owner,|connection|{let db=connection.transaction().map_err(storage)?;
         let previous:Option<(u64,String)>=db.query_row("SELECT revision,body FROM agent_servers WHERE owner=?1 AND id=?2",params![owner,id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(storage)?;
         if previous.as_ref().map(|p|p.0).unwrap_or(0)!=expected{return Err(Error::conflict("AGENT_SERVER_CHANGED"));}
         let mut value=json!({"name":name,"url":url.as_str(),"tools":tools,"enabled":args["enabled"].as_bool().ok_or_else(Error::invalid)?});
         let old=previous.map(|p|serde_json::from_str::<Value>(&p.1)).transpose().map_err(storage)?;
+        if let Some(session) = session {
+            value["sessionId"] = json!(session);
+        } else if let Some(session) = old.as_ref().and_then(|previous| previous.get("sessionId")) {
+            value["sessionId"] = session.clone();
+        }
+        if let Some(site) = site {
+            if !value["sessionId"].is_string() { return Err(Error::invalid()); }
+            value["site"] = site;
+        }
         if let Some(credential)=args.get("credential").or(old.as_ref().and_then(|v|v.get("credential"))) {
             let credential=credential.as_str().filter(|s|s.len()<=8192&&!s.contains(['\r','\n'])).ok_or_else(Error::invalid)?;
             if !credential.is_empty(){value["credential"]=json!(credential);}
@@ -94,6 +105,7 @@ impl Channels {
     pub(super) fn agent_config(
         &self,
         owner: &str,
+        session: Option<&str>,
         scoped: Option<Value>,
     ) -> Result<Option<Value>, Error> {
         self.6.owner(owner, |db| {
@@ -112,8 +124,17 @@ impl Channels {
                 if value["enabled"] != true {
                     continue;
                 }
+                if value["sessionId"].as_str().is_some_and(|target| Some(target) != session) {
+                    continue;
+                }
                 let mut server =
                     json!({"url":value["url"],"enabled_tools":value["tools"],"required":true});
+                if value["site"].is_object() {
+                    server["default_tools_approval_mode"] = json!("prompt");
+                    for tool in value["tools"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                        server["tools"][tool]["approval_mode"] = json!("prompt");
+                    }
+                }
                 if let Some(secret) = value["credential"].as_str() {
                     server["http_headers"] = json!({"Authorization":format!("Bearer {secret}")});
                 }

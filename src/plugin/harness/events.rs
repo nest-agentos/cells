@@ -10,6 +10,7 @@ pub struct Events {
     heads: super::runtime_heads::RuntimeHeads,
     changed: tokio::sync::watch::Sender<u64>,
     pub epoch: String,
+    pub(super) site_bridge: std::sync::Weak<super::bridge::Bridge>,
     pub runtime: Option<std::sync::Arc<crate::projects::runtime::ProjectRuntime>>,
     next: u64,
     bytes: usize,
@@ -29,6 +30,7 @@ impl Events {
             changed: tokio::sync::watch::channel(0).0,
             epoch: bytes.iter().map(|b| format!("{b:02x}")).collect(),
             runtime: None,
+            site_bridge: Default::default(),
             next: 0,
             bytes: 0,
             entries: VecDeque::new(),
@@ -38,6 +40,9 @@ impl Events {
         }
     }
     pub fn push(&mut self, mut message: Value) -> Result<(), Error> {
+        if let (Some(runtime), Some(bridge)) = (&self.runtime, self.site_bridge.upgrade()) {
+            if super::site_approval::present(runtime, &bridge, &mut message) { return Ok(()); }
+        }
         let observed_at = chrono::Utc::now().timestamp_millis();
         super::presentation::stamp_event(&mut message, observed_at);
         let size = message.to_string().len();

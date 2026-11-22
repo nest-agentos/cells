@@ -119,8 +119,8 @@ impl LockPlan {
         deadline: tokio::time::Instant,
     ) -> Result<serde_json::Value, Error> {
         operation.checkpoint(deadline)?;
+        let mut registry = self.export.lease_registry()?.write()?;
         let resource = self.export.resource(&self.path)?;
-        let mut registry = file_constraints::registry()?;
         operation.checkpoint(deadline)?;
         self.conditions.check(&self.export, &self.path)?;
         let created = if self.unlock {
@@ -161,7 +161,7 @@ impl LockPlan {
             upload::commit(&self.export, &self.path, upload, None, checkpoint)
         });
         if let Err(error) = result {
-            file_constraints::registry()?.release(resource, self.owner, &self.token)?;
+            self.export.lease_registry()?.write()?.release(resource, self.owner, &self.token)?;
             return Err(error);
         }
         Ok(())

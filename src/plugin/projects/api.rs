@@ -135,7 +135,7 @@ pub(super) fn valid_channel_endpoint(value: &str) -> bool {
 fn control(state:&State,identity:usize,service:&ProjectService,id:&str)->Result<(tokio::sync::OwnedRwLockReadGuard<()>,crate::core::gate::ExclusivePermit),Error>{
     let node=state.files.shared()?;
     service.get(identity,id)?;
-    let project=service.lifecycle(id).exclusive()?;
+    let project=service.lifecycle(id).exclusive_using(&state.files)?;
     Ok((node,project))
 }
 

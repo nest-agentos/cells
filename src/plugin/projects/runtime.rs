@@ -393,11 +393,12 @@ impl ProjectRuntime {
         if affected {
             if clean {
                 self.invalidate();
-            } else if self.state.upgrade().is_some() {
+            } else if let Some(state)=self.state.upgrade() {
+                state.files.poison_constraints();
                 self.lifecycle.poison();
-                if let Some(state)=self.state.upgrade(){if let Some(service)=state.services.get::<super::ProjectService>(){
+                if let Some(service)=state.services.get::<super::ProjectService>(){
                     for project in &self.context{service.lifecycle(&project.id).poison();}
-                }}
+                }
             }
         }
         drop(permits);

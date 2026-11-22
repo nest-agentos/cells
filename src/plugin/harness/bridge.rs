@@ -106,7 +106,11 @@ impl Bridge {
             exited,
             context: context.clone(),
         });
-        bridge.events.lock().unwrap().runtime = runtime.clone();
+        {
+            let mut events = bridge.events.lock().unwrap();
+            events.runtime = runtime.clone();
+            events.site_bridge = Arc::downgrade(&bridge);
+        }
         let events = bridge.events.clone();
         let stop = bridge.stop.clone();
         tokio::spawn(async move {
@@ -145,6 +149,23 @@ impl Bridge {
             .map_err(|_| Error::unavailable())?;
         receive.await.map_err(|_| Error::unavailable())?
     }
+    pub(super) fn approve_registered_site(&self, id: &Value, session: &Value) -> bool {
+        let (send, receive) = oneshot::channel();
+        if self.sender.try_send(Command::Respond(id.clone(), super::site_approval::reply(true), send)).is_err() {
+            return false;
+        }
+        let (id, session) = (id.clone(), session.clone());
+        let started = Instant::now();
+        tokio::spawn(async move {
+            let result = await_reply(receive).await;
+            crate::core::events::emit(if result.is_ok(){crate::core::events::Level::Info}else{crate::core::events::Level::Warn},
+                "harness.site.approval",json!({"operation":"harness.site.approval","operationId":id,"sessionId":session,
+                    "stage":"dispatch","result":if result.is_ok(){"success"}else{"failure"},
+                    "code":result.as_ref().err().map(|error|error.code),"durationMs":started.elapsed().as_millis()}));
+        });
+        true
+    }
+
     pub async fn respond(&self, id: Value, result: Value) -> Result<Value, Error> {
         let (send, receive) = oneshot::channel();
         self.sender

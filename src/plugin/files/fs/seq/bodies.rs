@@ -100,7 +100,7 @@ fn ensure_directory(
         return Err(Error::forbidden("EROFS"));
     }
     export.path_locks.with(&[(path, true)], || {
-        let _constraints = export.constrain(&[path])?;
+        let _constraints = export.constrain(&[path], false)?;
         checkpoint()?;
         let (parent, name) = export.parent(path)?;
         match rustix::fs::mkdirat(

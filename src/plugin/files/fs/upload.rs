@@ -164,14 +164,15 @@ fn publish(
         return Err(Error::forbidden("EROFS"));
     }
     export.path_locks.with(&[(path, true)], || {
-        let constraints = export.constrain(&[path])?;
+        let constraints = export.constrain(&[path], false)?;
         checkpoint()?;
         // Re-resolve the parent under the lock: renaming it invalidates the upload.
         let (target, name) = export.parent(path)?;
         if identity(&target) != identity(&upload.parent) {
             return Err(Error::precondition_failed());
         }
-        let (mut mode, _file_lease, replace) = publication_mode(export,path,condition,&constraints)?;
+        let registry = constraints.as_ref().map(|guard| &**guard);
+        let (mut mode, _file_lease, replace) = publication_mode(export, path, condition, registry)?;
         if let Some(executable) = executable {
             let bits = if executable {
                 mode.bits() | 0o111
@@ -185,7 +186,7 @@ fn publish(
         rustix::fs::fchmod(&upload.file, mode)?;
         upload.file.sync_all()?;
         checkpoint()?;
-        if constraints.enabled() { constraints.check(&[export.resource(path)?])?; }
+        if let Some(registry) = registry { registry.check(&[export.resource(path)?])?; }
         rustix::fs::renameat_with(
             &upload.parent,
             upload.name.as_str(),
@@ -243,12 +244,12 @@ fn identity(file: &File) -> Result<(u64, u64), Error> {
 }
 
 // A lease condition is not a client read validator; never manufacture an expected revision.
-fn publication_mode(export: &Export,path: &str,condition: Condition<'_>,constraints: &crate::core::file_constraints::Registry) -> Result<(Mode,Option<File>,bool),Error> {
+fn publication_mode(export: &Export,path: &str,condition: Condition<'_>,constraints: Option<&crate::core::file_constraints::Registry>) -> Result<(Mode,Option<File>,bool),Error> {
     match condition {
         Condition::Revision(Some(expected)) => replaced_mode(export,path,expected).map(|(mode,file)|(mode,Some(file),true)),
         Condition::Revision(None) => Ok((DEFAULT_FILE_MODE,None,false)),
         Condition::Locked {owner,tokens} => {
-            if !constraints.owns(&export.resource(path)?,owner,tokens) { return Err(Error::precondition_failed()); }
+            if !constraints.ok_or_else(Error::precondition_failed)?.owns(&export.resource(path)?,owner,tokens) { return Err(Error::precondition_failed()); }
             match export.lock_existing_file(path) {
                 Err(error) if error.is_not_found() => Ok((DEFAULT_FILE_MODE,None,false)),
                 Err(error) => Err(error),

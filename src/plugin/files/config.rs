@@ -13,6 +13,9 @@ pub struct ExportConfig {
     pub public: bool,
     #[serde(default)]
     pub grants: Vec<DirectoryGrant>,
+    /// Opt in to DAV write leases on this export.
+    #[serde(default)]
+    pub webdav_locks: bool,
 }
 
 #[derive(Clone, Deserialize)]

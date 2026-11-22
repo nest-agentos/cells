@@ -9,7 +9,7 @@ impl NodePlugin for Projects {
             if domain == "projects" { return super::call(state, identity, &format!("project_{operation}"), args).await; }
             let service = state.services.require::<super::ProjectService>()?;
             let owner = state.auth.client(identity).id();
-            match operation { "mcp_list" => service.channels.server_list(owner), "mcp_save" => service.channels.server_save(owner, &args), "mcp_remove" => service.channels.server_remove(owner, &args), _ => Err(crate::core::error::Error::unsupported()) } })
+            match operation { "mcp_list" => service.channels.server_list(owner), "mcp_save" => service.channels.server_save(owner, &args), "mcp_remove" => service.channels.server_remove(owner, &args), "mcp_revoke_site" => service.channels.revoke_site(owner, &args), _ => Err(crate::core::error::Error::unsupported()) } })
     }
     fn subscribe<'a>(
         &'a self,

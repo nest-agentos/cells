@@ -147,15 +147,7 @@ async fn dispatch(state: Arc<State>, request: Request, id: &str) -> Result<Respo
         access::writable_export(&state, &headers, &alias)?;
     }
     match method {
-        "OPTIONS" => Ok(Response::builder()
-            .status(200)
-            .header(
-                "allow",
-                "OPTIONS, PROPFIND, GET, HEAD, PUT, MKCOL, MOVE, DELETE, LOCK, UNLOCK",
-            )
-            .header("dav", "1, 2")
-            .body(Body::empty())
-            .unwrap()),
+        "OPTIONS" => Ok(options(&export)),
         "PROPFIND" => properties::find(state, export, alias, path, headers, body, guards).await,
         "GET" | "HEAD" => {
             let response = super::http::content::content(
@@ -176,7 +168,7 @@ async fn dispatch(state: Arc<State>, request: Request, id: &str) -> Result<Respo
                 Ok(response)
             }
         }
-        "LOCK" | "UNLOCK" => {
+        "LOCK" | "UNLOCK" if export.webdav_locks => {
             locking::run(
                 state,
                 export,
@@ -190,6 +182,19 @@ async fn dispatch(state: Arc<State>, request: Request, id: &str) -> Result<Respo
                 guards,
             )
             .await
+        }
+        "LOCK" | "UNLOCK" => {
+            let error = Error {
+                outcome: Some("not-committed"),
+                ..Error::new(StatusCode::METHOD_NOT_ALLOWED, "DAV_LOCK_DISABLED")
+            };
+            let mut response = error.into_response();
+            response.headers_mut().insert("allow", allow(false).parse().unwrap());
+            response.extensions_mut().insert(ReceiptOutcome {
+                code: error.code.into(),
+                outcome: "not-committed".into(),
+            });
+            Ok(response)
         }
         "PUT" | "MKCOL" | "MOVE" | "DELETE" => {
             writing::run(
@@ -211,6 +216,22 @@ async fn dispatch(state: Arc<State>, request: Request, id: &str) -> Result<Respo
             "DAV_METHOD_UNSUPPORTED",
         )),
     }
+}
+fn allow(locks: bool) -> &'static str {
+    if locks {
+        "OPTIONS, PROPFIND, GET, HEAD, PUT, MKCOL, MOVE, DELETE, LOCK, UNLOCK"
+    } else {
+        "OPTIONS, PROPFIND, GET, HEAD, PUT, MKCOL, MOVE, DELETE"
+    }
+}
+fn options(export: &crate::fs::Export) -> Response {
+    let mut response = Response::builder()
+        .header("allow", allow(export.webdav_locks))
+        .header("dav", if export.webdav_locks { "1, 2" } else { "1" });
+    if !export.webdav_locks {
+        response = response.header("x-cells-dav-structural-conditions", "if-match");
+    }
+    response.body(Body::empty()).unwrap()
 }
 pub(super) fn xml(status: StatusCode, body: String) -> Response {
     (

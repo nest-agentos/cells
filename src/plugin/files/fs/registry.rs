@@ -36,6 +36,17 @@ impl Exports {
         self.by_alias.is_empty()
     }
 
+    pub(crate) fn enable_webdav_locks(&mut self, gate: &mut crate::core::gate::FileGate) -> Result<(), String> {
+        if !self.by_alias.values().any(|export| export.webdav_locks) {
+            return Ok(());
+        }
+        let constraints = gate.enable_file_constraints();
+        for export in self.by_alias.values_mut() {
+            Arc::get_mut(export).ok_or("Export already in use")?.file_constraints = Some(constraints.clone());
+        }
+        Ok(())
+    }
+
     /// Any export, used as the process-level lock anchor.
     pub fn first(&self) -> Option<&Arc<Export>> {
         self.by_alias.values().next()

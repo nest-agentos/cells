@@ -11,7 +11,7 @@ impl NodePlugin for Files {
         &["depth", "destination", "overwrite", "lock-token", "timeout", "if"]
     }
     fn response_headers(&self) -> &'static [&'static str] {
-        &["dav", "allow", "lock-token", "timeout"]
+        &["dav", "allow", "lock-token", "timeout", "x-cells-dav-structural-conditions"]
     }
     fn capabilities(
         &self,
@@ -43,7 +43,9 @@ impl NodePlugin for Files {
         state: &mut State,
     ) -> Result<(), String> {
         let options: super::webdav::Options = config.option("files").cloned().map(|value| value.try_into()).transpose().map_err(|_| "Invalid files options")?.unwrap_or_default();
-        if options.webdav { crate::core::file_constraints::enable().map_err(|_| "Cannot enable file constraints")?; }
+        if options.webdav {
+            state.exports.enable_webdav_locks(&mut state.files)?;
+        }
         state.services.insert(Arc::new(options))?;
         super::source::Sources::install(state)?;
         state

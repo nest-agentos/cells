@@ -21,6 +21,7 @@ mod driver_slot;
 mod dsh;
 mod environment;
 mod session_channel;
+mod site_approval;
 mod events;
 mod runtime_heads;
 mod history;

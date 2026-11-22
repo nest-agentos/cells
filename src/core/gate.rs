@@ -13,6 +13,7 @@ pub struct FileGate {
     inner: Arc<RwLock<()>>,
     poisoned: Arc<AtomicBool>,
     scope: Option<String>,
+    file_constraints: Option<Arc<super::file_constraints::Constraints>>,
 }
 
 /// Only topology changes and shutdown require exclusive lifecycle ownership.
@@ -26,7 +27,7 @@ pub struct ExclusivePermit {
 /// Commands share lifecycle ownership with file work and native turns.
 #[derive(Debug)]
 pub struct ExecutionPermit {
-    _constraint: super::file_constraints::Native,
+    constraint: Option<super::file_constraints::Native>,
     owner: super::gate_owner::OwnerGuard,
     _guard: OwnedRwLockReadGuard<()>,
     resource: Option<Box<ExecutionPermit>>,
@@ -43,7 +44,9 @@ impl ExecutionPermit {
         self
     }
     pub fn poison(&self) {
-        super::file_constraints::poison();
+        if let Some(constraint) = &self.constraint {
+            constraint.poison();
+        }
         if let Some(resource) = &self.resource {
             resource.poison();
         } else {
@@ -60,13 +63,18 @@ impl ExecutionPermit {
 }
 #[derive(Debug)]
 pub struct ActivityPermit {
-    _constraint: super::file_constraints::Native,
+    constraint: Option<super::file_constraints::Native>,
     _owner: super::gate_owner::OwnerGuard,
     _guard: OwnedRwLockReadGuard<()>,
     resource: Option<Box<ActivityPermit>>,
 }
 
 impl ActivityPermit {
+    pub(crate) fn poison_constraints(&self) {
+        if let Some(constraint) = &self.constraint {
+            constraint.poison();
+        }
+    }
     pub fn with_resource(mut self, resource: ActivityPermit) -> Self {
         let resource = if let Some(previous) = self.resource.take() {
             resource.with_resource(*previous)
@@ -91,6 +99,19 @@ impl FileGate {
     pub fn new() -> Self {
         Self::default()
     }
+    pub(crate) fn enable_file_constraints(&mut self) -> Arc<super::file_constraints::Constraints> {
+        let constraints = Arc::new(super::file_constraints::Constraints::new(self.owners.clone()));
+        self.file_constraints = Some(constraints.clone());
+        constraints
+    }
+    fn native_constraints(&self) -> Result<Option<super::file_constraints::Native>, Error> {
+        self.file_constraints.as_ref().map(super::file_constraints::Native::acquire).transpose()
+    }
+    pub(crate) fn poison_constraints(&self) {
+        if let Some(constraints) = &self.file_constraints {
+            constraints.poison();
+        }
+    }
     pub fn read_only(&self) -> Result<OwnedRwLockReadGuard<()>, Error> {
         self.shared()
     }
@@ -103,6 +124,9 @@ impl FileGate {
             .map_err(|_| self.busy("lifecycle-admission"))
     }
     pub fn exclusive(&self) -> Result<ExclusivePermit, Error> {
+        self.exclusive_using(self)
+    }
+    pub(crate) fn exclusive_using(&self, node: &Self) -> Result<ExclusivePermit, Error> {
         self.check()?;
         let guard = self
             .inner
@@ -110,7 +134,7 @@ impl FileGate {
             .try_write_owned()
             .map_err(|_| self.busy("topology"))?;
         Ok(ExclusivePermit {
-            _constraint: Some(super::file_constraints::native()?),
+            _constraint: node.native_constraints()?,
             _owner: Some(self.owners.enter("topology", None)),
             _guard: guard,
         })
@@ -118,7 +142,7 @@ impl FileGate {
     pub fn command_now(&self, operation: &str) -> Result<ExecutionPermit, Error> {
         let guard = self.shared()?;
         Ok(ExecutionPermit {
-            _constraint: super::file_constraints::native()?,
+            constraint: self.native_constraints()?,
             owner: self.owners.enter("command", Some(operation)),
             _guard: guard,
             resource: None,
@@ -152,7 +176,7 @@ impl FileGate {
         let owner = self.owners.enter("native", operation);
         owner.session_started(session);
         Ok(ActivityPermit {
-            _constraint: super::file_constraints::native()?,
+            constraint: self.native_constraints()?,
             _owner: owner,
             _guard: guard,
             resource: None,
@@ -160,7 +184,7 @@ impl FileGate {
     }
     /// Unknown process ownership still prevents unsafe new admissions.
     pub fn poison(&self) {
-        super::file_constraints::poison();
+        self.poison_constraints();
         self.poisoned.store(true, Ordering::Release);
     }
     pub fn is_poisoned(&self) -> bool {

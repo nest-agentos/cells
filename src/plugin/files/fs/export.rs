@@ -28,6 +28,8 @@ const DIRECTORY_LIMIT: usize = 100_000;
 pub struct Export {
     pub(crate) root: File,
     pub(crate) path_locks: crate::core::path_locks::PathLocks,
+    pub(crate) webdav_locks: bool,
+    pub(crate) file_constraints: Option<Arc<crate::core::file_constraints::Constraints>>,
     revisions: Option<Mutex<Revisions>>,
     pub(crate) upload_journal: Option<Arc<super::upload_journal::UploadJournal>>,
 }
@@ -47,6 +49,8 @@ impl Export {
         let export = Self {
             root,
             path_locks: Default::default(),
+            webdav_locks: false,
+            file_constraints: None,
             revisions: None,
             upload_journal: None,
         };

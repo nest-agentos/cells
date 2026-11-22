@@ -2,9 +2,9 @@
 use super::Export;
 use crate::core::{
     error::Error,
-    file_constraints::{self, Registry, Resource},
+    file_constraints::{CommitGuard, Constraints, Resource},
 };
-use std::{os::unix::fs::MetadataExt, sync::MutexGuard};
+use std::os::unix::fs::MetadataExt;
 fn identity(file: &std::fs::File) -> Result<String, Error> {
     let metadata = file.metadata()?;
     Ok(format!("{}:{}", metadata.dev(), metadata.ino()))
@@ -35,16 +35,30 @@ impl Export {
             ancestors,
         })
     }
-    pub(crate) fn constrain(&self, paths: &[&str]) -> Result<MutexGuard<'static, Registry>, Error> {
-        let registry = file_constraints::registry()?;
-        if !registry.enabled() {
-            return Ok(registry);
+    pub(crate) fn lease_registry(&self) -> Result<&Constraints, Error> {
+        self.file_constraints.as_deref().ok_or_else(Error::internal)
+    }
+    pub(crate) fn constrain(
+        &self,
+        paths: &[&str],
+        remove_leases: bool,
+    ) -> Result<Option<CommitGuard<'_>>, Error> {
+        let Some(constraints) = &self.file_constraints else {
+            return Ok(None);
+        };
+        let registry = if self.webdav_locks && remove_leases {
+            CommitGuard::Write(constraints.write()?)
+        } else {
+            CommitGuard::Read(constraints.read()?)
+        };
+        if self.webdav_locks {
+            registry.check_execution("commit", Error::busy())?;
         }
         let resources = paths
             .iter()
             .map(|path| self.resource(path))
             .collect::<Result<Vec<_>, _>>()?;
         registry.check(&resources)?;
-        Ok(registry)
+        Ok(Some(registry))
     }
 }

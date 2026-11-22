@@ -72,6 +72,7 @@ impl Input {
         let deadline = access::deadline(&self.headers)?;
         let conditions = Conditions::parse(&self.headers)?;
         let (change, overwrite) = self.change()?;
+        self.require_conditions(&conditions, overwrite)?;
         let mut paths = vec![self.path.as_str()];
         if let Some(Change::Rename { to, .. }) = &change {
             paths.push(to);
@@ -79,15 +80,6 @@ impl Input {
         conditions.validate_tags(&self.alias, &paths)?;
         let scopes = conditions.scopes(&paths);
         let body = accept_body(&self.method, body, deadline).await?;
-        if body.is_some()
-            && conditions.revision.is_none()
-            && !conditions.create
-            && conditions.tokens.is_empty()
-        {
-            return Err(Error::precondition_required(
-                "DAV_LOCK_OR_REVISION_REQUIRED",
-            ));
-        }
         Ok(Plan {
             input: self,
             conditions,
@@ -97,6 +89,26 @@ impl Input {
             body,
             deadline,
         })
+    }
+    fn require_conditions(&self, conditions: &Conditions, overwrite: bool) -> Result<(), Error> {
+        if self.export.webdav_locks {
+            if self.method == "PUT" && conditions.revision.is_none() && !conditions.create && conditions.tokens.is_empty() {
+                return Err(Error::precondition_required("DAV_LOCK_OR_REVISION_REQUIRED"));
+            }
+            return Ok(());
+        }
+        if !conditions.tokens.is_empty() {
+            return Err(Error::precondition_failed());
+        }
+        if overwrite {
+            return Err(Error::precondition_required("DAV_DESTINATION_REVISION_REQUIRED"));
+        }
+        if conditions.revision.is_none()
+            && (matches!(self.method.as_str(), "MOVE" | "DELETE") || self.method == "PUT" && !conditions.create)
+        {
+            return Err(Error::precondition_required("DAV_REVISION_REQUIRED"));
+        }
+        Ok(())
     }
     fn change(&mut self) -> Result<(Option<Change>, bool), Error> {
         let path = self.path.clone();
@@ -137,7 +149,8 @@ impl Input {
             false,
         )?);
         let overwrite = match header(&self.headers, "overwrite")? {
-            None | Some("T") => true,
+            None => self.export.webdav_locks,
+            Some("T") => true,
             Some("F") => false,
             _ => return Err(Error::invalid()),
         };

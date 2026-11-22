@@ -527,8 +527,11 @@ impl Codex {
             .ok_or_else(|| Error::not_found("ENOENT"))?;
         self.require_owned(string(&request["params"], "threadId")?)
             .await?;
-        let result = args.get("response").ok_or_else(Error::invalid)?.clone();
-        validate_response(&request, result.clone())?;
+        let response = args.get("response").ok_or_else(Error::invalid)?;
+        let result = match super::site_approval::decide(self.runtime.as_deref(), &request, response)? {
+            Some(reply) => reply,
+            None => native_response(&request, response)?,
+        };
         bridge.respond(id.clone(), result).await?;
         bridge
             .events
@@ -835,7 +838,7 @@ impl Codex {
     }
 }
 
-fn validate_response(request: &Value, result: Value) -> Result<(), Error> {
+fn native_response(request: &Value, result: &Value) -> Result<Value, Error> {
     match request["method"].as_str().unwrap_or("") {
         "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
             if !matches!(
@@ -850,9 +853,47 @@ fn validate_response(request: &Value, result: Value) -> Result<(), Error> {
                 return Err(Error::invalid());
             }
         }
+        "mcpServer/elicitation/request" if is_mcp_tool_approval(&request["params"]) => {
+            let (action, content) = match result["decision"].as_str() {
+                Some("accept") => ("accept", json!({})),
+                Some("decline") => ("decline", Value::Null),
+                _ => return Err(Error::invalid()),
+            };
+            return Ok(json!({"action":action,"content":content,"_meta":null}));
+        }
         _ => return Err(Error::unsupported()),
     }
-    Ok(())
+    Ok(result.clone())
+}
+
+pub(super) fn is_mcp_tool_approval(params: &Value) -> bool {
+    let schema = &params["requestedSchema"];
+    let meta = &params["_meta"];
+    params["mode"] == "form"
+        && meta["codex_approval_kind"] == "mcp_tool_call"
+        && meta["tool_name"].as_str().is_some_and(|value| !value.is_empty())
+        && params["serverName"].as_str().is_some_and(|value| !value.is_empty())
+        && params["message"].is_string()
+        && schema["type"] == "object"
+        && schema["properties"].as_object().is_some_and(|fields| fields.is_empty())
+        && schema.get("required").is_none_or(|value| value.as_array().is_some_and(|fields| fields.is_empty()))
+}
+
+#[cfg(test)]
+#[test]
+fn mcp_tool_approval_translates_only_one_time_decisions() {
+    let mut request = json!({"method":"mcpServer/elicitation/request","params":{
+        "mode":"form","serverName":"browser","message":"Open the page?",
+        "_meta":{"codex_approval_kind":"mcp_tool_call","tool_name":"open","persist":["session","always"]},
+        "requestedSchema":{"type":"object","properties":{}}
+    }});
+    assert_eq!(native_response(&request, &json!({"decision":"accept","_meta":{"persist":"session"}})).unwrap(),
+        json!({"action":"accept","content":{},"_meta":null}));
+    assert_eq!(native_response(&request, &json!({"decision":"decline"})).unwrap(),
+        json!({"action":"decline","content":null,"_meta":null}));
+    assert!(native_response(&request, &json!({"decision":"acceptForSession"})).is_err());
+    request["params"]["requestedSchema"]["properties"]["query"] = json!({"type":"string"});
+    assert!(native_response(&request, &json!({"decision":"accept"})).is_err());
 }
 
 fn channel_config_diagnostic(profile:&str,session:&str,stage:&str,result:&str,cached:bool,duration:u128,code:Option<&str>) {

@@ -24,13 +24,13 @@ async fn file_request(
                     "Bearer isolated-concurrency-secret-0123456789",
                 )
                 .header("content-type", "application/json")
-                .header("x-operation-id", "independent-file-operation")
+                .header("x-operation-id", format!("independent-{}", method.to_ascii_lowercase()))
                 .header("x-fsagent-project", project["projectId"].as_str().unwrap())
                 .header(
                     "x-fsagent-project-revision",
                     project["revision"].to_string(),
                 )
-                .body(axum::body::Body::from(body.to_string()))
+                .body(if body.is_null() { axum::body::Body::empty() } else { axum::body::Body::from(body.to_string()) })
                 .unwrap(),
         )
         .await
@@ -56,7 +56,7 @@ async fn fixture() -> (tempfile::TempDir, Arc<State>, Value) {
     std::fs::write(&peer, include_str!("fixtures/codex-app-server.py")).unwrap();
     std::fs::set_permissions(&peer, std::fs::Permissions::from_mode(0o700)).unwrap();
     let config: Config = toml::from_str(&format!(
-        "listen='127.0.0.1:0'\nexecution=true\nserver_id='parallel-test'\ntoken='isolated-concurrency-secret-0123456789'\n[projects]\nroot={:?}\n[[exports]]\nalias='work'\npath={:?}\naccess='rw'\n[[harnesses]]\nid='codex'\nkind='codex'\ncommand={:?}\nhome={:?}\nprojects=true\n",
+        "listen='127.0.0.1:0'\nexecution=true\nserver_id='parallel-test'\ntoken='isolated-concurrency-secret-0123456789'\n[plugin_options.files]\nwebdav=true\n[projects]\nroot={:?}\n[[exports]]\nalias='work'\npath={:?}\naccess='rw'\n[[harnesses]]\nid='codex'\nkind='codex'\ncommand={:?}\nhome={:?}\nprojects=true\n",
         root.path().join("catalog"), root.path().join("work"), peer, root.path().join("home"))).unwrap();
     let state = State::from_config(&config).unwrap();
     cells::process::enable(&state).await.unwrap();
@@ -280,6 +280,11 @@ async fn project_turns_allow_independent_file_writes_and_keep_exact_turn_receipt
     .await;
     assert_eq!(status, axum::http::StatusCode::OK);
     assert!(work.join("independent-directory").is_dir());
+    let (status, bytes) = file_request(
+        &state, "MKCOL", "/dav/work/independent-dav-directory", Value::Null, &base
+    ).await;
+    assert_eq!(status, axum::http::StatusCode::CREATED, "{}", String::from_utf8_lossy(&bytes));
+    assert!(work.join("independent-dav-directory").is_dir());
     assert!(state.files.shared().is_ok());
     assert!(state.files.exclusive().is_err());
     assert_eq!(

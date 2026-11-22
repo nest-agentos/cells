@@ -1,7 +1,7 @@
 use super::{header, locking};
 use crate::{
     app::State,
-    core::{error::Error, file_constraints},
+    core::error::Error,
     fs::{Export, Stat},
     http::access,
 };
@@ -261,17 +261,18 @@ fn value(
             .ok_or_else(Error::internal)?
             .to_rfc3339(),
         "supportedlock" => {
-            if export.writable() {
+            if export.webdav_locks {
                 "<D:lockentry><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockentry>".into()
             } else {
                 String::new()
             }
         }
-        "lockdiscovery" => file_constraints::registry()?
+        "lockdiscovery" if export.webdav_locks => export.lease_registry()?.read()?
             .discovery(&export.resource(path)?, owner)
             .iter()
             .map(|(token, seconds, url)| locking::active(token, *seconds, url))
             .collect(),
+        "lockdiscovery" => String::new(),
         _ => return Ok(None),
     }))
 }

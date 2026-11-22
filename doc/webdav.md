@@ -1,4 +1,4 @@
-# Linux davfs2 文件入口
+# WebDAV 文件入口
 
 WebDAV 是可选的现有文件服务适配器，数据仍在已配置 export 中。原生 `/v1/fs` API 保留；协议入口是 `/dav/<alias>/`，不是项目的虚拟挂载树。启用方式见 [完整示例](../config.webdav.example.toml)：
 
@@ -7,7 +7,9 @@ WebDAV 是可选的现有文件服务适配器，数据仍在已配置 export �
 webdav = true
 ```
 
-默认关闭，关闭时返回 `404 WEBDAV_DISABLED`；files 插件关闭时也不装配入口。配置修改随 Cells 重启生效。不要把此表放进 `[[exports]]` 内。沿用原有 Basic/Bearer 认证、principal/export 写权限、项目声明及生命周期 fence、只读限制、保留路径和 `openat2` 边界；不会通过内部 HTTP 调用，也不会复制一套文件存储。只读 export 可浏览和读取，写入及 LOCK/UNLOCK 返回 `403 EROFS`。
+默认关闭，关闭时返回 `404 WEBDAV_DISABLED`；files 插件关闭时也不装配入口。配置修改随 Cells 重启生效。不要把此表放进 `[[exports]]` 内。沿用原有 Basic/Bearer 认证、principal/export 写权限、项目声明及生命周期 fence、只读限制、保留路径和 `openat2` 边界。只读 export 可浏览和读取，写入及 LOCK/UNLOCK 返回 `403 EROFS`。
+
+可写 export 默认按版本提交，OPTIONS 返回 `DAV: 1`，并用 `X-Cells-DAV-Structural-Conditions: if-match` 声明结构修改需要源版本。依赖 WebDAV 独占锁的客户端，可在对应的 `[[exports]]` 中设置 `webdav_locks = true`，该导出的 OPTIONS 返回 `DAV: 1, 2` 并列出 LOCK/UNLOCK。升级仍在写入的旧挂载前，先确认延迟上传完成并正常卸载。NestOS 文件驱动应先支持源版本协商，再切换 Cells 的默认导出。
 
 ## 安装、凭据与挂载
 
@@ -32,7 +34,7 @@ https://cells.example.org/dav/docs/ dav-user "replace locally"
 
 普通用户挂载还需按发行版配置 davfs2 用户组、mount.davfs 权限及 `/etc/fstab` 的 `user,noauto` 条目，重新登录后再使用。root 和普通用户的缓存、配置与 secrets 是不同的；不要混用。Cells 的 Bearer API key 不能直接当作 Basic 密码，需使用已配置的 Basic 主体。
 
-保留 `use_locks 1`，不要为绕过 `423` 关闭锁。davfs2 对文件采用本地缓存及延迟上传，编辑器的保存返回不等于服务器已经提交；确认上传完成并正常卸载后再切换入口。`cache_size`、`delay_upload`、`file_refresh` 等按客户端版本的手册配置，不把缓存当作备份。参考 [mount.davfs 手册](https://manpages.debian.org/trixie/davfs2/mount.davfs.8.en.html) 和 [davfs2.conf 手册](https://manpages.debian.org/trixie/davfs2/davfs2.conf.5.en.html)。
+需要保留旧版 davfs2 挂载行为时，在对应导出开启 `webdav_locks`，客户端保留 `use_locks 1`。默认按版本提交的导出要求客户端发出所需条件头，单独修改 `use_locks` 无法让旧客户端自动支持 MOVE/DELETE 的源版本要求。davfs2 使用本地缓存和延迟上传，确认服务器提交后再卸载或切换入口。参考 [mount.davfs 手册](https://manpages.debian.org/trixie/davfs2/mount.davfs.8.en.html) 和 [davfs2.conf 手册](https://manpages.debian.org/trixie/davfs2/davfs2.conf.5.en.html)。
 
 ## 协议范围
 
@@ -43,11 +45,11 @@ OPTIONS 的 Allow 列出支持方法，DAV 头提供锁能力发现；此入口�
 | OPTIONS | 认证、导出及路径授权后返回能力；关闭配置不能使用。 |
 | PROPFIND | 支持 Depth `0`/`1`、空 body/allprop、propname 和命名属性。省略 Depth 或 infinity 返回 `403 DAV_FINITE_DEPTH_REQUIRED`；不递归枚举。单目录最多 10000 项，存在不能表示的条目或扫描告警时明确失败，不返回伪完整列表。 |
 | GET/HEAD | 复用原生流式读取、范围和 ETag；HEAD 无正文。If-Match 使用当前 export 版本，If-None-Match 支持 `*` 或单个 ETag。集合不作为文件下载。 |
-| PUT | 最多 256 MiB。需要 If-None-Match `*` 创建、单个 If-Match ETag 替换，或当前主体持有且提交了有效锁令牌。无条件且无锁返回 `428 DAV_LOCK_OR_REVISION_REQUIRED`。创建为 201，替换为 204；LOCK 已创建的空文件随后 PUT 为 204。 |
+| PUT | 最多 256 MiB。需要 If-None-Match `*` 创建，或用单个 If-Match ETag 替换。启用锁的导出也可提交当前主体持有的有效锁令牌。缺少前置条件返回 428。创建为 201，替换为 204。 |
 | MKCOL | 只创建一层空目录，不自动创建父目录；已有路径返回 405，非空请求体返回 415。 |
-| MOVE | 同一 export 内重命名文件或目录；默认 Overwrite `T`，仅支持文件覆盖文件。目标不存在返回 201，覆盖返回 204；`F` 的目标已存在返回 412。目录覆盖明确拒绝。源目标都执行路径授权、锁和元数据边界检查；跨元数据 scope 返回 `METADATA_SCOPE_CROSS_MOVE`。 |
-| DELETE | 文件或空目录删除。非空目录返回 `409 ENOTEMPTY`，首版明确不递归删除；Depth 只能省略或 infinity。根路径不可删除。 |
-| LOCK | 独占 write lock。文件支持 Depth `0`/infinity，目录只支持 infinity 子树锁；目录 Depth `0` 明确拒绝。不支持 shared lock。未映射 URL 原子创建零字节文件并持有租约；失败可能保留已发布文件时明确报告 partial。 |
+| MOVE | 同一 export 内重命名文件或目录。默认导出要求源 If-Match，目标必须不存在，显式请求 Overwrite `T` 返回 `428 DAV_DESTINATION_REVISION_REQUIRED`。启用锁的导出沿用默认 `T`，仅支持文件覆盖文件。目标不存在返回 201，`F` 遇到已有目标返回 412。源目标都执行授权和元数据边界检查。 |
+| DELETE | 删除文件或空目录。默认导出要求源 If-Match。非空目录返回 `409 ENOTEMPTY`，Depth 只能省略或 infinity。根路径不可删除。 |
+| LOCK | 仅限启用锁的导出，默认导出返回 `405 DAV_LOCK_DISABLED`。文件支持 Depth `0`/infinity，目录只支持 infinity 子树锁。未映射 URL 原子创建零字节文件并持有独占租约，部分提交明确报告 partial。 |
 | UNLOCK | 需要匹配 URL、主体和 Lock-Token。成功为 204；未知/已过期令牌返回 `409 LOCK_TOKEN_UNKNOWN`。 |
 | COPY/PROPPATCH/其他 | 返回 `501 DAV_METHOD_UNSUPPORTED`；不修改文件、属性或权限。原生 metadata/Seq API 保留自身语义并遵守共享锁。 |
 
@@ -61,11 +63,13 @@ OPTIONS 的 Allow 列出支持方法，DAV 头提供锁能力发现；此入口�
 
 `core::file_constraints` 在原生上传发布、结构及 metadata 修改、Seq 事务及资源目录创建的实际临界区检查锁；基于目录 inode 和父目录 inode/名称识别资源，同一底层目录的别名和 bind mount 不以别名分裂锁。覆盖、目录子树、MOVE 的源和目标都会纳入检查。PUT 文件原子替换保持目标 URL 租约；MOVE/DELETE 释放源上及其后代的租约，不将源 URL 租约转移到目标，目标和祖先已有租约保留。客户端应在新 URL 重新加锁。
 
-首版采用保守的进程级执行屏障：只要存在活动 DAV 租约，所有 Cells 命令、原生 harness activity 和拓扑修改的准入都拒绝；已有执行尚未物理收尾时，新锁和文件提交拒绝。读请求继续可用。启用 WebDAV 后各文件提交短时串行化，防止加锁、别名操作与执行准入竞态；不提供按无关目录细分的执行并行度。没有活动租约且未发生内容提交时，执行准入仍沿用原生命周期。若进程清理/所有权未知导致 poison，写入及新锁以 `503 FILE_EXECUTION_UNKNOWN` fail closed，不能通过另一个入口继续写；需先核对原执行与持久回执，再由宿主正式恢复。直接在 Cells 管理之外启动的宿主进程不受此进程内屏障保护，不应同时修改这些导出目录。
+默认导出的文件提交可与其他目录的命令和原生会话并行。没有启用锁的导出时，文件提交走现有的路径锁、文件 inode 锁和 Seq 事务。混合配置下，版本提交在短临界区用共享读锁核对租约，底层资源重叠时仍拒绝。
+
+启用锁的导出保留保守的执行准入。活动 DAV 租约阻止同一节点的新命令、原生会话执行和拓扑修改。已有原生执行时，该导出的文件提交和新锁均拒绝。合作式原生执行的实际可写范围可超出工作目录，因此不能用 cwd 推断能够授予独占锁。进程回收未知时，该模式对新租约及该导出的提交返回 `503 FILE_EXECUTION_UNKNOWN`。项目和节点生命周期仍按各自范围封闭。默认导出的版本保护适用于经 Cells 协调的提交，直接写盘的进程仍可能与同一文件提交竞态。
 
 超时默认 600 秒，`Second-N` 最多 3600 秒；Infinite 按默认有限值处理。空 body 的 LOCK 使用原 If 令牌刷新；UNLOCK 主动释放。到期后不再授权写入，惰性回收记录 `LOCK_EXPIRED`。客户端需要在到期前刷新，不能把重新获取的租约当作离线旧版本的许可。租约不跨服务重启恢复：旧令牌的条件写返回 412，旧 UNLOCK 返回 409；重启后的原生版本 nonce 也变化。重新挂载/读取当前内容、比较本地副本后再加锁，不自动续用旧令牌。
 
-编辑器临时文件替换保存可创建临时文件、上传后 MOVE 覆盖同一 export 的普通目标文件；目标已锁时必须提交目标令牌，临时文件和目标都锁定时须分别提交相应 URI 的令牌。数据与元数据使用现有维护链路；无法保证的目录覆盖、递归删除和跨导出移动直接拒绝，不模拟为多次非原子写入。只支持跨元数据边界之外的同范围 MOVE，不能把一次编辑器保存推广为跨多个请求的事务。
+默认导出使用带原 ETag 的 PUT 保存已有文件。需要临时文件再 MOVE 覆盖的客户端可使用专门的锁租约导出，并提交目标令牌。临时文件和目标都锁定时分别提交相应 URI 的令牌。多次请求各自独立提交。
 
 ## 失败、断线与恢复
 

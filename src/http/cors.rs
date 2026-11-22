@@ -86,7 +86,7 @@ mod tests {
             .unwrap();
         let response = app.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), 200);
-        assert_eq!(response.headers()["dav"], "1, 2");
+        assert_eq!(response.headers()["dav"], "1");
         assert!(response.headers()["allow"]
             .to_str()
             .unwrap()
@@ -96,6 +96,8 @@ mod tests {
             .to_str()
             .unwrap()
             .contains("lock-token"));
+        assert!(response.headers()["access-control-expose-headers"]
+            .to_str().unwrap().contains("x-cells-dav-structural-conditions"));
         let rejected = app
             .clone()
             .oneshot(

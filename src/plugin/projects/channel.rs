@@ -11,6 +11,7 @@ mod bodies;
 mod client_state;
 mod client_stores;
 mod servers;
+mod site_approvals;
 
 pub struct Channels(
     Mutex<Connection>,
@@ -200,6 +201,9 @@ impl Channels {
         Ok(json!({"scopeId":id,"accepted":true}))
     }
     pub fn config(&self, project: &str, cwd: &str, owner: &str) -> Result<Option<Value>, Error> {
+        self.config_for_session(project, cwd, owner, None)
+    }
+    fn config_for_session(&self, project: &str, cwd: &str, owner: &str, session: Option<&str>) -> Result<Option<Value>, Error> {
         let db = self.0.lock().map_err(storage)?;
         let rows: Vec<(String,String)> = db.prepare("SELECT token,endpoint FROM scopes WHERE project=?1 AND cwd=?2 AND closed=0 AND expires_at>unixepoch()*1000 ORDER BY rowid DESC LIMIT 2").map_err(storage)?
             .query_map(params![project,cwd], |r| Ok((r.get(0)?,r.get(1)?))).map_err(storage)?.collect::<Result<_,_>>().map_err(storage)?;
@@ -209,7 +213,7 @@ impl Channels {
         let endpoint = self.5.read().map_err(storage)?.clone();
         let scoped=rows.first().map(|(token,endpoint_saved)| json!({"features.mcp_2026_07_28":true,"mcp_servers.cells_session":{"url":endpoint.as_ref().unwrap_or(endpoint_saved),"required":true,"default_tools_approval_mode":"approve","enabled_tools":["session_context","session_report","session_receipt","session_request","session_response"],"http_headers":{"Authorization":format!("Bearer {token}")}}}));
         drop(db);
-        self.agent_config(owner, scoped)
+        self.agent_config(owner, session, scoped)
     }
     /// New and resumed sessions must start from the same explicit channel baseline.
     pub fn creation_config(&self, project:&str, cwd:&str, owner:&str)->Result<Value,Error> {
@@ -227,12 +231,17 @@ impl Channels {
     ) -> Result<Value, Error> {
         match self.bind(project, cwd, session) {
             Ok(()) => {
-                self.creation_config(project,cwd,owner)
+                let mut config = self.config_for_session(project, cwd, owner, Some(session))?.unwrap_or(json!({}));
+                if config.get("mcp_servers.cells_session").is_none() {
+                    config["mcp_servers.cells_session"] = disabled_channel();
+                }
+                Ok(config)
             }
             Err(error) if error.code == "CHANNEL_SESSION_CHANGED" => {
                 let config = self
                     .agent_config(
                         owner,
+                        Some(session),
                         Some(json!({"mcp_servers.cells_session":disabled_channel()})),
                     )?
                     .unwrap();
@@ -1062,6 +1071,22 @@ mod tests {
             store.create("p", &args()).unwrap_err().code,
             "CHANNEL_SCOPE_CLOSED"
         );
+    }
+    #[test]
+    fn agent_server_is_only_bound_to_the_selected_existing_session() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Channels::open(root.path()).unwrap();
+        store.server_save("owner", &json!({
+            "id":"browser","name":"Browser","url":"http://127.0.0.1:18887/mcp",
+            "revision":0,"enabled":true,"tools":["operate"],"sessionId":"selected",
+            "credential":"fixture"
+        })).unwrap();
+        let key = "mcp_servers.browser";
+        assert!(store.creation_config("p", "/work", "owner").unwrap().get(key).is_none());
+        assert!(store.session_config("p", "/work", "owner", "other").unwrap().get(key).is_none());
+        assert!(store.session_config("p", "/work", "another", "selected").unwrap().get(key).is_none());
+        assert!(store.session_config("p", "/work", "owner", "selected").unwrap().get(key).is_some());
+        assert!(!store.server_list("owner").unwrap().to_string().contains("fixture"));
     }
     #[test]
     fn old_conversation_detaches_without_inheriting_or_rebinding_a_successor_scope() {

@@ -103,10 +103,9 @@ fn open(config: &ExportConfig, index: usize, root: &Path) -> Result<Export, Stri
         Access::Ro => Export::open(root),
         Access::Rw => Export::open_writable(root),
     };
-    opened.map_err(|error| {
-        format!(
-            "exports[{index}]: cannot initialize path {:?} ({})",
-            config.path, error.code
-        )
-    })
+    let mut export = opened.map_err(|error| {
+        format!("exports[{index}]: cannot initialize path {:?} ({})", config.path, error.code)
+    })?;
+    export.webdav_locks = config.webdav_locks && export.writable();
+    Ok(export)
 }

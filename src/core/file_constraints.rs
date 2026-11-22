@@ -3,7 +3,8 @@ use super::error::Error;
 use axum::http::StatusCode;
 use std::{
     cell::RefCell,
-    sync::{Mutex, MutexGuard, OnceLock},
+    ops::Deref,
+    sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
     time::{Duration, Instant},
 };
 
@@ -37,12 +38,32 @@ struct Lease {
 }
 #[derive(Default)]
 pub(crate) struct Registry {
-    enabled: bool,
     unknown: bool,
     native: usize,
     leases: Vec<Lease>,
+    owners: super::gate_owner::Owners,
 }
-static REGISTRY: OnceLock<Mutex<Registry>> = OnceLock::new();
+pub(crate) struct Constraints(RwLock<Registry>);
+pub(crate) enum CommitGuard<'a> {
+    Read(RwLockReadGuard<'a, Registry>),
+    Write(RwLockWriteGuard<'a, Registry>),
+}
+impl Deref for CommitGuard<'_> {
+    type Target = Registry;
+    fn deref(&self) -> &Registry {
+        match self {
+            Self::Read(registry) => registry,
+            Self::Write(registry) => registry,
+        }
+    }
+}
+impl CommitGuard<'_> {
+    pub(crate) fn removed(&mut self, resource: &Resource) {
+        if let Self::Write(registry) = self {
+            registry.removed(resource);
+        }
+    }
+}
 thread_local! { static TOKENS: RefCell<(usize, Vec<String>, Vec<usize>)> = const { RefCell::new((usize::MAX, Vec::new(), Vec::new())) }; }
 pub(crate) fn credentials<T>(owner: usize, tokens: Vec<String>, work: impl FnOnce() -> T) -> T {
     credentials_for(owner, tokens, Vec::new(), work)
@@ -64,58 +85,69 @@ pub(crate) fn credentials_for<T>(
     let _reset = Reset(TOKENS.with(|slot| slot.replace((owner, tokens, scopes))));
     work()
 }
-pub(crate) fn registry() -> Result<MutexGuard<'static, Registry>, Error> {
-    let mut registry = REGISTRY
-        .get_or_init(Default::default)
-        .lock()
-        .map_err(|_| Error::internal())?;
-    registry.leases.retain(|lease| {
-        if lease.expires > Instant::now() { return true; }
-        super::events::emit(super::events::Level::Info,"file.lock.expired",serde_json::json!({"operation":"lock.expire","operationId":lease.operation,"stage":"lease","result":"success","code":"LOCK_EXPIRED","durationMs":0}));
-        false
-    });
-    Ok(registry)
-}
-pub(crate) fn enable() -> Result<(), Error> {
-    registry()?.enabled = true;
-    Ok(())
-}
-pub(crate) fn poison() {
-    if let Ok(mut registry) = registry() {
-        registry.unknown = true;
+impl Constraints {
+    pub(super) fn new(owners: super::gate_owner::Owners) -> Self {
+        Self(RwLock::new(Registry {
+            owners,
+            ..Registry::default()
+        }))
+    }
+    pub(crate) fn read(&self) -> Result<RwLockReadGuard<'_, Registry>, Error> {
+        self.0.read().map_err(|_| Error::internal())
+    }
+    pub(crate) fn write(&self) -> Result<RwLockWriteGuard<'_, Registry>, Error> {
+        let mut registry = self.0.write().map_err(|_| Error::internal())?;
+        registry.leases.retain(|lease| {
+            if lease.expires > Instant::now() { return true; }
+            super::events::emit(super::events::Level::Info,"file.lock.expired",serde_json::json!({"operation":"lock.expire","operationId":lease.operation,"stage":"lease","result":"success","code":"LOCK_EXPIRED","durationMs":0}));
+            false
+        });
+        Ok(registry)
+    }
+    pub(super) fn poison(&self) {
+        if let Ok(mut registry) = self.0.write() {
+            registry.unknown = true;
+        }
     }
 }
 pub(crate) fn locked() -> Error {
     Error::new(StatusCode::LOCKED, "FILE_LOCK_CONFLICT")
 }
 impl Registry {
-    pub(crate) fn enabled(&self) -> bool {
-        self.enabled
-    }
-    pub(crate) fn check(&self, resources: &[Resource]) -> Result<(), Error> {
-        if !self.enabled {
-            return Ok(());
-        }
+    fn check_known(&self) -> Result<(), Error> {
         if self.unknown {
             return Err(Error::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "FILE_EXECUTION_UNKNOWN",
             ));
         }
+        Ok(())
+    }
+    pub(crate) fn check_execution(&self, stage: &'static str, busy: Error) -> Result<(), Error> {
+        self.check_known()?;
         if self.native > 0 {
-            return Err(Error::busy());
+            super::events::emit(
+                super::events::Level::Warn,
+                "file.lock.execution_conflict",
+                serde_json::json!({"operation":"file.lock.admit","stage":stage,"result":"failure","code":busy.code,
+                    "outcome":"not-committed","durationMs":0,"owners":self.owners.fields()}),
+            );
+            return Err(busy);
         }
+        Ok(())
+    }
+    pub(crate) fn check(&self, resources: &[Resource]) -> Result<(), Error> {
         TOKENS.with(|slot| {
             let (owner, tokens, scopes) = &*slot.borrow();
             self.check_tokens(*owner, tokens, scopes, resources)?;
-            if self.leases.iter().any(|lease| {
+            if let Some(lease) = self.leases.iter().find(|lease| {
                 lease.expires > Instant::now()
                     && resources
                         .iter()
                         .any(|resource| resource.overlaps(&lease.resource))
                     && !(lease.owner == *owner && tokens.contains(&lease.token))
             }) {
-                return Err(locked());
+                return Err(lease.conflict("commit"));
             }
             Ok(())
         })
@@ -155,19 +187,13 @@ impl Registry {
         operation: String,
         url: String,
     ) -> Result<(), Error> {
-        if self.unknown {
-            return Err(Error::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "FILE_EXECUTION_UNKNOWN",
-            ));
-        }
-        if self.native > 0
-            || self
-                .leases
-                .iter()
-                .any(|lease| resource.overlaps(&lease.resource))
+        self.check_execution("lease", locked())?;
+        if let Some(lease) = self
+            .leases
+            .iter()
+            .find(|lease| resource.overlaps(&lease.resource))
         {
-            return Err(locked());
+            return Err(lease.conflict("lease"));
         }
         if self.leases.len() >= 4096 {
             return Err(Error::too_many("LOCK_LIMIT"));
@@ -235,7 +261,11 @@ impl Registry {
     ) -> Vec<(String, u64, String)> {
         self.leases
             .iter()
-            .filter(|lease| lease.owner == owner && lease.resource.overlaps(resource))
+            .filter(|lease| {
+                lease.expires > Instant::now()
+                    && lease.owner == owner
+                    && lease.resource.overlaps(resource)
+            })
             .map(|lease| {
                 (
                     lease.token.clone(),
@@ -257,30 +287,45 @@ impl Registry {
         })
     }
 }
-#[derive(Debug)]
-pub(crate) struct Native;
-pub(crate) fn native() -> Result<Native, Error> {
-    let mut registry = registry()?;
-    if registry.enabled && registry.unknown {
-        return Err(Error::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "FILE_EXECUTION_UNKNOWN",
-        ));
-    }
-    if registry.enabled && !registry.leases.is_empty() {
+impl Lease {
+    fn conflict(&self, stage: &'static str) -> Error {
         super::events::emit(
             super::events::Level::Warn,
-            "file.lock.native_rejected",
-            serde_json::json!({"operation":"execution.admit","stage":"lease","result":"failure","code":"FILE_LOCK_CONFLICT","blockerOperationId":registry.leases.first().map(|lease|&lease.operation),"lockCount":registry.leases.len(),"durationMs":0}),
+            "file.lock.overlap",
+            serde_json::json!({"operation":"file.lock.check","stage":stage,"result":"failure","code":"FILE_LOCK_CONFLICT",
+                "outcome":"not-committed","durationMs":0,"blockerOperationId":self.operation}),
         );
-        return Err(locked());
+        locked()
     }
-    registry.native += 1;
-    Ok(Native)
+}
+pub(super) struct Native(Arc<Constraints>);
+impl std::fmt::Debug for Native {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Native")
+    }
+}
+impl Native {
+    pub(super) fn acquire(constraints: &Arc<Constraints>) -> Result<Self, Error> {
+        let mut registry = constraints.write()?;
+        registry.check_known()?;
+        if let Some(lease) = registry.leases.first() {
+            super::events::emit(
+                super::events::Level::Warn,
+                "file.lock.native_rejected",
+                serde_json::json!({"operation":"execution.admit","stage":"lease","result":"failure","code":"FILE_LOCK_CONFLICT","outcome":"not-committed","blockerOperationId":lease.operation,"lockCount":registry.leases.len(),"durationMs":0}),
+            );
+            return Err(locked());
+        }
+        registry.native += 1;
+        Ok(Self(constraints.clone()))
+    }
+    pub(super) fn poison(&self) {
+        self.0.poison();
+    }
 }
 impl Drop for Native {
     fn drop(&mut self) {
-        if let Ok(mut registry) = registry() {
+        if let Ok(mut registry) = self.0 .0.write() {
             registry.native = registry.native.saturating_sub(1);
         }
     }
@@ -304,10 +349,7 @@ mod tests {
         }
     }
     fn registry_with(resource: Resource) -> Registry {
-        let mut registry = Registry {
-            enabled: true,
-            ..Default::default()
-        };
+        let mut registry = Registry::default();
         registry
             .lease(
                 resource,
@@ -354,10 +396,7 @@ mod tests {
     }
     #[test]
     fn stale_tokens_and_unknown_execution_never_authorize_a_commit() {
-        let mut registry = Registry {
-            enabled: true,
-            ..Default::default()
-        };
+        let mut registry = Registry::default();
         assert_eq!(
             credentials(1, vec!["stale".into()], || registry.check(&[file("a")]))
                 .unwrap_err()
@@ -365,11 +404,21 @@ mod tests {
             StatusCode::PRECONDITION_FAILED
         );
         registry.native = 1;
-        assert_eq!(registry.check(&[file("a")]).unwrap_err().code, "EBUSY");
+        assert!(registry.check(&[file("a")]).is_ok());
+        assert_eq!(
+            registry
+                .check_execution("commit", Error::busy())
+                .unwrap_err()
+                .code,
+            "EBUSY"
+        );
         registry.native = 0;
         registry.unknown = true;
         assert_eq!(
-            registry.check(&[file("a")]).unwrap_err().status,
+            registry
+                .check_execution("commit", Error::busy())
+                .unwrap_err()
+                .status,
             StatusCode::SERVICE_UNAVAILABLE
         );
     }

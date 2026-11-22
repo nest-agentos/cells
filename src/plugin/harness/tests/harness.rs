@@ -504,6 +504,7 @@ fn rejects_profiles_overlapping_exclusive_exports() {
         access: cells::config::Access::Rw,
         public: false,
         grants: vec![],
+        webdav_locks: false,
     });
     assert!(cells::harness::config::validate(&config).is_err());
     let mut duplicate: ProfileConfig = config.harnesses[0].clone();

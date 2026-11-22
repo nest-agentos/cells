@@ -77,6 +77,7 @@ impl Activities {
                 if current.completed.len() < LIMIT || current.completed.contains(turn) {
                     current.completed.insert(turn.into());
                 } else {
+                    current._permit.poison_constraints();
                     gate.poison();
                 }
                 None
