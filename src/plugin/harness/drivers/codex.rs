@@ -38,7 +38,7 @@ pub struct Codex {
     config: ProfileConfig,
     runtime: Option<Arc<crate::projects::runtime::ProjectRuntime>>,
     bridge: Mutex<Option<Arc<Bridge>>>,
-    pub(super) owned: Mutex<HashSet<String>>,
+    pub(super) owned: Arc<Mutex<HashSet<String>>>,
     closed: AtomicBool,
     created: std::time::Instant,
     usage: Arc<super::usage::Reader>,
@@ -51,7 +51,7 @@ impl Codex {
             config,
             runtime: None,
             bridge: Mutex::new(None),
-            owned: Mutex::new(HashSet::new()),
+            owned: Arc::new(Mutex::new(HashSet::new())),
             closed: AtomicBool::new(false),
             created: std::time::Instant::now(),
             usage: Arc::default(),
@@ -78,7 +78,7 @@ impl Codex {
             return Ok(bridge.clone());
         }
         let bridge = match &self.runtime {
-            Some(runtime) => Bridge::start_scoped(&self.config, Some(runtime.clone())).await?,
+            Some(runtime) => Bridge::start_scoped(&self.config, Some(runtime.clone()), Some(self.owned.clone())).await?,
             None => Bridge::start(&self.config).await?,
         };
         *slot = Some(bridge.clone());
@@ -525,14 +525,16 @@ impl Codex {
             .get(&id.to_string())
             .cloned()
             .ok_or_else(|| Error::not_found("ENOENT"))?;
-        self.require_owned(string(&request["params"], "threadId")?)
-            .await?;
+        let session = string(&request["params"], "threadId")?;
+        self.require_owned(session).await?;
         let response = args.get("response").ok_or_else(Error::invalid)?;
-        let result = match super::site_approval::decide(self.runtime.as_deref(), &request, response)? {
-            Some(reply) => reply,
-            None => native_response(&request, response)?,
-        };
-        bridge.respond(id.clone(), result).await?;
+        let revision = if response["decision"] == super::approval_policy::ALLOW_SESSION {
+            Some(super::approval_policy::grant_revision(&bridge.events.lock().unwrap(), &request)?)
+        } else { None };
+        let result = if revision.is_some() { json!({"decision":"accept"}) }
+            else if let Some(reply) = super::site_approval::decide(self.runtime.as_deref(), &request, response)? { reply }
+            else { native_response(&request, response)? };
+        bridge.respond_with_grant(id.clone(), result, revision.map(|revision| (session.into(), revision))).await?;
         bridge
             .events
             .lock()
@@ -588,6 +590,7 @@ impl Codex {
             .persistent_call("thread/archive", json!({"threadId":id}))
             .await?;
         self.owned.lock().await.remove(id);
+        bridge.events.lock().unwrap().approval_grants.remove(id);
         thread["archived"] = json!(true);
         Ok(thread)
     }

@@ -393,6 +393,10 @@ projects = true
 
 真实验收版本为 Claude Code 2.1.209。控制使用 [Agent SDK 流式输入](https://code.claude.com/docs/en/agent-sdk/streaming-vs-single-mode) 的 stream-json、initialize/control_request/control_response；每个受控会话独立子进程，最多 16 个。新建、恢复、文本/图片附件、中断、工具审批及 AskUserQuestion 转换为统一 harness 接口。使用 manual 权限模式和 stdio 审批通道；不跳过审批。turn 收到相同原生 user UUID 的 replay，或受控当前 turn 的原生 result 后确认回执；超时或断线结果未知，不自动重发。0.4.3 将 HTTP 的 25 秒观察预算与后台原生确认的生命周期分开：turn 的回执接收器持续归原共享 mutation worker 所有，迟到的确认仍能持久写入同一 requestId；独立 operation 查询可读取该事实。控制和管道写入仍有有界等待，取消不等待原提交回执，进程退出会释放等待并保留 unknown；不以管道写入、active 或助手块冒充原生接纳。诊断记录原操作、Session/turn、阶段、错误类别与耗时，不记录正文或凭据。客户端关闭只释放观察，不中断远端 turn；服务端关闭回收进程组和审批请求。
 
+在 NestOS 的远程项目设置中，可为 Codex、DSH、Claude 选择默认审批。缺省为询问。允许或拒绝在 Cells 收到原生工具审批时生效，站点连接和用户问答沿用各自的交互。Claude 可选择仅允许明确指定绝对路径的 `Read`、`Glob`、`Grep`。保存默认值使用独立版本，正在运行的会话可在下一个请求应用新规则。
+
+审批卡片的「本会话允许所有原生工具操作」作用于当前受控会话，项目规则变更或会话断开后失效。Claude 也可仅记住参数完全相同的读取请求。`/permissions` 可在执行期间查看默认规则、会话授权和待审批数量，`/permissions:reset` 可在空闲时撤销由 Cells 记住的会话授权。
+
 历史只读解析私有 home 的 `projects/*/*.jsonl`，按实际 cwd 核验项目归属，拒绝链接和越界，不修改原生索引。目录列表检查最多 2048 个目录名称、8192 个文件、16 MiB 元信息及 5 秒；历史每次读取 8 MiB 窗口，返回最多 100 项/2 MiB。真实用户 UUID 定义轮次，多条 assistant 消息保留该身份；工具只返回摘要。恢复使用[原生日志绝对路径](https://code.claude.com/docs/en/sessions)，兼容宿主 cwd 与项目沙箱虚拟 cwd 的差异；恢复前核验整份日志的身份及 cwd，日志上限 16 MiB，超限明确失败；历史读取与恢复验证共用 4 个 blocking 工作槽。搜索共用 100 条/16 MiB/15 秒预算及每会话 64 页上限。
 
 独立 CLI 历史可发现，状态为 notLoaded、owned=false；读取不获得控制权，显式 resume 才建立本服务的独立受控进程，不能接管外部正在运行的进程。Claude 当前未声明 fork/rename/archive/unarchive。新建空会话由原生子进程持有，首条消息写入前不保证重启后可发现；原生 JSONL 落盘可能稍晚于 result 事件，历史刷新会获取随后写入的记录。

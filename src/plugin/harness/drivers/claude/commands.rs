@@ -1,5 +1,6 @@
 //! SDK commands and explicit session controls; terminal navigation belongs to the host.
 use super::*;
+use super::super::approval_policy::{self, Driver};
 const MODES: &[&str] = &["manual", "plan", "acceptEdits", "dontAsk"];
 const NAVIGATION: &[&str] = &["clear", "reset", "new", "resume", "fork", "exit", "quit"];
 
@@ -25,13 +26,15 @@ pub(super) fn catalog(raw: &Value) -> Value {
         .unwrap()
         .clone();
     rows.retain(|row| {
-        !NAVIGATION.contains(&row["name"].as_str().unwrap_or("")) && row["name"] != "permissions"
+        !NAVIGATION.contains(&row["name"].as_str().unwrap_or("")) && row["name"] != "permissions" && row["name"] != "permissions:mode" && row["name"] != "permissions:reset"
     });
-    rows.truncate(249);
-    rows.push(json!({"name":"permissions","description":"View or change this session's tool permission mode",
-        "argumentHint":"[manual|plan|acceptEdits|dontAsk]","kind":"action",
+    rows.truncate(247);
+    rows.push(approval_policy::reset_command());
+    rows.push(json!({"name":"permissions:mode","description":"Change this session's tool permission mode",
+        "argumentHint":"[manual|plan|acceptEdits|dontAsk|reset-reads]","kind":"action",
         "argumentChoices":MODES.iter().map(|mode|json!({"value":mode,"label":mode})).collect::<Vec<_>>()}));
     for (name, description) in [
+        ("permissions", "Read this session's permission state"),
         ("session:models", "Read this session's model selection"),
         ("session:mcp", "Read MCP connection state"),
         ("session:context", "Read context window usage"),
@@ -94,7 +97,12 @@ impl Claude {
             return Err(Error::unsupported());
         }
         let input = super::super::commands::arguments(args)?;
-        if name == "permissions" {
+        if name == "permissions:reset" {
+            let result = super::super::commands::result(args, json!({"sessionGrant":false,"rememberedReadCount":0}))?;
+            process.clear_read_grants(true).await?;
+            return Ok(result);
+        }
+        if name == "permissions:mode" {
             return self.permissions(&process, args, input.trim()).await;
         }
         let mut turn = args.clone();
@@ -106,6 +114,14 @@ impl Claude {
         let value = match name {
             "status" | "session:status" => {
                 return super::super::commands::status(args, &self.session(id).await?)
+            }
+            "permissions" => {
+                let session = self.session(id).await?;
+                let mut status = approval_policy::status(&self.events.lock().unwrap(), Driver::Claude, id);
+                status["mode"] = session["permissionMode"].clone();
+                status["rememberedReadCount"] = session["rememberedReadCount"].clone();
+                status["reset"] = json!("/permissions:reset");
+                status
             }
             "session:models" => self.models(args).await?,
             "session:mcp" => {
@@ -159,7 +175,9 @@ impl Claude {
         if process.session.lock().unwrap()["status"] == "active" {
             return Err(Error::busy());
         }
-        if !mode.is_empty() {
+        if mode == "reset-reads" {
+            process.clear_read_grants(false).await?;
+        } else if !mode.is_empty() {
             if !MODES.contains(&mode) {
                 return Err(Error::invalid());
             }
@@ -173,7 +191,7 @@ impl Claude {
             .unwrap_or("manual")
             .to_owned();
         Ok(
-            json!({"commandId":args["requestId"],"output":format!("Permission mode: {current}\n/permissions [{}]\nSession only; project authorization still applies.", MODES.join(" | "))}),
+            json!({"commandId":args["requestId"],"output":format!("Permission mode: {current}\n/permissions:mode [{} | reset-reads]\nSession only; project authorization still applies.", MODES.join(" | "))}),
         )
     }
 }

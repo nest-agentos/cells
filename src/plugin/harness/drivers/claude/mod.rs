@@ -399,11 +399,20 @@ impl Claude {
             && !response
                 .get("decision")
                 .and_then(Value::as_str)
-                .is_some_and(|v| ["accept", "decline", "cancel"].contains(&v))
+                .is_some_and(|decision| request["params"]["decisions"].as_array()
+                    .is_some_and(|offered| offered.iter().any(|value| value.as_str() == Some(decision))))
         {
             return Err(Error::invalid());
         }
-        process.respond(request_id, args["response"].clone()).await
+        let mut response = args["response"].clone();
+        if response["decision"] == super::approval_policy::ALLOW_SESSION {
+            let revision = super::approval_policy::grant_revision(&self.events.lock().unwrap(), &request)?;
+            response["decision"] = json!("accept");
+            response["approvalGrantRevision"] = json!(revision);
+        } else if let Some(response) = response.as_object_mut() {
+            response.remove("approvalGrantRevision");
+        }
+        process.respond(request_id, response).await
     }
     async fn search(&self, args: &Value) -> Result<Value, Error> {
         let query = string(args, "query")?;

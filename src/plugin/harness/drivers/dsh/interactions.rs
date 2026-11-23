@@ -2,7 +2,7 @@
 use super::{transport::Client, Live};
 use crate::{
     core::error::Error,
-    harness::{events::Events, service::string},
+    harness::{approval_policy::{self, Driver}, events::Events, service::string},
 };
 use serde_json::{json, Value};
 use std::{
@@ -45,7 +45,7 @@ async fn handle(
     frame: Value,
 ) -> Result<(), Error> {
     match frame["type"].as_str() {
-        Some("waterfall") => waterfall(client, client_id, sessions, events, &frame)?,
+        Some("waterfall") => waterfall(client, client_id, sessions, events, &frame).await?,
         Some("cancel") => events.lock().unwrap().push(
             json!({"method":"serverRequest/resolved","params":{"requestId":frame["eventId"]}}),
         )?,
@@ -54,7 +54,7 @@ async fn handle(
     }
     Ok(())
 }
-fn waterfall(
+async fn waterfall(
     client: &Arc<Client>,
     client_id: &str,
     sessions: &Sessions,
@@ -71,10 +71,30 @@ fn waterfall(
     };
     let live = live.unwrap();
     let turn = live.cursor.lock().unwrap().turn.clone();
-    events.lock().unwrap().push(json!({"id":id,"method":method,"params":{"threadId":session,"turnId":turn,
-        "questions":frame["request"]["questions"],"reason":frame["request"]["displayReason"],"toolName":frame["request"]["toolName"],"decisions":["accept","decline"]},
+    let mut params = json!({"threadId":session,"turnId":turn,"questions":frame["request"]["questions"],
+        "reason":frame["request"]["displayReason"],"toolName":frame["request"]["toolName"],"decisions":["accept","decline"]});
+    let eligible = frame["event"] == "approval/request" && params["toolName"].as_str().is_some_and(approval_policy::native_tool);
+    if eligible {
+        let decision = {
+            let _approval = client.approval_admission.lock().await;
+            approval_policy::consider(&events.lock().unwrap(), Driver::Dsh, session, false)
+        };
+        if let Some(decision) = decision {
+            let started = std::time::Instant::now();
+            let result = client.call("$events/result", json!({"clientId":client_id,"eventId":id,
+                "outcome":approval_outcome(decision.allows())})).await;
+            approval_policy::record(&json!(id), decision, started, &result);
+            return Ok(());
+        }
+        approval_policy::offer_for_request(&events.lock().unwrap(), &mut params);
+    }
+    events.lock().unwrap().push(json!({"id":id,"method":method,"params":params,
         "dshClientId":client_id,"dshEvent":frame["event"]}))
 }
+fn approval_outcome(allow: bool) -> Value {
+    json!({"kind":"result","value":if allow {"allowed-once"} else {"rejected"}})
+}
+
 fn delegate(client: &Arc<Client>, client_id: &str, id: &str) -> Result<(), Error> {
     let client = client.clone();
     let args = json!({"clientId":client_id,"eventId":id,"outcome":{"kind":"next"}});
@@ -135,27 +155,33 @@ pub async fn respond(
     {
         return Err(Error::forbidden("EACCES"));
     }
-    let outcome = response(&request, &args["response"])?;
+    let _approval = if args["response"]["decision"] == approval_policy::ALLOW_SESSION {
+        Some(client.approval_admission.lock().await)
+    } else { None };
+    let revision = if _approval.is_some() {
+        Some(approval_policy::grant_revision(&events.lock().unwrap(), &request)?)
+    } else { None };
+    let outcome = if revision.is_some() { approval_outcome(true) } else { response(&request, &args["response"])? };
     client
         .call(
             "$events/result",
             json!({"clientId":request["dshClientId"],"eventId":id,"outcome":outcome}),
         )
         .await?;
-    events
-        .lock()
-        .unwrap()
-        .push(json!({"method":"serverRequest/resolved","params":{"requestId":id}}))?;
+    let mut events = events.lock().unwrap();
+    if let Some(revision) = revision {
+        events.approval_grants.insert(string(&request["params"], "threadId")?.into(), revision);
+    }
+    events.push(json!({"method":"serverRequest/resolved","params":{"requestId":id}}))?;
     Ok(json!({}))
 }
 fn response(request: &Value, response: &Value) -> Result<Value, Error> {
     if request["dshEvent"] == "approval/request" {
-        let value = match string(response, "decision")? {
-            "accept" => "allowed-once",
-            "decline" | "cancel" => "rejected",
-            _ => return Err(Error::invalid()),
+        return match string(response, "decision")? {
+            "accept" => Ok(approval_outcome(true)),
+            "decline" | "cancel" => Ok(approval_outcome(false)),
+            _ => Err(Error::invalid()),
         };
-        return Ok(json!({"kind":"result","value":value}));
     }
     let answers = response["answers"]
         .as_object()

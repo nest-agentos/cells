@@ -126,6 +126,19 @@ pub fn status(args: &Value, session: &Value) -> Result<Value, crate::core::error
     }
     result(args, value)
 }
+pub fn pending_approvals(events: &super::events::Events, session: &str) -> usize {
+    events.requests.values().filter(|request| {
+        if request["params"]["threadId"] != session {
+            return false;
+        }
+        match request["method"].as_str() {
+            Some("item/commandExecution/requestApproval" | "item/fileChange/requestApproval") => true,
+            Some("mcpServer/elicitation/request") => super::codex::is_mcp_tool_approval(&request["params"]),
+            _ => false,
+        }
+    }).count()
+}
+
 /// SDK aliases are executable names, not extra model prompts or UI actions.
 pub fn with_aliases(value: &Value) -> Value {
     let mut entries = Vec::new();

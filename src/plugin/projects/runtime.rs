@@ -190,6 +190,19 @@ impl ProjectRuntime {
             format!("{root}/{relative}")
         })
     }
+    pub(crate) fn approval_policy(&self) -> Result<(u64, super::execution::HarnessApprovals), Error> {
+        if self.project.access != "rw" { return Err(Error::forbidden("EROFS")); }
+        let state = self.state()?;
+        let service = state.services.require::<super::ProjectService>()?;
+        let project = service.get(self.identity, &self.project.id)?;
+        super::service::authorize(&state, self.identity, &project)?;
+        if project.access != "rw" || !state.auth.client(self.identity).may_write(&project.alias) {
+            return Err(Error::forbidden("EROFS"));
+        }
+        let settings = service.approval_settings(&project)?;
+        Ok((settings.revision, settings.defaults))
+    }
+
     pub fn state(&self) -> Result<Arc<State>, Error> {
         let state = self.state.upgrade().ok_or_else(Error::unavailable)?;
         let current = state

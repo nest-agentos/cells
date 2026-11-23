@@ -1,4 +1,4 @@
-use super::super::commands as descriptors;
+use super::super::{approval_policy::{self, Driver}, commands as descriptors};
 use super::*;
 use sha2::{Digest, Sha256};
 
@@ -36,6 +36,8 @@ fn base_commands() -> Vec<Value> {
         ),
         descriptors::query("mcp", "Read MCP server connection status"),
         descriptors::query("skills", "Read available skills"),
+        descriptors::query("permissions", "Read this session's approval state"),
+        approval_policy::reset_command(),
     ]
 }
 
@@ -103,6 +105,15 @@ impl Codex {
                     .unwrap_or(Value::Null);
                 return descriptors::status(args, &session).map(Some);
             }
+            "permissions" => {
+                let id = string(args, "sessionId")?;
+                let thread = self.summary(bridge, id).await?;
+                let owned = self.session(&thread)["owned"] == true;
+                let mut status = approval_policy::status(&bridge.events.lock().unwrap(), Driver::Codex, id);
+                status["scope"] = json!(if owned {"controlled"} else {"external"});
+                status["reset"] = json!("/permissions:reset");
+                status
+            }
             "models" => self.models(bridge, args).await?,
             "skills" => json!(self
                 .skills(bridge, args)
@@ -137,6 +148,9 @@ impl Codex {
         }
         let id = string(args, "sessionId")?;
         self.require_owned(id).await?;
+        if name == "permissions:reset" {
+            return approval_policy::reset(&mut bridge.events.lock().unwrap(), id, args);
+        }
         if self.summary(bridge, id).await?["status"]["type"] == "active" {
             return Err(Error::busy());
         }

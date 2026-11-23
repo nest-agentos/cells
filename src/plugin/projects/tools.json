@@ -425,6 +425,29 @@
     }
   },
   {
+    "name": "project_set_harness_approvals",
+    "description": "Configure project harness approval defaults using the approval policy revision",
+    "annotations": {"readOnlyHint": false, "openWorldHint": true},
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "projectId": {"type": "string"},
+        "revision": {"type": "integer", "minimum": 0},
+        "defaults": {
+          "type": "object",
+          "properties": {
+            "codex": {"enum": ["ask", "allowAll", "deny"]},
+            "dsh": {"enum": ["ask", "allowAll", "deny"]},
+            "claude": {"enum": ["ask", "allowRead", "allowAll", "deny"]}
+          },
+          "additionalProperties": false
+        }
+      },
+      "required": ["projectId", "revision", "defaults"],
+      "additionalProperties": false
+    }
+  },
+  {
     "name": "project_binding",
     "description": "Read owner-only project binding metadata for remount recovery; does not grant directory access.",
     "annotations": {

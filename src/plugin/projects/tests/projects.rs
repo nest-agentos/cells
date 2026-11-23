@@ -698,6 +698,106 @@ async fn execution_configuration_is_authorized_revision_checked_and_persistent()
 }
 
 #[tokio::test]
+async fn approval_defaults_have_an_independent_persistent_revision() {
+    let root = tempfile::tempdir().unwrap();
+    let config = deployment(root.path());
+    let state = State::from_config(&config).unwrap();
+    let first = register(&state, "group/existing", false).await;
+    let second = register(&state, "group/other", true).await;
+    let args = json!({"projectId":first["id"],"revision":0,
+        "defaults":{"claude":"allowRead","codex":"deny","dsh":"allowAll"}});
+    let saved = call(&state, 0, "project_set_harness_approvals", args.clone()).await.unwrap();
+    assert_eq!(saved["harnessApprovals"]["revision"], 1);
+    let stale = call(&state, 0, "project_set_harness_approvals", args).await.unwrap_err();
+    assert_eq!(stale.code, "HARNESS_APPROVAL_POLICY_CHANGED");
+    let project = call(&state, 0, "project_read", json!({"projectId":first["id"]})).await.unwrap();
+    assert_eq!(project["project"]["revision"], first["revision"]);
+    let other = call(&state, 0, "project_execution", json!({"projectId":second["id"]})).await.unwrap();
+    assert_eq!(other["harnessApprovals"]["defaults"], json!({"claude":"ask","codex":"ask","dsh":"ask"}));
+    drop(state);
+    let reopened = State::from_config(&config).unwrap();
+    let settings = call(&reopened, 0, "project_execution", json!({"projectId":first["id"]})).await.unwrap();
+    assert_eq!(settings["harnessApprovals"], saved["harnessApprovals"]);
+}
+
+#[tokio::test]
+async fn project_approval_policy_updates_a_live_claude_session() {
+    verify_live_harness_policy("claude", include_str!("../../harness/tests/fixtures/claude-sdk.py")).await;
+}
+
+#[tokio::test]
+async fn project_approval_policy_updates_a_live_codex_session() {
+    verify_live_harness_policy("codex", include_str!("../../harness/tests/fixtures/codex-app-server.py")).await;
+}
+
+async fn verify_live_harness_policy(driver: &str, script: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let mut config = deployment(root.path());
+    config.projects.as_mut().unwrap().isolation = cells::projects::model::Isolation::None;
+    let peer = root.path().join("harness-peer");
+    std::fs::write(&peer, script).unwrap();
+    std::fs::set_permissions(&peer, std::fs::Permissions::from_mode(0o700)).unwrap();
+    config.harnesses = vec![toml::from_str(&format!(
+        "id='{driver}'\nkind='{driver}'\ncommand={peer:?}\nhome={:?}\nprojects=true", root.path().join("codex")
+    )).unwrap()];
+    let state = State::from_config(&config).unwrap();
+    cells::process::enable(&state).await.unwrap();
+    let project = register(&state, "group/existing", false).await;
+    let harness = state.services.require::<cells::harness::Harnesses>().unwrap();
+    let base = json!({"projectId":project["id"],"revision":project["revision"],"profileId":driver,
+        "epoch":harness.profiles()["epoch"]});
+    let operation = |method, id, fields: Value| {
+        let mut args = base.clone();
+        args["requestId"] = json!(id);
+        args.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+        harness.project_call(&state, 0, method, args)
+    };
+    let created = operation("harness_create", "policy-create", json!({"workspaceId":project["id"]})).await.unwrap();
+    assert_eq!(created["outcome"], "committed", "{created}");
+    let session = &created["result"]["session"]["id"];
+    for (operation_id, prompt) in [("policy-first","approval-policy-allow"),
+        ("policy-repeat","approval-policy-allow"), ("policy-regrant","approval-policy-allow"),
+        ("policy-deny","approval-policy-deny")] {
+        if operation_id == "policy-regrant" {
+            let reset = operation("harness_command", "policy-reset", json!({"sessionId":session,
+                "command":"permissions:reset"})).await.unwrap();
+            assert_eq!(reset["outcome"], "committed", "{reset}");
+        }
+        if operation_id == "policy-deny" {
+            call(&state, 0, "project_set_harness_approvals", json!({"projectId":project["id"],"revision":0,
+                "defaults":{(driver):"deny"}})).await.unwrap();
+        }
+        let turn = operation("harness_turn", operation_id, json!({"sessionId":session,"prompt":prompt})).await.unwrap();
+        assert_eq!(turn["outcome"], "committed", "{turn}");
+        if matches!(operation_id, "policy-first" | "policy-regrant") {
+            for _ in 0..100 {
+                let query = operation("harness_query", "policy-query", json!({"sessionId":session,"command":"permissions"})).await.unwrap();
+                let output: Value = serde_json::from_str(query["output"].as_str().unwrap()).unwrap();
+                if output["pendingApprovals"] == 1 { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            let grant_id = if operation_id == "policy-first" { "grant-first" } else { "grant-again" };
+            let reply = operation("harness_respond", grant_id, json!({"nativeRequestId":"approval-request",
+                "response":{"decision":"allowAllForSession"}})).await.unwrap();
+            assert_eq!(reply["outcome"], "committed", "{reply}");
+        }
+        let mut completed = false;
+        for _ in 0..100 {
+            let info = operation("harness_session_info", "policy-read", json!({"sessionId":session})).await.unwrap();
+            if info["session"]["status"] == "idle" {
+                assert_eq!(info["session"]["lastTurnResult"], "completed");
+                completed = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(completed, "{operation_id} did not finish");
+    }
+    harness.close().await;
+}
+
+#[tokio::test]
 async fn native_isolation_uses_real_cwd_and_keeps_package_siblings_visible() {
     use std::os::unix::fs::PermissionsExt;
     let root=tempfile::tempdir().unwrap();let mut config=deployment(root.path());

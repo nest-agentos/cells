@@ -1,4 +1,5 @@
 //! Host harness profiles, separate from short-lived sandboxed shell commands.
+mod approval_policy;
 mod context_identity;
 mod execution_state;
 mod attachments;

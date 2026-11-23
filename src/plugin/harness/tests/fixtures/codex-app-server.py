@@ -9,6 +9,7 @@ import time
 threads = {}
 turn_count = 0
 awaiting_turn = None
+policy_approval = None
 
 def emit(value):
     print(json.dumps(value), flush=True)
@@ -20,6 +21,13 @@ for line in sys.stdin:
     if method == 'initialized':
         continue
     if method is None:
+        if policy_approval is not None:
+            thread_id, turn_id, expected = policy_approval
+            assert request['result']['decision'] == expected
+            threads[thread_id]['status'] = {'type': 'idle'}
+            threads[thread_id]['turns'].append({'id': turn_id, 'status': 'completed', 'items': []})
+            emit({'method': 'turn/completed', 'params': {'threadId': thread_id, 'turn': {'id': turn_id, 'status': 'completed'}}})
+            policy_approval = None
         if awaiting_turn is not None:
             emit(awaiting_turn)
             awaiting_turn = None
@@ -140,6 +148,11 @@ for line in sys.stdin:
             continue
         emit({'id': request['id'], 'result': result})
         emit({'method': 'turn/started', 'params': {'threadId': thread_id, 'turn': {'id': turn_id}}})
+        if prompt.startswith('approval-policy-'):
+            policy_approval = (thread_id, turn_id, 'accept' if prompt.endswith('-allow') else 'decline')
+            emit({'id': 'approval-request', 'method': 'item/commandExecution/requestApproval',
+                  'params': {'threadId': thread_id, 'turnId': turn_id, 'availableDecisions': ['accept', 'decline']}})
+            continue
         if params['input'][0].get('text') == 'fixture:metrics':
             emit({'method': 'thread/tokenUsage/updated', 'params': {'threadId': thread_id, 'turnId': turn_id, 'tokenUsage': {'last': {'totalTokens': 10000}, 'total': {'totalTokens': 900000}, 'modelContextWindow': 200000}}})
         emit({'method': 'item/agentMessage/delta', 'params': {'threadId': thread_id, 'turnId': turn_id, 'delta': '<script>output</script>'}})

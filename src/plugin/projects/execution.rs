@@ -10,6 +10,25 @@ pub struct ProjectEnvironment {
     #[serde(default)]
     pub variables: BTreeMap<String, String>,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum HarnessApproval { #[default] Ask, AllowRead, AllowAll, Deny }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HarnessApprovals {
+    #[serde(default)]
+    pub codex: HarnessApproval,
+    #[serde(default)]
+    pub dsh: HarnessApproval,
+    #[serde(default)]
+    pub claude: HarnessApproval,
+}
+#[derive(Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApprovalSettings {
+    pub revision: u64,
+    pub defaults: HarnessApprovals,
+}
 #[derive(Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionProfile {

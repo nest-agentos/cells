@@ -7,7 +7,7 @@ use crate::{
 use serde_json::{json, Value};
 use std::os::unix::process::CommandExt;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     process::Stdio,
     sync::{Arc, Mutex},
     time::Duration,
@@ -45,6 +45,8 @@ pub(super) struct Context {
     pub steering: HashMap<String, String>,
     pub pending: HashMap<String, Reply>,
     pub requests: HashMap<String, Value>,
+    pub read_grants: HashSet<[u8; 32]>,
+    pub automatic_replies: Vec<(Value, super::super::approval_policy::Decision)>,
     pub events: Arc<Mutex<Events>>,
     pub session: Arc<Mutex<Value>>,
     pub(super) items: Arc<Mutex<Vec<Value>>>,
@@ -70,6 +72,8 @@ impl Context {
             steering: HashMap::new(),
             pending: HashMap::new(),
             requests: HashMap::new(),
+            read_grants: HashSet::new(),
+            automatic_replies: Vec::new(),
             events,
             session,
             items,
@@ -138,6 +142,7 @@ impl Process {
         runtime: Option<Arc<ProjectRuntime>>,
     ) -> Result<Arc<Self>, Error> {
         session["permissionMode"] = json!("manual");
+        session["rememberedReadCount"] = json!(0);
         session["loaded"] = json!(true);
         let input = child.stdin.take().ok_or_else(Error::internal)?;
         let output = child.stdout.take().ok_or_else(Error::internal)?;
@@ -238,6 +243,9 @@ impl Process {
             None,
         )
         .await
+    }
+    pub async fn clear_read_grants(&self, all: bool) -> Result<Value, Error> {
+        self.send(json!({"type":"clear_read_grants","all":all}), None).await
     }
     async fn send(&self, message: Value, key: Option<String>) -> Result<Value, Error> {
         let receive = self.enqueue(message, key).await?;
@@ -393,11 +401,31 @@ async fn supervise(
         tokio::select! {
             _=stop.cancelled()=>break,
             command=receiver.recv()=>{let Some(command)=command else{break;};if send_until_stopped(command,&mut input,&mut context,&stop).await.is_err(){break;}},
-            read=output.read(&mut chunk)=>{let Ok(n)=read else{break;};if n==0 || consume(&chunk[..n],&mut line,&mut context).is_err(){break;}},
+            read=output.read(&mut chunk)=>{let Ok(n)=read else{break;};if n==0 || consume(&chunk[..n],&mut line,&mut context).is_err(){break;}
+                if flush_automatic_replies(&mut input, &mut context, &stop).await.is_err(){break;}},
         }
     }
     cleanup(&mut child, &mut context, &stop, runtime).await;
 }
+async fn flush_automatic_replies(
+    input: &mut ChildStdin, context: &mut Context, stop: &CancellationToken,
+) -> Result<(), Error> {
+    for (message, decision) in std::mem::take(&mut context.automatic_replies) {
+        let started = std::time::Instant::now();
+        let operation = &message["response"]["request_id"];
+        let mut bytes = serde_json::to_vec(&message).map_err(|_| Error::internal())?;
+        bytes.push(b'\n');
+        let result = tokio::select! {
+            _ = stop.cancelled() => Err(Error::cancelled()),
+            result = tokio::time::timeout(Duration::from_secs(25), input.write_all(&bytes)) =>
+                result.map_err(|_| Error::timed_out()).and_then(|result| result.map_err(|_| Error::unavailable())),
+        };
+        super::super::approval_policy::record(operation, decision, started, &result.map(|_| Value::Null));
+        result?;
+    }
+    Ok(())
+}
+
 async fn cleanup(
     child: &mut Child,
     context: &mut Context,
@@ -459,7 +487,26 @@ async fn send_command(
     context: &mut Context,
 ) -> Result<(), Error> {
     let mut message = command.message;
+    if message["type"] == "clear_read_grants" {
+        context.read_grants.clear();
+        if message["all"] == true { context.events.lock().unwrap().approval_grants.remove(&context.id); }
+        context.session.lock().unwrap()["rememberedReadCount"] = json!(0);
+        let _ = command.reply.send(Ok(json!({})));
+        return Ok(());
+    }
+    let mut read_grant = None;
+    let mut approval_revision = None;
     if message["type"] == "permission_reply" {
+        approval_revision = message["response"]["approvalGrantRevision"].as_u64();
+        if message["response"]["decision"] == "allowRepeatedRead" {
+            read_grant = message["request_id"].as_str().and_then(|id| context.requests.get(id))
+                .and_then(super::protocol::read_grant);
+        }
+        if read_grant.is_some() && context.read_grants.len() >= 256
+            && !read_grant.is_some_and(|grant| context.read_grants.contains(&grant)) {
+            let _ = command.reply.send(Err(Error::too_many("CLAUDE_READ_GRANT_LIMIT")));
+            return Ok(());
+        }
         message = match permission_reply(context, &message) {
             Ok(message) => message,
             Err(error) => {
@@ -497,6 +544,13 @@ async fn send_command(
         .write_all(&bytes)
         .await
         .map_err(|_| Error::unavailable())?;
+    if let Some(revision) = approval_revision {
+        context.events.lock().unwrap().approval_grants.insert(context.id.clone(), revision);
+    }
+    if let Some(grant) = read_grant {
+        context.read_grants.insert(grant);
+        context.session.lock().unwrap()["rememberedReadCount"] = json!(context.read_grants.len());
+    }
     if let Some(key) = command.key {
         context.pending.insert(key, command.reply);
     } else {
@@ -563,7 +617,8 @@ fn permission_reply(context: &mut Context, message: &Value) -> Result<Value, Err
     let decision = response["decision"].as_str().unwrap_or("");
     let result = if question {
         question_reply(&request["request"]["input"], response)?
-    } else if decision == "accept" {
+    } else if decision == "accept"
+        || (decision == "allowRepeatedRead" && super::protocol::read_grant(request).is_some()) {
         json!({"behavior":"allow","updatedInput":request["request"]["input"]})
     } else if decision == "decline" || decision == "cancel" {
         json!({"behavior":"deny","message":"Denied by user","interrupt":decision=="cancel"})

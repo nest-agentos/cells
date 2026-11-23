@@ -18,6 +18,8 @@ struct Image {
     server_id: String,
     projects: BTreeMap<String, Project>,
     #[serde(default)]
+    approval_settings: BTreeMap<String, super::execution::ApprovalSettings>,
+    #[serde(default)]
     retired_ids: Vec<String>,
     #[serde(default)]
     bindings: BTreeMap<String, super::directory_sync::model::Binding>,
@@ -174,6 +176,36 @@ impl Store {
             .cloned()
             .ok_or_else(|| Error::not_found("PROJECT_UNKNOWN"))
     }
+    pub fn approval_settings(&self, project: &Project) -> Result<super::execution::ApprovalSettings, Error> {
+        let image = self.image.lock().map_err(|_| Error::internal())?;
+        self.check_approval_project(&image, project)?;
+        Ok(image.approval_settings.get(&project.id).copied().unwrap_or_default())
+    }
+    pub fn set_approval_settings(&self, project: &Project, revision: u64,
+        defaults: super::execution::HarnessApprovals) -> Result<super::execution::ApprovalSettings, Error> {
+        let mut image = self.image.lock().map_err(|_| Error::internal())?;
+        self.check_approval_project(&image, project)?;
+        let current = image.approval_settings.get(&project.id).copied().unwrap_or_default();
+        if current.revision != revision {
+            return Err(Error::conflict("HARNESS_APPROVAL_POLICY_CHANGED"));
+        }
+        let revision = revision.checked_add(1).ok_or_else(Error::internal)?;
+        let settings = super::execution::ApprovalSettings { revision, defaults };
+        let mut next = image.clone();
+        next.approval_settings.insert(project.id.clone(), settings);
+        self.persist(&next)?;
+        *image = next;
+        Ok(settings)
+    }
+    fn check_approval_project(&self, image: &Image, project: &Project) -> Result<(), Error> {
+        if self.poisoned.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(Error::internal());
+        }
+        if !image.projects.get(&project.id).is_some_and(|current| current.owner == project.owner && current.revision == project.revision) {
+            return Err(Error::conflict("PROJECT_REVISION_CHANGED"));
+        }
+        Ok(())
+    }
     pub fn save(&self, project: Project, expected: Option<u64>) -> Result<Project, Error> {
         let mut image = self.image.lock().map_err(|_| Error::internal())?;
         if self.poisoned.load(std::sync::atomic::Ordering::Acquire) {
@@ -220,6 +252,7 @@ impl Store {
         }
         let mut next = image.clone();
         next.projects.remove(id);
+        next.approval_settings.remove(id);
         next.retired_ids.push(id.into());
         next.bindings.retain(|_, b| b.project_id != id);
         self.persist(&next)?;

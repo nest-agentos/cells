@@ -1,4 +1,5 @@
 use super::*;
+use super::super::approval_policy::{self, Driver};
 
 impl Dsh {
     pub(super) async fn query(
@@ -12,6 +13,14 @@ impl Dsh {
         match name {
             "status" | "session:status" => {
                 super::super::commands::status(args, &self.summary(client, id).await?)
+            }
+            "permissions" => {
+                self.summary(client, id).await?;
+                let owned = self.sessions.lock().unwrap().contains_key(id);
+                let mut status = approval_policy::status(&self.events.lock().unwrap(), Driver::Dsh, id);
+                status["scope"] = json!(if owned {"controlled"} else {"external"});
+                status["reset"] = json!("/permissions:reset");
+                super::super::commands::result(args, status)
             }
             "session:models" => {
                 super::super::commands::result(args, self.models(client, args).await?)
@@ -63,6 +72,11 @@ impl Dsh {
         super::super::commands::verify(args, descriptor)?;
         if descriptor["execution"] == "query" {
             return self.query(client, args).await;
+        }
+        if name == "permissions:reset" {
+            let id = string(args, "sessionId")?;
+            if !self.sessions.lock().unwrap().contains_key(id) { return Err(Error::forbidden("EACCES")); }
+            return approval_policy::reset(&mut self.events.lock().unwrap(), id, args);
         }
         if args.get("selection").is_some() {
             return Err(Error::unsupported());
@@ -132,7 +146,11 @@ fn query_commands(mut commands: Value) -> Value {
     commands
         .as_array_mut()
         .unwrap()
-        .retain(|row| row["name"] != "session:models");
+        .retain(|row| row["name"] != "session:models" && row["name"] != "permissions" && row["name"] != "permissions:reset");
+    let rows = commands.as_array_mut().unwrap();
+    rows.truncate(251);
+    rows.push(approval_policy::reset_command());
+    rows.push(super::super::commands::query("permissions", "Read this session's approval state"));
     commands
         .as_array_mut()
         .unwrap()

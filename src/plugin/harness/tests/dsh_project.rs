@@ -218,3 +218,69 @@ async fn managed_dsh_uses_the_project_launcher_and_readonly_mounts() {
         axum::http::StatusCode::FORBIDDEN
     );
 }
+
+#[tokio::test]
+async fn project_approval_policy_updates_a_live_dsh_session() {
+    let (root, previous) = support::fixture();
+    drop(previous);
+    let home = root.path().join("dsh-home");
+    std::fs::create_dir(&home).unwrap();
+    let command = root.path().join("dsh-peer");
+    let host = native::Host::new(&root.path().join("docs")).await;
+    std::fs::write(&command,
+        format!("#!/bin/sh\nprintf 'dsh web: {}?token=fixture\\n'\nexec sleep 60\n", host.url)).unwrap();
+    std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut config = support::config(root.path(), false);
+    config.execution = true;
+    config.exports[0].grants[0].execute = true;
+    config.projects.as_mut().unwrap().isolation = cells::projects::model::Isolation::None;
+    config.harnesses = vec![toml::from_str(&format!(
+        "id='dsh'\nkind='dsh'\nprincipal_id='alice'\nprojects=true\ncommand={command:?}\nhome={home:?}"
+    )).unwrap()];
+    let state = State::from_config(&config).unwrap();
+    cells::process::enable(&state).await.unwrap();
+    let who = state.auth.index("alice").unwrap();
+    let project = projects::call(&state, who, "project_register",
+        json!({"name":"DSH","alias":"docs","path":"","access":"rw"})).await.unwrap()["project"].clone();
+    let harness = state.services.require::<cells::harness::Harnesses>().unwrap();
+    let mut args = json!({"profileId":"dsh","projectId":project["id"],"revision":project["revision"],
+        "epoch":harness.profiles()["epoch"],"workspaceId":project["id"],"requestId":"create"});
+    let created = harness.project_call(&state, who, "harness_create", args.clone()).await.unwrap();
+    assert_eq!(created["outcome"], "committed", "{created}");
+    let session = &created["result"]["session"]["id"];
+    args["sessionId"] = session.clone();
+    args["command"] = json!("permissions");
+    for (request, expected) in [("first","allowed-once"),("repeat","allowed-once"),("deny","rejected")] {
+        if request == "deny" {
+            projects::call(&state, who, "project_set_harness_approvals", json!({
+                "projectId":project["id"],"revision":0,"defaults":{"dsh":"deny"}
+            })).await.unwrap();
+        }
+        host.event(json!({"type":"waterfall","event":"approval/request","eventId":request,
+            "agentId":session,"request":{"toolName":"shell","displayReason":"fixture"}}));
+        if request == "first" {
+            for _ in 0..100 {
+                let row = harness.project_call(&state, who, "harness_query", args.clone()).await.unwrap();
+                let value: Value = serde_json::from_str(row["output"].as_str().unwrap()).unwrap();
+                if value["pendingApprovals"] == 1 { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            let mut response = args.clone();
+            response["requestId"] = json!("grant");
+            response["nativeRequestId"] = json!(request);
+            response["response"] = json!({"decision":"allowAllForSession"});
+            let result = harness.project_call(&state, who, "harness_respond", response).await.unwrap();
+            assert_eq!(result["outcome"], "committed", "{result}");
+        }
+        let mut observed = None;
+        for _ in 0..100 {
+            observed = host.state.calls.lock().unwrap().iter()
+                .find(|call| call["method"] == "$events/result" && call["payload"]["args"]["eventId"] == request)
+                .map(|call| call["payload"]["args"]["outcome"]["value"].clone());
+            if observed.is_some() { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(observed, Some(json!(expected)));
+    }
+    harness.close().await;
+}

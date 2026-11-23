@@ -421,6 +421,9 @@ async fn native_command_catalog_and_dispatch_are_session_scoped_and_receipted() 
     assert_eq!(receipt["outcome"], "not-committed");
     let mut serial = query_args;
     serial["command"] = json!("permissions");
+    let permissions = service.call("harness_query", serial.clone()).await.unwrap();
+    assert_eq!(permissions["status"], "completed");
+    serial["command"] = json!("permissions:mode");
     assert!(service.call("harness_query", serial).await.is_err());
 
     let catalog = call(&service, "harness_commands", json!({"sessionId":id})).await;
@@ -1164,5 +1167,45 @@ async fn listing_reads_only_the_requested_metadata_window_after_sorting_file_tim
     )
     .await;
     assert_eq!(next["sessions"][0]["title"], "row-19");
+    service.close().await;
+}
+
+#[tokio::test]
+async fn remembered_read_matches_only_identical_input_in_the_live_session() {
+    let root = tempfile::tempdir().unwrap();
+    let service = fixture(root.path());
+    let created = mutate(&service, "harness_create", "read-create",
+        json!({"workspaceId":"workspace"})).await;
+    let id = &created["result"]["session"]["id"];
+    for (prompt, answer) in [
+        ("read-repeat-first", Some("allowRepeatedRead")),
+        ("read-repeat-same", None),
+        ("read-repeat-other", Some("decline")),
+    ] {
+        let turn = mutate(&service, "harness_turn", prompt,
+            json!({"sessionId":id,"prompt":prompt})).await;
+        assert_eq!(turn["outcome"], "committed");
+        if let Some(decision) = answer {
+            for _ in 0..100 {
+                let page = event_support::snapshot(&service, json!({"profileId":"claude"}))
+                    .await.unwrap();
+                if page["requests"][0]["id"] == "read-request" {
+                    assert!(page["requests"][0]["params"]["decisions"]
+                        .as_array().unwrap().contains(&json!(decision)));
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            let permissions = service.call("harness_query",
+                json!({"profileId":"claude","sessionId":id,"command":"permissions","requestId":"read-pending"}))
+                .await.unwrap();
+            let output: Value = serde_json::from_str(permissions["output"].as_str().unwrap()).unwrap();
+            assert_eq!(output["pendingApprovals"], 1);
+            let reply = mutate(&service, "harness_respond", &format!("reply-{prompt}"),
+                json!({"nativeRequestId":"read-request","response":{"decision":decision}})).await;
+            assert_eq!(reply["outcome"], "committed");
+        }
+        idle(&service, id).await;
+    }
     service.close().await;
 }

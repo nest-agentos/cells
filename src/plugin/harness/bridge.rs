@@ -26,10 +26,11 @@ struct Pending {
 }
 enum Command {
     Call(String, Value, Reply, Value),
-    Respond(Value, Value, Reply),
+    Respond(Value, Value, Option<(String, u64)>, Reply),
 }
 pub struct Bridge {
     sender: mpsc::Sender<Command>,
+    approval_sessions: Option<Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>>,
     pub events: Arc<Mutex<Events>>,
     pub source_paths: bool,
     stop: CancellationToken,
@@ -39,11 +40,12 @@ pub struct Bridge {
 
 impl Bridge {
     pub async fn start(config: &ProfileConfig) -> Result<Arc<Self>, Error> {
-        Self::start_scoped(config, None).await
+        Self::start_scoped(config, None, None).await
     }
     pub async fn start_scoped(
         config: &ProfileConfig,
         runtime: Option<Arc<crate::projects::runtime::ProjectRuntime>>,
+        approval_sessions: Option<Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>>,
     ) -> Result<Arc<Self>, Error> {
         let mut source_paths=true;
         let arguments=vec!["app-server".into(),"-c".into(),"thread_unload_delay_secs=0".into()];
@@ -101,6 +103,7 @@ impl Bridge {
         let bridge = Arc::new(Self {
             source_paths,
             sender,
+            approval_sessions,
             events: Arc::new(Mutex::new(Events::new())),
             stop: CancellationToken::new(),
             exited,
@@ -149,9 +152,25 @@ impl Bridge {
             .map_err(|_| Error::unavailable())?;
         receive.await.map_err(|_| Error::unavailable())?
     }
+    pub(super) fn owns_approval_session(&self, id: &str) -> bool {
+        self.approval_sessions.as_ref().and_then(|owned| owned.try_lock().ok()).is_some_and(|owned| owned.contains(id))
+    }
+    pub(super) fn reply_automatically(&self, id: &Value, response: Value, decision: super::approval_policy::Decision) -> bool {
+        let started = Instant::now();
+        let (send, receive) = oneshot::channel();
+        if self.sender.try_send(Command::Respond(id.clone(), response, None, send)).is_err() {
+            super::approval_policy::record(id, decision, started, &Err(Error::unavailable()));
+            return false;
+        }
+        let id = id.clone();
+        tokio::spawn(async move {
+            super::approval_policy::record(&id, decision, started, &await_reply(receive).await);
+        });
+        true
+    }
     pub(super) fn approve_registered_site(&self, id: &Value, session: &Value) -> bool {
         let (send, receive) = oneshot::channel();
-        if self.sender.try_send(Command::Respond(id.clone(), super::site_approval::reply(true), send)).is_err() {
+        if self.sender.try_send(Command::Respond(id.clone(), super::site_approval::reply(true), None, send)).is_err() {
             return false;
         }
         let (id, session) = (id.clone(), session.clone());
@@ -167,9 +186,12 @@ impl Bridge {
     }
 
     pub async fn respond(&self, id: Value, result: Value) -> Result<Value, Error> {
+        self.respond_with_grant(id, result, None).await
+    }
+    pub async fn respond_with_grant(&self, id: Value, result: Value, grant: Option<(String, u64)>) -> Result<Value, Error> {
         let (send, receive) = oneshot::channel();
         self.sender
-            .try_send(Command::Respond(id, result, send))
+            .try_send(Command::Respond(id, result, grant, send))
             .map_err(|_| Error::unavailable())?;
         await_reply(receive).await
     }
@@ -283,7 +305,7 @@ async fn pump(
     events: &Mutex<Events>,
     stop: &CancellationToken,
 ) -> &'static str {
-    let writer = send_commands(input, receiver, pending);
+    let writer = send_commands(input, receiver, pending, events);
     tokio::pin!(writer);
     let mut line = Vec::new();
     let mut chunk = [0u8; 8192];
@@ -304,12 +326,13 @@ async fn send_commands(
     mut input: impl AsyncWrite + Unpin,
     mut receiver: mpsc::Receiver<Command>,
     pending: &PendingCalls,
+    events: &Mutex<Events>,
 ) -> &'static str {
     let mut next = 0u64;
     while let Some(command) = receiver.recv().await {
         let sent = tokio::time::timeout(
             Duration::from_secs(25),
-            send_command(command, &mut input, pending, &mut next),
+            send_command(command, &mut input, pending, &mut next, events),
         )
         .await;
         match sent {
@@ -347,6 +370,7 @@ async fn send_command(
     input: &mut (impl AsyncWrite + Unpin),
     pending: &PendingCalls,
     next: &mut u64,
+    events: &Mutex<Events>,
 ) -> Result<(), Error> {
     match command {
         Command::Call(method, params, reply, mut context) => {
@@ -357,13 +381,18 @@ async fn send_command(
                 write(input, &message).await?;
             }
         }
-        Command::Respond(id, result, reply) => {
+        Command::Respond(id, result, grant, reply) => {
             let message = if id.is_null() {
                 result
             } else {
                 json!({"id":id,"result":result})
             };
             let result = write(input, &message).await;
+            if result.is_ok() {
+                if let Some((session, revision)) = grant {
+                    events.lock().unwrap().approval_grants.insert(session, revision);
+                }
+            }
             let _ = reply.send(result.map(|_| json!({})));
             result?;
         }
@@ -514,6 +543,7 @@ mod diagnostic_tests {
             &mut tokio::io::sink(),
             &pending,
             &mut next,
+            &Mutex::new(Events::new()),
         )
         .await
         .unwrap();

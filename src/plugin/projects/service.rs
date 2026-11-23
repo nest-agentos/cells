@@ -198,6 +198,22 @@ impl ProjectService {
             Err(error) => Err(error),
         }
     }
+    pub(crate) fn approval_settings(&self, project: &Project) -> Result<super::execution::ApprovalSettings, Error> {
+        self.store.approval_settings(project)
+    }
+    pub fn set_approval_settings(&self, state: &State, identity: usize, id: &str, revision: u64,
+        defaults: super::execution::HarnessApprovals) -> Result<super::execution::ApprovalSettings, Error> {
+        use super::execution::HarnessApproval;
+        if defaults.codex == HarnessApproval::AllowRead || defaults.dsh == HarnessApproval::AllowRead {
+            return Err(Error::unsupported());
+        }
+        let project = self.get(identity, id)?;
+        authorize(state, identity, &project)?;
+        if project.access != "rw" || !state.auth.client(identity).may_write(&project.alias) {
+            return Err(Error::forbidden("EROFS"));
+        }
+        self.store.set_approval_settings(&project, revision, defaults)
+    }
     pub fn set_environment(&self, state: &State, identity: usize, id: &str, revision: u64,
         environment: super::execution::ProjectEnvironment) -> Result<Project, Error> {
         let mut project = self.get(identity, id)?;

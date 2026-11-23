@@ -16,6 +16,7 @@ pub struct Events {
     bytes: usize,
     entries: VecDeque<(u64, Value, usize, i64)>,
     pub requests: HashMap<String, Value>,
+    pub(super) approval_grants: HashMap<String, u64>,
     active: std::collections::HashSet<String>,
     last_activity: std::time::Instant,
 }
@@ -35,13 +36,15 @@ impl Events {
             bytes: 0,
             entries: VecDeque::new(),
             requests: HashMap::new(),
+            approval_grants: HashMap::new(),
             active: std::collections::HashSet::new(),
             last_activity: std::time::Instant::now(),
         }
     }
     pub fn push(&mut self, mut message: Value) -> Result<(), Error> {
         if let (Some(runtime), Some(bridge)) = (&self.runtime, self.site_bridge.upgrade()) {
-            if super::site_approval::present(runtime, &bridge, &mut message) { return Ok(()); }
+            if super::site_approval::present(runtime, &bridge, &mut message)
+                || super::approval_policy::codex_request(self, &bridge, &mut message) { return Ok(()); }
         }
         let observed_at = chrono::Utc::now().timestamp_millis();
         super::presentation::stamp_event(&mut message, observed_at);
@@ -109,6 +112,7 @@ impl Events {
                 }
                 Some("turn/completed" | "harness/disconnected") => {
                     self.active.remove(id);
+                    if message["method"] == "harness/disconnected" { self.approval_grants.remove(id); }
                 }
                 Some("thread/status/changed") => {
                     if message["params"]["status"]["type"] == "active" {

@@ -261,9 +261,23 @@ fn complete(context: &mut Context, frame: &Value) -> Result<(), Error> {
 fn resolve(context: &mut Context, id: &Value) -> Result<(), Error> {
     if let Some(id) = id.as_str() {
         context.requests.remove(id);
+        context.automatic_replies.retain(|(reply, _)| reply["response"]["request_id"] != id);
     }
     push(context, "serverRequest/resolved", json!({"requestId":id}))
 }
+pub(super) fn read_grant(frame: &Value) -> Option<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+    let request = &frame["request"];
+    if request["subtype"] != "can_use_tool"
+        || !matches!(request["tool_name"].as_str(), Some("Read" | "Glob" | "Grep"))
+        || !request["input"][if request["tool_name"] == "Read" { "file_path" } else { "path" }]
+            .as_str().is_some_and(|path| std::path::Path::new(path).is_absolute())
+    {
+        return None;
+    }
+    Some(Sha256::digest(json!([request["tool_name"], request["input"]]).to_string()).into())
+}
+
 fn permission(context: &mut Context, frame: Value) -> Result<(), Error> {
     if frame["request"]["subtype"] != "can_use_tool" {
         return Err(Error::unsupported());
@@ -275,6 +289,25 @@ fn permission(context: &mut Context, frame: Value) -> Result<(), Error> {
     let request = &frame["request"];
     let tool = request["tool_name"].as_str().unwrap_or("");
     let input = tool == "AskUserQuestion";
+    use super::super::approval_policy::{self, Decision, Driver};
+    let grant = read_grant(&frame);
+    let eligible = approval_policy::native_tool(tool);
+    let mut events = context.events.lock().unwrap();
+    let decision = eligible.then(|| approval_policy::consider(&events, Driver::Claude, &context.id, grant.is_some())).flatten()
+        .or_else(|| grant.filter(|grant| context.read_grants.contains(grant)).map(|_| Decision::RepeatedRead));
+    if let Some(decision) = decision {
+        let response = if decision.allows() { json!({"behavior":"allow","updatedInput":request["input"]}) }
+            else { json!({"behavior":"deny","message":"Denied by project policy","interrupt":false}) };
+
+        context.automatic_replies.push((json!({"type":"control_response","response":{
+            "subtype":"success","request_id":id,"response":response}}), decision));
+        return Ok(());
+    }
+    let decisions = if grant.is_some() && context.read_grants.len() < 256 {
+        json!(["accept","allowRepeatedRead","decline","cancel"])
+    } else {
+        json!(["accept","decline","cancel"])
+    };
     let questions=request["input"]["questions"].as_array().map(|qs|qs.iter().enumerate().map(|(i,q)|json!({"id":i.to_string(),"question":q["question"],"header":q["header"],"multiSelect":q["multiSelect"].as_bool().unwrap_or(false),"isOther":true,"options":q["options"]})).collect::<Vec<_>>());
     let method = if input {
         "item/tool/requestUserInput"
@@ -283,7 +316,10 @@ fn permission(context: &mut Context, frame: Value) -> Result<(), Error> {
     } else {
         "item/commandExecution/requestApproval"
     };
-    context.events.lock().unwrap().push(json!({"id":id,"method":method,"params":{"threadId":context.id,"turnId":context.turn,"toolName":tool,"command":request["input"]["command"],"path":request["input"]["file_path"],"questions":questions,"decisions":["accept","decline","cancel"]}}))?;
+    let mut params = json!({"threadId":context.id,"turnId":context.turn,"toolName":tool,
+        "command":request["input"]["command"],"path":request["input"]["file_path"],"questions":questions,"decisions":decisions});
+    if eligible { approval_policy::offer_for_request(&events, &mut params); }
+    events.push(json!({"id":id,"method":method,"params":params}))?;
     context.requests.insert(id, frame);
     Ok(())
 }

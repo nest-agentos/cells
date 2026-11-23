@@ -12,6 +12,7 @@ deferred_user=None
 model=None
 effort=None
 metrics_mode=False
+expected_approval=None
 
 def emit(value):
  print(json.dumps(value),flush=True)
@@ -58,7 +59,12 @@ for line in sys.stdin:
   if 'question' in text:
    pending='question-request'
    emit({'type':'control_request','request_id':pending,'request':{'subtype':'can_use_tool','tool_name':'AskUserQuestion','input':{'questions':[{'question':'Which option?','options':[{'label':'A'},{'label':'B'}]}]}}})
+  elif text.startswith('read-repeat'):
+   pending='read-request'
+   path='other.txt' if text=='read-repeat-other' else 'same.txt'
+   emit({'type':'control_request','request_id':pending,'request':{'subtype':'can_use_tool','tool_name':'Read','input':{'file_path':os.path.join(cwd,path)}}})
   elif 'approval' in text:
+   expected_approval=text.removeprefix('approval-policy-') if text.startswith('approval-policy-') else None
    pending='approval-request'
    emit({'type':'control_request','request_id':pending,'request':{'subtype':'can_use_tool','tool_name':'Bash','input':{'command':'printf fixture'}}})
   elif 'wait' not in text:
@@ -72,4 +78,6 @@ for line in sys.stdin:
  elif value['type']=='control_response':
   assert value['response']['request_id']==pending
   assert value['response']['response']['behavior'] in ['allow','deny']
+  if pending=='approval-request' and expected_approval:
+   assert value['response']['response']['behavior']==expected_approval
   finish()

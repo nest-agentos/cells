@@ -36,6 +36,7 @@ pub struct Client {
     listeners: Listeners,
     pub stop: CancellationToken,
     requests: tokio::sync::Semaphore,
+    pub(super) approval_admission: tokio::sync::Mutex<()>,
 }
 pub struct Subscription {
     id: String,
@@ -80,6 +81,7 @@ impl Client {
             listeners: Arc::default(),
             stop,
             requests: tokio::sync::Semaphore::new(128),
+            approval_admission: Default::default(),
         });
         spawn_mux(
             websocket,

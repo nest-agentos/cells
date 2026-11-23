@@ -73,7 +73,7 @@ pub async fn call(
             let profiles: Vec<_> = service.execution_profiles.iter()
                 .filter(|p| p.principals.contains(&project.owner))
                 .map(|p| json!({"id":p.id,"name":p.name,"user":p.user})).collect();
-            Ok(json!({"execution":project.execution,"profiles":profiles}))
+            Ok(json!({"execution":project.execution,"profiles":profiles,"harnessApprovals":service.approval_settings(&project)?}))
         }
         "project_set_execution" => {
             let started = std::time::Instant::now();
@@ -88,6 +88,18 @@ pub async fn call(
             let project = result?;
             if let Some(harness) = state.services.get::<crate::harness::Harnesses>() { harness.close_project(id).await; }
             Ok(json!({"project":super::descriptor::project(state,identity,&project)?}))
+        }
+        "project_set_harness_approvals" => {
+            let started = std::time::Instant::now();
+            let id = text(&args, "projectId")?;
+            let revision = args["revision"].as_u64().ok_or_else(Error::invalid)?;
+            let defaults = serde_json::from_value(args["defaults"].clone()).map_err(|_| Error::invalid())?;
+            let result = service.set_approval_settings(state, identity, id, revision, defaults);
+            crate::core::events::emit(crate::core::events::Level::Info, "project.harness.approvals.configure",
+                json!({"operation":"project.harness.approvals.configure","projectId":id,"operationId":format!("{id}:{revision}"),
+                    "stage":"persist","result":if result.is_ok(){"success"}else{"failure"},
+                    "code":result.as_ref().err().map(|error|error.code),"durationMs":started.elapsed().as_millis()}));
+            Ok(json!({"harnessApprovals":result?}))
         }
         "project_list" => Ok(
             json!({"projects":service.list(identity)?.iter().filter_map(|p| super::descriptor::project(state, identity, p).ok()).collect::<Vec<_>>()}),
