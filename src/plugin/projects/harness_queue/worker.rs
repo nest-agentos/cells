@@ -203,7 +203,7 @@ async fn advance_item(
         ["session"]
         .clone();
     if item["state"] != "pending" {
-        return reconcile(state, identity, binding, &item, &session).await;
+        return reconcile(state, identity, binding, &item, &session, &record["instructionQueue"]).await;
     }
     if record["instructionQueue"]["paused"] == true {
         return Ok(());
@@ -555,6 +555,7 @@ async fn reconcile(
     binding: &Binding,
     item: &Value,
     session: &Value,
+    queue: &Value,
 ) -> Result<(), Error> {
     if item["preparation"] == "resume" && !item["receipt"].is_object() {
         return reconcile_preparation(state, identity, binding, item).await;
@@ -646,7 +647,7 @@ async fn reconcile(
             return Ok(());
         }
     } else if item["receipt"]["commandStatus"] != "completed" {
-        return Ok(());
+        return settle_legacy_command(state, binding, item, queue).await;
     }
     let failed =
         result.as_deref().is_some_and(|r| r != "completed") || item["receipt"]["failed"] == true;
@@ -658,6 +659,59 @@ async fn reconcile(
         Ok(())
     })
     .await
+}
+
+/// Before explicit command status, synchronous results returned a command ID and output.
+fn legacy_completed_command(queue: &Value, item: &Value) -> Option<usize> {
+    let receipt = &item["receipt"];
+    let id = receipt["commandId"].as_str()?;
+    if item["commandKind"] != "action"
+        || item["state"] != "dispatching"
+        || item["queueEpoch"].as_str().is_none()
+        || !receipt["turnId"].is_null()
+        || !receipt["commandStatus"].is_null()
+        || !receipt["resultError"].is_null()
+    {
+        return None;
+    }
+    queue["commandResults"].as_array()?.iter().position(|row| {
+        row["commandId"] == id
+            && row["operationId"] == attempt(item)
+            && row["operationEpoch"] == item["queueEpoch"]
+            && row["turnId"].is_null()
+            && row["status"].is_null()
+            && row["resultError"].is_null()
+            && row["output"].as_str().is_some_and(|output| !output.is_empty())
+    })
+}
+
+async fn settle_legacy_command(
+    state: &Arc<State>,
+    binding: &Binding,
+    item: &Value,
+    queue: &Value,
+) -> Result<(), Error> {
+    if legacy_completed_command(queue, item).is_none() {
+        return Ok(());
+    }
+    let started = std::time::Instant::now();
+    let result = update(state, binding, item, |queue, index| {
+        let current = &queue["items"][index];
+        let command = legacy_completed_command(queue, current)
+            .ok_or_else(|| Error::conflict("HARNESS_QUEUE_ATTEMPT_CHANGED"))?;
+        let failed = current["receipt"]["failed"] == true
+            || queue["commandResults"][command]["failed"] == true;
+        queue["commandResults"][command]["status"] = json!("completed");
+        queue["items"].as_array_mut().unwrap().remove(index);
+        if failed {
+            queue["paused"] = json!(true);
+        }
+        Ok(())
+    }).await;
+    crate::core::events::emit(crate::core::events::Level::Info, "harness.queue.reconcile",
+        json!({"operation":"harness.queue","operationId":attempt(item),"sessionId":binding.session_id,"stage":"legacy_command_receipt",
+            "result":if result.is_ok() {"success"} else {"failure"},"code":result.as_ref().err().map(|e|e.code),"durationMs":started.elapsed().as_millis()}));
+    result
 }
 async fn reconcile_result(
     state: &Arc<State>,
@@ -765,7 +819,7 @@ async fn supplement(
         .as_array()
         .ok_or_else(Error::invalid)?;
     if let Some(existing) = items.iter().find(|r| !r["steerTurnId"].is_null()) {
-        return Box::pin(reconcile(state, identity, binding, existing, session)).await;
+        return Box::pin(reconcile(state, identity, binding, existing, session, &record["instructionQueue"])).await;
     }
     let Some(index) = items.iter().position(|r| r["state"] == "pending") else {
         return Ok(());
@@ -844,4 +898,23 @@ async fn observe(state: &Arc<State>, binding: &Binding, frame: &Value) -> Result
         .await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reconciles_legacy_output_only_for_the_original_synchronous_command() {
+        let item = json!({"id":"input","attemptId":"attempt","queueEpoch":"epoch",
+            "state":"dispatching","commandKind":"action","receipt":{"commandId":"command"}});
+        let result = json!({"commandId":"command","operationEpoch":"epoch","operationId":"attempt","output":"completed output"});
+        assert_eq!(legacy_completed_command(&json!({"commandResults":[result]}), &item), Some(0));
+        for (key, value) in [("operationId",json!("different")), ("operationEpoch",json!("changed")),
+            ("status",json!("running")), ("output",json!("")), ("turnId",json!("turn"))] {
+            let mut changed = result.clone();
+            changed[key] = value;
+            assert_eq!(legacy_completed_command(&json!({"commandResults":[changed]}), &item), None);
+        }
+    }
 }

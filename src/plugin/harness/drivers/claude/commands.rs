@@ -191,7 +191,7 @@ impl Claude {
             .unwrap_or("manual")
             .to_owned();
         Ok(
-            json!({"commandId":args["requestId"],"output":format!("Permission mode: {current}\n/permissions:mode [{} | reset-reads]\nSession only; project authorization still applies.", MODES.join(" | "))}),
+            json!({"commandId":args["requestId"],"status":"completed","output":format!("Permission mode: {current}\n/permissions:mode [{} | reset-reads]\nSession only; project authorization still applies.", MODES.join(" | "))}),
         )
     }
 }

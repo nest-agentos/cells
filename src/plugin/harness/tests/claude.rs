@@ -425,6 +425,10 @@ async fn native_command_catalog_and_dispatch_are_session_scoped_and_receipted() 
     assert_eq!(permissions["status"], "completed");
     serial["command"] = json!("permissions:mode");
     assert!(service.call("harness_query", serial).await.is_err());
+    let mode = mutate(&service, "harness_command", "mode-once",
+        json!({"sessionId":id,"command":"permissions:mode","arguments":""})).await;
+    assert_eq!(mode["outcome"], "committed");
+    assert_eq!(mode["result"]["status"], "completed");
 
     let catalog = call(&service, "harness_commands", json!({"sessionId":id})).await;
     let rows = catalog["commands"].as_array().unwrap();
