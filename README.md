@@ -167,7 +167,7 @@ NestOS 项目右键菜单选择“启用远程命令”后，File Tools 和 Bash
 
 顶层 `log_level = "info"` 为默认值，可设 `trace/debug/info/warn/error/off`。服务事件同时输出到 stderr 和配置文件所在目录下的 `logs/cells-<启动时间>-<PID>.jsonl`；启动终端打印绝对日志路径，`server.ready` 也记录版本和路径。以配置路径示例 `tools/<config>.toml` 启动时，默认目录为 `tools/logs/`。启动提示和 API Key 等终端文本不复制到文件，文件只接收结构化事件。
 
-默认单文件 10 MiB，按完整记录轮转为 `.jsonl.1` 至 `.jsonl.4`，每次启动最多保留 5 份（包含当前文件）；旧启动的日志保留供排查，不自动删除。单条记录不截断，可能独自超过大小阈值。日志文件权限为 `0600`，新建目录为 `0700`。事件直接写入文件，不逐条 `fsync`；日志初始化失败时启动报错，运行中写入失败则提示终端并继续 stderr 日志，不中断任务。
+默认单文件 10 MiB，按完整记录轮转为 `.jsonl.1` 至 `.jsonl.4`，每次启动最多保留 5 份（包含当前文件）。同一日志目录跨重启默认共用 128 MiB 预算。启动和轮转时按最后修改时间淘汰最旧的已关闭日志，每个写入进程预留一个日志文件的空间。共享目录的实例须使用相同的大小限制。超单文件上限的记录完整写入 stderr。日志文件权限为 `0600`，新建目录为 `0700`。事件直接写入文件，不逐条 `fsync`；日志初始化失败时启动报错，运行中写入失败则提示终端并继续 stderr 日志。
 
 文件批量元数据失败记录 `files.stat.failed`，阶段区分 `authorize-path`、`prepare-source` 和 `source-stat`，包含数量、状态、错误码及耗时；插件路径策略失败另记 `files.authorization.failed` 的插件 ID。未分类系统 I/O 错误通过 `storage.io.failed` 保留 errno、错误类别和源码位置，沿用请求追踪。以上记录不包含实际文件路径、请求参数或原始异常正文，不能据 HTTP 500 单独推断网络故障。
 
@@ -178,6 +178,7 @@ NestOS 项目右键菜单选择“启用远程命令”后，File Tools 和 Bash
 directory = "logs"
 max_file_bytes = 10485760
 retained_files = 5
+max_total_bytes = 134217728
 ```
 
 事件使用 JSON 行；每行首先输出带毫秒和 `Z` 的 UTC `time`，再输出 level、event、fields，末尾保留 Unix 毫秒 `timeMs` 供程序处理。例如 `{"time":"2026-10-08T05:44:42.034Z","level":"info","event":"server.ready","fields":{"address":"127.0.0.1:8787"},"timeMs":1791438282034}`。日志时间固定为 UTC，与运行机器的本地时区无关；浏览器按本地时区转换并显示实际 UTC 偏移。sync.diagnostics 是每分钟的调试性能汇总，仅在 debug/trace 下输出；普通运行保持 info 即可。

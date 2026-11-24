@@ -60,6 +60,18 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", cells::cli::HELP);
         return Ok(());
     }
+    if let [flag, path] = args.as_slice() {
+        if flag == "--check-config" {
+            if path == "-" {
+                let text = std::io::read_to_string(std::io::stdin().lock())
+                    .map_err(|_| "CELLS_CONFIG_INVALID")?;
+                toml::from_str::<cells::config::Config>(&text).map_err(|_| "CELLS_CONFIG_INVALID")?;
+            } else {
+                launch::load(std::path::Path::new(path)).map_err(|_| "CELLS_CONFIG_INVALID")?;
+            }
+            return Ok(());
+        }
+    }
     eprintln!("cells {}", env!("CARGO_PKG_VERSION"));
     if args.first().is_some_and(|arg| arg == "plugins") {
         return cells::cli::plugins(&args[1..]).map_err(Into::into);

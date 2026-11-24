@@ -108,6 +108,9 @@
         "sessionId": {
           "type": "string"
         },
+        "includeUsage": {
+          "type": "boolean"
+        },
         "toolDetail": {
           "enum": [
             "summary"

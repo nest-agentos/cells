@@ -7,7 +7,7 @@ listen = "127.0.0.1:8787"
 log_level = "info"
 # Structured events also go to <config directory>/logs/cells-<time>-<PID>.jsonl.
 # Optional [logging] table: directory = "logs", max_file_bytes = 10485760,
-# retained_files = 5 (current file plus four rotated segments per startup).
+# retained_files = 5, max_total_bytes = 134217728 (128 MiB across startups).
 # Browser origins allowed to read responses: Web dev (3000) and Tauri dev (1420).
 # "tauri://localhost" / "http://tauri.localhost" cover packaged Tauri builds;
 # ["*"] allows every origin (trusted, local-only setups); [] blocks all browsers.

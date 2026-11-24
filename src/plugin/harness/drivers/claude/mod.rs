@@ -168,7 +168,7 @@ impl Claude {
             let items = self.live_items(id).await;
             json!({"session":session,"turns":[{"id":null,"items":items}],"nextCursor":null})
         };
-        if !args["cursor"].is_string() && args["digestProjection"] != true {
+        if !args["cursor"].is_string() && args["digestProjection"] != true && args["includeUsage"] != false {
             super::usage::attach(&mut session, self.usage(args).await);
         }
         result["session"] = session;
@@ -515,7 +515,7 @@ impl HarnessDriver for Claude {
     }
     fn descriptor(&self) -> Value {
         json!({"id":self.config.id,"kind":"claude","workspaces":self.config.workspaces.iter().map(|w|json!({"id":w.id})).collect::<Vec<_>>(),"projectRuntime":self.config.projects,
-        "capabilities":{"sessionChannels":self.config.projects,"workingDirectory":self.config.projects,"metrics":true,"models":true,"slashCommands":true,"commandQueries":true,"usage":true,"history":true,"create":true,"resume":true,"interrupt":true,"steer":true,"interactions":true,"search":true,"searchPrompts":true,"searchKeywords":true,"fork":false,"rename":false,"archive":false,"unarchive":false,"attachments":["text","image"]}})
+        "capabilities":{"sessionChannels":self.config.projects,"workingDirectory":self.config.projects,"metrics":true,"historyWithoutUsage":true,"models":true,"slashCommands":true,"commandQueries":true,"usage":true,"history":true,"create":true,"resume":true,"interrupt":true,"steer":true,"interactions":true,"search":true,"searchPrompts":true,"searchKeywords":true,"fork":false,"rename":false,"archive":false,"unarchive":false,"attachments":["text","image"]}})
     }
     fn read<'a>(&'a self, name: &'a str, args: Value) -> BoxFuture<'a, Result<Value, Error>> {
         Box::pin(async move {

@@ -29,12 +29,12 @@ fn scan(config: &ProfileConfig, runtime: Option<&crate::projects::runtime::Proje
     let limit=args["limit"].as_u64().unwrap_or(100).clamp(1,100);
     let offset=args["cursor"].as_str().map(|s|s.parse::<u32>().map_err(|_|Error::invalid())).transpose()?.unwrap_or(0);
     let named=db.prepare("PRAGMA table_info(threads)").map_err(schema_error)?.query_map([],|row|row.get::<_,String>(1)).map_err(schema_error)?.collect::<Result<Vec<_>,_>>().map_err(schema_error)?.iter().any(|name|name=="name");
-    let title=if named {"COALESCE(NULLIF(name,''),title)"} else {"title"};
-    let sql=format!("SELECT id,rollout_path,cwd,{title},created_at,updated_at,archived FROM threads WHERE archived=?1 AND EXISTS(SELECT 1 FROM json_each(?2) WHERE cwd=value OR substr(cwd,1,length(value)+1)=value||'/') ORDER BY updated_at DESC,id LIMIT ?3 OFFSET ?4");
+    let name=if named {"name"} else {"NULL"};
+    let sql=format!("SELECT id,rollout_path,cwd,{name},title,created_at,updated_at,archived FROM threads WHERE archived=?1 AND EXISTS(SELECT 1 FROM json_each(?2) WHERE cwd=value OR substr(cwd,1,length(value)+1)=value||'/') ORDER BY updated_at DESC,id LIMIT ?3 OFFSET ?4");
     let mut query=db.prepare(&sql).map_err(schema_error)?;
     let rows=query.query_map(rusqlite::params![args["archived"].as_bool().unwrap_or(false),json!(roots(config,runtime)?).to_string(),limit+1,offset],|row|{
-        Ok(json!({"id":row.get::<_,String>(0)?,"path":row.get::<_,String>(1)?,"cwd":row.get::<_,String>(2)?,"name":row.get::<_,String>(3)?,
-            "createdAt":row.get::<_,i64>(4)?,"updatedAt":row.get::<_,i64>(5)?,"archived":row.get::<_,bool>(6)?,"status":{"type":"notLoaded"}}))
+        Ok(json!({"id":row.get::<_,String>(0)?,"path":row.get::<_,String>(1)?,"cwd":row.get::<_,String>(2)?,"name":row.get::<_,Option<String>>(3)?,"preview":row.get::<_,Option<String>>(4)?,
+            "createdAt":row.get::<_,i64>(5)?,"updatedAt":row.get::<_,i64>(6)?,"archived":row.get::<_,bool>(7)?,"status":{"type":"notLoaded"}}))
     }).map_err(schema_error)?;
     rows.map(|row|row.map_err(schema_error)).collect::<Result<Vec<_>,_>>().map(Some)
 }
@@ -76,9 +76,40 @@ mod tests {
         let page=codex.local_sessions(&json!({"limit":10})).await.unwrap().unwrap();
         assert_eq!(page["sessions"].as_array().unwrap().len(),2);
         assert_eq!(page["sessions"][0]["cwd"],nested.to_str().unwrap());
+        assert_eq!(page["sessions"][0]["title"],"Title");
         assert!(codex.bridge.lock().await.is_none());
         std::fs::remove_dir(sibling).unwrap();
     }
+    #[tokio::test]
+    async fn catalog_and_thread_detail_share_titles_for_named_and_default_sessions() {
+        let home = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let rows = [
+            ("auto", "2026-11-24 06-37-20Z", "First request"),
+            ("named", "Named thread", "Another request"),
+        ];
+        let db = Connection::open(home.path().join("state_5.sqlite")).unwrap();
+        db.execute_batch("CREATE TABLE threads(id TEXT,rollout_path TEXT,cwd TEXT,name TEXT,title TEXT,created_at INTEGER,updated_at INTEGER,archived INTEGER);").unwrap();
+        for (id, name, title) in rows {
+            db.execute("INSERT INTO threads VALUES(?1,'sessions/test.jsonl',?2,?3,?4,1,2,0)",
+                rusqlite::params![id, work.path().to_str().unwrap(), name, title]).unwrap();
+        }
+        drop(db);
+        let config: ProfileConfig = toml::from_str(&format!(
+            "id='codex'\nkind='codex'\ncommand='/bin/false'\nhome={:?}\n[[workspaces]]\nid='p'\npath={:?}",
+            home.path(), work.path())).unwrap();
+        let codex = Codex::new(config);
+        let page = codex.local_sessions(&json!({})).await.unwrap().unwrap();
+        let sessions = page["sessions"].as_array().unwrap();
+        for (row, (id, name, preview)) in sessions.iter().zip(rows) {
+            let details = codex.session(&json!({"id":id,"name":name,"preview":preview}));
+            assert_eq!(row["id"], details["id"]);
+            assert_eq!(row["title"], details["title"]);
+        }
+        assert_eq!(sessions[0]["title"], "First request");
+        assert_eq!(sessions[1]["title"], "Named thread");
+    }
+
     #[test]
     fn refuses_symlinked_native_indexes() {
         let home=tempfile::tempdir().unwrap(); let other=tempfile::NamedTempFile::new().unwrap();

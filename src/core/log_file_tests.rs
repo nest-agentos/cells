@@ -88,6 +88,48 @@ fn retaining_one_file_discards_old_records() {
 }
 
 #[test]
+fn directory_budget_prunes_closed_generations_at_startup_and_rotation() {
+    let config = Config {
+        max_file_bytes: 1024,
+        max_total_bytes: 2048,
+        ..Config::default()
+    };
+    let (root, mut log) = fixture(config.clone());
+    let directory = log.path().parent().unwrap().to_path_buf();
+    let old = directory.join("cells-20260110T010203.123456789-99.jsonl");
+    let unrelated = directory.join("notes.jsonl");
+    let linked = directory.join("cells-20260110T010203.123456789Z-99.jsonl.1");
+    fs::write(&old, "x".repeat(2048)).unwrap();
+    fs::write(&unrelated, "keep").unwrap();
+    std::os::unix::fs::symlink(&unrelated, &linked).unwrap();
+
+    let mut other = FileLog::open(&config, &root.path().join("config.toml")).unwrap();
+    assert!(!old.exists());
+    for _ in 0..4 {
+        log.write_line(&"a".repeat(800)).unwrap();
+        other.write_line(&"b".repeat(800)).unwrap();
+    }
+    assert_eq!(fs::metadata(log.path()).unwrap().len(), 801);
+    assert_eq!(fs::metadata(other.path()).unwrap().len(), 801);
+    assert!(!log.segment(1).exists());
+    assert!(!other.segment(1).exists());
+    assert!(linked.is_symlink());
+    assert_eq!(fs::read_to_string(unrelated).unwrap(), "keep");
+}
+
+#[test]
+fn oversized_records_do_not_consume_the_file_budget() {
+    let (_root, mut log) = fixture(Config {
+        max_file_bytes: 1024,
+        max_total_bytes: 1024,
+        ..Config::default()
+    });
+    log.write_line(&"a".repeat(1024)).unwrap();
+    log.write_line("next").unwrap();
+    assert_eq!(fs::read_to_string(log.path()).unwrap(), "next\n");
+}
+
+#[test]
 fn rejects_invalid_limits_and_unwritable_directory() {
     for config in [
         Config {
@@ -96,6 +138,10 @@ fn rejects_invalid_limits_and_unwritable_directory() {
         },
         Config {
             retained_files: 0,
+            ..Config::default()
+        },
+        Config {
+            max_total_bytes: 1024,
             ..Config::default()
         },
     ] {

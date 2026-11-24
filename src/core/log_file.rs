@@ -1,4 +1,5 @@
-//! Private, per-process JSONL files with bounded size rotation.
+//! Private JSONL files with per-process rotation and a shared directory budget.
+use rustix::fs::{flock, FlockOperation};
 use serde::Deserialize;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::{
@@ -6,6 +7,8 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
 };
+#[path = "log_retention.rs"]
+mod retention;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -13,6 +16,7 @@ pub struct Config {
     pub directory: Option<PathBuf>,
     pub max_file_bytes: u64,
     pub retained_files: usize,
+    pub max_total_bytes: u64,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -20,6 +24,7 @@ impl Default for Config {
             directory: None,
             max_file_bytes: 10 * 1024 * 1024,
             retained_files: 5,
+            max_total_bytes: 128 * 1024 * 1024,
         }
     }
 }
@@ -30,13 +35,17 @@ pub(super) struct FileLog {
     bytes: u64,
     max_bytes: u64,
     retained: usize,
+    max_total_bytes: u64,
 }
 impl FileLog {
     pub fn open(config: &Config, config_file: &Path) -> io::Result<Self> {
-        if config.max_file_bytes < 1024 || !(1..=100).contains(&config.retained_files) {
+        if config.max_file_bytes < 1024
+            || !(1..=100).contains(&config.retained_files)
+            || config.max_total_bytes < config.max_file_bytes
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "logging requires max_file_bytes >= 1024 and retained_files in 1..=100",
+                "logging requires 1024 <= max_file_bytes <= max_total_bytes and retained_files in 1..=100",
             ));
         }
         let parent = config_file.canonicalize()?.parent().unwrap().to_path_buf();
@@ -51,13 +60,21 @@ impl FileLog {
             std::process::id()
         );
         let path = directory.join(name);
-        let file = create(&path)?;
+        let _directory_guard = lock_directory(&directory)?;
+        retention::prune(
+            &directory,
+            config.max_file_bytes,
+            config.max_total_bytes,
+            config.max_file_bytes,
+        )?;
+        let file = create_locked(&path)?;
         Ok(Self {
             path,
             file,
             bytes: 0,
             max_bytes: config.max_file_bytes,
             retained: config.retained_files,
+            max_total_bytes: config.max_total_bytes,
         })
     }
     pub fn path(&self) -> &Path {
@@ -65,6 +82,10 @@ impl FileLog {
     }
     pub fn write_line(&mut self, line: &str) -> io::Result<()> {
         let size = line.len() as u64 + 1;
+        // The full record is already emitted to stderr.
+        if size > self.max_bytes {
+            return Ok(());
+        }
         if self.bytes > 0 && self.bytes.saturating_add(size) > self.max_bytes {
             self.rotate()?;
         }
@@ -81,6 +102,8 @@ impl FileLog {
         PathBuf::from(name)
     }
     fn rotate(&mut self) -> io::Result<()> {
+        let directory = self.path.parent().unwrap();
+        let _directory_guard = lock_directory(directory)?;
         if self.retained == 1 {
             fs::remove_file(&self.path)?;
         } else {
@@ -91,18 +114,26 @@ impl FileLog {
                 }
             }
         }
-        self.file = create(&self.path)?;
+        self.file = create_locked(&self.path)?;
         self.bytes = 0;
+        retention::prune(directory, self.max_bytes, self.max_total_bytes, 0)?;
         Ok(())
     }
 }
-fn create(path: &Path) -> io::Result<File> {
-    OpenOptions::new()
+fn lock_directory(directory: &Path) -> io::Result<File> {
+    let file = File::open(directory)?;
+    flock(&file, FlockOperation::LockExclusive)?;
+    Ok(file)
+}
+fn create_locked(path: &Path) -> io::Result<File> {
+    let file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-        .open(path)
+        .open(path)?;
+    flock(&file, FlockOperation::LockExclusive)?;
+    Ok(file)
 }
 
 #[cfg(test)]

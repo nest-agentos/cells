@@ -67,12 +67,14 @@ pub fn stamp_event(message: &mut Value, observed_at: i64) {
         .or_insert_with(|| json!(if terminal { "completed" } else { "inProgress" }));
 }
 pub fn session_title(thread: &Value) -> &str {
-    ["name", "preview"]
-        .iter()
-        .filter_map(|key| thread[*key].as_str())
-        .map(str::trim)
-        .find(|title| !title.is_empty())
-        .unwrap_or("")
+    let name = thread["name"].as_str().unwrap_or("").trim();
+    let preview = thread["preview"].as_str().unwrap_or("").trim();
+    let default_name = name.len() == 20
+        && chrono::NaiveDateTime::parse_from_str(name, "%Y-%m-%d %H-%M-%SZ").is_ok();
+    if !preview.is_empty() && (name.is_empty() || default_name) {
+        return preview;
+    }
+    name
 }
 pub fn item(value: &Value) -> Option<Value> {
     let kind = value["type"].as_str().unwrap_or("");
@@ -332,6 +334,14 @@ mod tests {
         assert_eq!(
             session_title(&json!({"name":"  ","preview":" First request "})),
             "First request"
+        );
+        assert_eq!(
+            session_title(&json!({"name":"2026-11-24 06-37-20Z","preview":"First request"})),
+            "First request"
+        );
+        assert_eq!(
+            session_title(&json!({"name":"2026-11-24 06-37-20Z","preview":"  "})),
+            "2026-11-24 06-37-20Z"
         );
         assert_eq!(session_title(&json!({"name":null,"preview":""})), "");
     }
