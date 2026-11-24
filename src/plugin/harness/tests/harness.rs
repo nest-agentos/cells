@@ -365,6 +365,42 @@ for line in sys.stdin:
 }
 
 #[tokio::test]
+async fn bounded_digest_reads_selected_codex_log_with_revision_fence() {
+    let root = tempfile::tempdir().unwrap();
+    let service = service(root.path());
+    std::fs::create_dir(root.path().join("sessions")).unwrap();
+    let path = root.path().join("sessions/native.jsonl");
+    std::fs::write(&path, format!("{}\n{}\n{}\n",
+        json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"turn"}}),
+        json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"user request"}],"internal_chat_message_metadata_passthrough":{"content_item_kinds":["user.text"]}}}),
+        json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn"}}))).unwrap();
+    std::fs::write(root.path().join("codex-fixture.py"), r#"#!/usr/bin/env python3
+import json, os, sys
+for line in sys.stdin:
+    request = json.loads(line)
+    if request.get('id') is None: continue
+    method = request.get('method')
+    if method not in ('initialize', 'thread/read'): raise RuntimeError('Unexpected native operation')
+    home = os.environ['CODEX_HOME']
+    result = {} if method == 'initialize' else {'thread': {'id':'native','cwd':home,'path':home+'/sessions/native.jsonl',
+        'status':{'type':'notLoaded'},'createdAt':1,'updatedAt':2,'turns':[]}}
+    print(json.dumps({'id':request['id'],'result':result}), flush=True)
+"#).unwrap();
+    let metadata = service.call("harness_session_digest", json!({"profileId":"codex","sessionId":"native","metadataOnly":true})).await.unwrap();
+    let revision = metadata["revision"].as_str().unwrap();
+    let page = service.call("harness_session_digest", json!({"profileId":"codex","sessionId":"native","expectedRevision":revision})).await.unwrap();
+    assert_eq!(page["revision"], revision);
+    assert_eq!(page["messages"][0]["text"], "user request");
+    assert_eq!(page["messages"][0]["turnId"], "turn");
+    assert!(page["scan"]["historyBytes"].as_u64().unwrap() > 0);
+    assert_eq!(page["scan"]["contextBytes"], 0);
+    use std::io::Write;
+    writeln!(std::fs::OpenOptions::new().append(true).open(path).unwrap(), "{{}}").unwrap();
+    assert_eq!(service.call("harness_session_digest", json!({"profileId":"codex","sessionId":"native","expectedRevision":revision})).await.unwrap_err().code, "HARNESS_DIGEST_CHANGED");
+    service.close().await;
+}
+
+#[tokio::test]
 async fn creates_reads_resumes_streams_approves_and_interrupts_without_replay() {
     let root = tempfile::tempdir().unwrap();
     let service = service(root.path());

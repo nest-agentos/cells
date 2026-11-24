@@ -35,10 +35,11 @@ pub async fn read(
     path: &str,
     before: Option<u64>,
     summary: bool,
+    bounded_context: bool,
 ) -> Result<Value, Error> {
     let home = home.to_owned();
     let path = path.to_owned();
-    tokio::task::spawn_blocking(move || read_log(&home, &path, before, summary))
+    tokio::task::spawn_blocking(move || read_log_impl(&home, &path, before, summary, bounded_context))
         .await
         .map_err(|_| Error::internal())?
 }
@@ -71,7 +72,11 @@ pub(super) fn open_log(home: &Path, path: &str) -> Result<std::fs::File, Error> 
     )?;
     Ok(std::fs::File::from(file))
 }
+#[cfg(test)]
 fn read_log(home: &Path, path: &str, before: Option<u64>, summary: bool) -> Result<Value, Error> {
+    read_log_impl(home, path, before, summary, false)
+}
+fn read_log_impl(home: &Path, path: &str, before: Option<u64>, summary: bool, bounded_context: bool) -> Result<Value, Error> {
     let mut file = open_log(home, path)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
@@ -89,8 +94,10 @@ fn read_log(home: &Path, path: &str, before: Option<u64>, summary: bool) -> Resu
         .first()
         .map(|(at, _)| *at)
         .unwrap_or(start);
-    let prior = prior_turn(&mut file, first)?;
-    page(&bytes, start, prior, summary)
+    let (prior, context_bytes) = prior_turn_bounded(&mut file, first, bounded_context)?;
+    let mut result = page(&bytes, start, prior, summary)?;
+    if bounded_context {result["scan"] = json!({"historyBytes": bytes.len(), "contextBytes": context_bytes});}
+    Ok(result)
 }
 fn context(record: &Value) -> Option<String> {
     if record["type"] != "turn_context"
@@ -100,34 +107,41 @@ fn context(record: &Value) -> Option<String> {
     }
     record["payload"]["turn_id"].as_str().map(str::to_owned)
 }
-fn prior_turn(file: &mut std::fs::File, mut end: u64) -> Result<Option<String>, Error> {
+#[cfg(test)]
+fn prior_turn(file: &mut std::fs::File, end: u64) -> Result<Option<String>, Error> {
+    prior_turn_bounded(file, end, false).map(|(turn, _)| turn)
+}
+fn prior_turn_bounded(file: &mut std::fs::File, mut end: u64, bounded: bool) -> Result<(Option<String>, usize), Error> {
+    let mut scanned = 0usize;
     // Search backwards using bounded buffers; large tool output does not allocate a large record.
     while end > 0 {
         let start = end.saturating_sub(256 * 1024);
         file.seek(SeekFrom::Start(start))?;
         let mut bytes = Vec::new();
         (&mut *file).take(end - start).read_to_end(&mut bytes)?;
+        scanned += bytes.len();
         let Ok(lines) = complete_lines(&bytes, start) else {
-            return Ok(None);
+            return Ok((None, scanned));
         };
         let first = lines.first().map(|(at, _)| *at).unwrap_or(start);
         for (_, line) in lines.into_iter().rev() {
             let Ok(record) = serde_json::from_slice::<Value>(line) else {
-                return Ok(None);
+                return Ok((None, scanned));
             };
             if !record.is_object() {
-                return Ok(None);
+                return Ok((None, scanned));
             }
             if let Some(id) = context(&record) {
-                return Ok(Some(id));
+                return Ok((Some(id), scanned));
             }
         }
         if start == 0 {
             break;
         }
+        if bounded && scanned >= 8 * 1024 * 1024 {return Err(Error::too_large("HARNESS_HISTORY_CONTEXT_LIMIT"));}
         end = first.min(end - 1);
     }
-    Ok(None)
+    Ok((None, scanned))
 }
 fn complete_lines(bytes: &[u8], start: u64) -> Result<Vec<(u64, &[u8])>, Error> {
     let skip = if start == 0 {
@@ -483,6 +497,15 @@ mod tests {
         file.write_all(format!("{bytes}\0\n").as_bytes()).unwrap();
         let end = file.metadata().unwrap().len();
         assert_eq!(prior_turn(&mut file, end).unwrap(), None);
+    }
+    #[test]
+    fn digest_context_search_rejects_unbounded_history() {
+        use std::io::Write;
+        let mut file = tempfile::tempfile().unwrap();
+        let row = format!("{{\"type\":\"other\",\"padding\":\"{}\"}}\n", "x".repeat(1024));
+        for _ in 0..9000 {file.write_all(row.as_bytes()).unwrap();}
+        let end = file.metadata().unwrap().len();
+        assert_eq!(prior_turn_bounded(&mut file, end, true).unwrap_err().code, "HARNESS_HISTORY_CONTEXT_LIMIT");
     }
     #[test]
     fn lifecycle_terminals_keep_exact_identity_without_inventing_completion() {

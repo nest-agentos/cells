@@ -643,6 +643,7 @@ impl Codex {
         let started = std::time::Instant::now();
         let id = string(args, "sessionId")?;
         let mut thread = self.summary(bridge, id).await?;
+        let digest_head = (args["digestProjection"] == true).then(|| self.session(&thread));
         // Capture before reading; a concurrent append must remain visible to the next reconciliation.
         let revision = self.history_revision(&thread).await?;
         let mut page = self.page(bridge, &thread, args).await?;
@@ -656,8 +657,9 @@ impl Codex {
             }
         }
         thread["turns"] = page["turns"].clone();
-        restore_history_head(&mut thread, args);
+        if args["digestProjection"] != true { restore_history_head(&mut thread, args); }
         let mut session = self.session(&thread);
+        if let Some(head) = digest_head {session["lastTurnId"] = head["lastTurnId"].clone(); session["lastTurnResult"] = head["lastTurnResult"].clone();}
         if let Some(revision) = revision {
             session["historyRevision"] = json!(revision);
         }
@@ -668,6 +670,7 @@ impl Codex {
         }
         let mut result =
             json!({"session":session,"turns":page["turns"],"nextCursor":page["nextCursor"]});
+        if page["scan"].is_object() {result["scan"] = page["scan"].clone();}
         if page["recovery"].is_object() {
             result["recovery"] = page["recovery"].clone();
             eprintln!(
@@ -684,6 +687,7 @@ impl Codex {
         Ok(result)
     }
     async fn page(&self, bridge: &Bridge, thread: &Value, args: &Value) -> Result<Value, Error> {
+        if args["digestProjection"] == true && thread["status"]["type"] == "active" {return Err(Error::busy());}
         // Rollout files may not contain the answer while the native turn is streaming.
         if !args["cursor"].is_string()
             && thread["status"]["type"] == "active"
@@ -694,10 +698,12 @@ impl Codex {
         if args["toolDetail"] == "summary" && thread["path"].is_string() {
             match self.rollout(thread, args).await {
                 Ok(page) => return Ok(page),
+                Err(error) if args["digestProjection"] == true => return Err(error),
                 Err(error) if error.code == "ENOENT" => (),
                 Err(error) => return Err(error),
             }
         }
+        if args["digestProjection"] == true {return Err(Error::unsupported());}
         if thread["historyMode"] == "paginated" || args["cursor"].is_string() {
             return self.rollout(thread, args).await;
         }
@@ -786,6 +792,7 @@ impl Codex {
             &translated,
             cursor,
             args["toolDetail"] == "summary",
+            args["digestProjection"] == true,
         )
         .await
     }

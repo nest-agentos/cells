@@ -5,11 +5,15 @@ use sha2::{Digest, Sha256};
 
 pub(super) fn project(history: Value, args: &Value) -> Result<Value, Error> {
     let session = &history["session"];
-    let version = json!([session["id"], session["updatedAt"], session["activeTurnId"],
+    let version = json!([session["id"], session["createdAt"], session["historyRevision"], session["updatedAt"], session["activeTurnId"],
         session["lastTurnId"], session["lastTurnResult"], session["archived"], session["status"]]);
     let revision = format!("{:x}", Sha256::digest(version.to_string().as_bytes()));
     if args["expectedRevision"].as_str().is_some_and(|expected| expected != revision) {
         return Err(Error::conflict("HARNESS_DIGEST_CHANGED"));
+    }
+    if ["skippedRecords", "skippedBytes", "nulRecords", "invalidJsonRecords", "invalidRecordRecords"]
+        .iter().any(|key| history["recovery"][key].as_u64().unwrap_or(0) > 0) {
+        return Err(Error::conflict("HARNESS_HISTORY_INCOMPLETE"));
     }
     let mut messages = Vec::new();
     let mut omitted = 0usize;
@@ -21,11 +25,11 @@ pub(super) fn project(history: Value, args: &Value) -> Result<Value, Error> {
     if messages.iter().map(|item| item.to_string().len()).sum::<usize>() > 2 * 1024 * 1024 {
         return Err(Error::too_large("HARNESS_DIGEST_LIMIT"));
     }
-    let fields = ["id", "title", "cwd", "status", "statusDetails", "updatedAt", "resumable", "writerLock", "archived", "activeTurnId", "lastTurnId", "lastTurnResult"];
+    let fields = ["id", "title", "cwd", "status", "statusDetails", "createdAt", "historyRevision", "updatedAt", "resumable", "writerLock", "archived", "activeTurnId", "lastTurnId", "lastTurnResult"];
     let mut safe_session = serde_json::Map::new();
     for key in fields { if let Some(value) = session.get(key) { safe_session.insert(key.into(), value.clone()); } }
     Ok(json!({"version":1,"session":safe_session,"revision":revision,"messages":messages,
-        "omittedUnclassified":omitted,"nextCursor":history["nextCursor"]}))
+        "omittedUnclassified":omitted,"nextCursor":history["nextCursor"],"scan":history.get("scan")}))
 }
 fn message(item: &Value, turn: &Value, omitted: &mut usize) -> Option<Value> {
     let role = match item["type"].as_str()? {
@@ -78,6 +82,14 @@ mod tests {
     #[test]
     fn rejects_changed_snapshot_boundaries() {
         assert_eq!(project(json!({"session":{"id":"s"},"turns":[]}), &json!({"expectedRevision":"old"})).unwrap_err().code, "HARNESS_DIGEST_CHANGED");
+    }
+    #[test]
+    fn fences_history_revision_and_rejects_corrupt_history() {
+        let a = project(json!({"session":{"id":"s","historyRevision":"a"},"turns":[]}), &json!({})).unwrap();
+        let b = project(json!({"session":{"id":"s","historyRevision":"b"},"turns":[]}), &json!({})).unwrap();
+        assert_ne!(a["revision"], b["revision"]);
+        assert_eq!(a["session"]["historyRevision"], "a");
+        assert_eq!(project(json!({"session":{"id":"s"},"turns":[],"recovery":{"skippedRecords":1}}), &json!({})).unwrap_err().code, "HARNESS_HISTORY_INCOMPLETE");
     }
 }
 
